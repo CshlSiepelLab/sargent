@@ -1,4 +1,4 @@
-build/
 *.o
-example.trees
+build/
 compile_commands.json
+example.trees

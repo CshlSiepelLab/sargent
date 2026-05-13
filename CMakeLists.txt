@@ -6,6 +6,7 @@ project(sargent
 
 set(CMAKE_C_STANDARD 99)
 set(CMAKE_C_STANDARD_REQUIRED ON)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # allows use of upper case PHAST_ROOT / TSKIT_ROOT
 if(POLICY CMP0144)
