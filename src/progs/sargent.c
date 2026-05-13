@@ -4,6 +4,7 @@
 #include <tskit.h>
 #include "geno.h"
 #include "sargent.help"
+#include <phast/misc.h>
 
 #define CHECK(ret) do {                                                 \
     if ((ret) < 0) {                                                    \
@@ -58,6 +59,13 @@ int main(int argc, char *argv[])
     const char *pheno_file  = argv[optind];
     const char *trees_file  = argv[optind + 1];
     const char *geno_prefix = ts_geno ? NULL : argv[optind + 2];
+
+    FILE *pheno_fh = phast_fopen(pheno_file, "r");
+    if (!pheno_fh) {
+        fprintf(stderr, "ERROR: cannot open %s\n", pheno_file);
+        exit(EXIT_FAILURE);
+    }
+    fclose(pheno_fh);
 
     if (!silent) {
         fprintf(stderr, "Phenotypes  : %s\n", pheno_file);

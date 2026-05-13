@@ -15,12 +15,12 @@ endif()
 # ---- PHAST dependency --------------------------------------------------
 set(PHAST_ROOT "" CACHE PATH "PHAST install prefix (contains lib/cmake/phast)")
 
-if(PHAST_ROOT)
-  list(PREPEND CMAKE_PREFIX_PATH "${PHAST_ROOT}")
-  find_package(phast CONFIG REQUIRED)
-else()
-  message(STATUS "PHAST_ROOT not set — phast support disabled")
+if(NOT PHAST_ROOT)
+  message(FATAL_ERROR "PHAST_ROOT must be set. Pass -DPHAST_ROOT=/path/to/phast.")
 endif()
+list(PREPEND CMAKE_PREFIX_PATH "${PHAST_ROOT}")
+find_package(phast CONFIG REQUIRED)
+message(STATUS "PHAST found at ${PHAST_ROOT}")
 
 # ---- tskit dependency (built from submodule via meson) -----------------
 include(ExternalProject)
@@ -70,6 +70,22 @@ set_target_properties(tskit::tskit PROPERTIES
   INTERFACE_LINK_LIBRARIES m)
 
 message(STATUS "tskit will be built from ${TSKIT_SOURCE_DIR}")
+
+# ---- OpenMP ------------------------------------------------------------
+# Apple Clang needs hints to find Homebrew's libomp
+if(APPLE)
+  execute_process(
+    COMMAND brew --prefix libomp
+    OUTPUT_VARIABLE LIBOMP_PREFIX
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET)
+  if(LIBOMP_PREFIX)
+    set(OpenMP_C_FLAGS "-Xpreprocessor -fopenmp -I${LIBOMP_PREFIX}/include"
+        CACHE STRING "" FORCE)
+    set(OpenMP_C_LIB_NAMES "omp" CACHE STRING "" FORCE)
+    set(OpenMP_omp_LIBRARY "${LIBOMP_PREFIX}/lib/libomp.dylib" CACHE PATH "" FORCE)
+  endif()
+endif()
 
 # ---- Project layout ----------------------------------------------------
 set(SARGENT_INCLUDE_DIR "${CMAKE_SOURCE_DIR}/include")
