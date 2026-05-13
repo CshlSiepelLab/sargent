@@ -1,0 +1,4 @@
+build/
+*.o
+example.trees
+compile_commands.json

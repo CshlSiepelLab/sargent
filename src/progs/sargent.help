@@ -1,0 +1,16 @@
+char HELP[388] = "\nPROGRAM: sargent\n\
+\n\
+USAGE: sargent [OPTIONS] <input.trees>\n\
+\n\
+DESCRIPTION: [placeholder -- fill in description here]\n\
+\n\
+MAIN OPTIONS:\n\
+    --help, -h\n\
+        Display this help message and exit.\n\
+\n\
+    --version, -v\n\
+        Display the current version number and exit.\n\
+\n\
+    --silent, -z\n\
+        Omit progress updates to stderr.\n\
+";

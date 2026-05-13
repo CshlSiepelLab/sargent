@@ -1,0 +1,15 @@
+PROGRAM: sargent
+
+USAGE: sargent [OPTIONS] <input.trees>
+
+DESCRIPTION: [placeholder -- fill in description here]
+
+MAIN OPTIONS:
+    --help, -h
+        Display this help message and exit.
+
+    --version, -v
+        Display the current version number and exit.
+
+    --silent, -z
+        Omit progress updates to stderr.
