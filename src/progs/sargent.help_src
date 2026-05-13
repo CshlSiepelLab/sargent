@@ -1,8 +1,20 @@
 PROGRAM: sargent
 
-USAGE: sargent [OPTIONS] <input.trees>
+USAGE: sargent [OPTIONS] <phenotypes> <input.trees> [<geno_prefix>]
 
 DESCRIPTION: [placeholder -- fill in description here]
+
+ARGUMENTS:
+    <phenotypes>
+        Phenotype file (format TBD).
+
+    <input.trees>
+        Tree sequence file.  Used for local-tree covariance matrices and,
+        when --ts-geno is given, as the source of genotypes.
+
+    <geno_prefix>
+        Prefix for PLINK BED files (<prefix>.bed, <prefix>.bim, <prefix>.fam).
+        Required unless --ts-geno is specified.
 
 MAIN OPTIONS:
     --help, -h
@@ -13,3 +25,7 @@ MAIN OPTIONS:
 
     --silent, -z
         Omit progress updates to stderr.
+
+    --ts-geno, -G
+        Obtain genotypes from the tree sequence file rather than a BED
+        file.  When this option is given, <geno_prefix> must be omitted.

@@ -1,8 +1,20 @@
-char HELP[388] = "\nPROGRAM: sargent\n\
+char HELP[994] = "\nPROGRAM: sargent\n\
 \n\
-USAGE: sargent [OPTIONS] <input.trees>\n\
+USAGE: sargent [OPTIONS] <phenotypes> <input.trees> [<geno_prefix>]\n\
 \n\
 DESCRIPTION: [placeholder -- fill in description here]\n\
+\n\
+ARGUMENTS:\n\
+    <phenotypes>\n\
+        Phenotype file (format TBD).\n\
+\n\
+    <input.trees>\n\
+        Tree sequence file.  Used for local-tree covariance matrices and,\n\
+        when --ts-geno is given, as the source of genotypes.\n\
+\n\
+    <geno_prefix>\n\
+        Prefix for PLINK BED files (<prefix>.bed, <prefix>.bim, <prefix>.fam).\n\
+        Required unless --ts-geno is specified.\n\
 \n\
 MAIN OPTIONS:\n\
     --help, -h\n\
@@ -13,4 +25,8 @@ MAIN OPTIONS:\n\
 \n\
     --silent, -z\n\
         Omit progress updates to stderr.\n\
+\n\
+    --ts-geno, -G\n\
+        Obtain genotypes from the tree sequence file rather than a BED\n\
+        file.  When this option is given, <geno_prefix> must be omitted.\n\
 ";
