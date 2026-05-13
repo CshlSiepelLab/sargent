@@ -22,25 +22,54 @@ else()
   message(STATUS "PHAST_ROOT not set — phast support disabled")
 endif()
 
-# ---- tskit dependency --------------------------------------------------
-set(TSKIT_ROOT "/usr/local/Caskroom/miniforge/base/envs/sargent"
-    CACHE PATH "tskit install prefix (conda env or other prefix)")
+# ---- tskit dependency (built from submodule via meson) -----------------
+include(ExternalProject)
 
-find_path(TSKIT_INCLUDE_DIR tskit.h
-  PATHS "${TSKIT_ROOT}/include"
-  REQUIRED)
+set(TSKIT_SOURCE_DIR  "${CMAKE_SOURCE_DIR}/third_party/tskit/c")
+set(TSKIT_BINARY_DIR  "${CMAKE_BINARY_DIR}/tskit-build")
+set(TSKIT_INSTALL_DIR "${CMAKE_BINARY_DIR}/tskit-install")
+set(TSKIT_LIB         "${TSKIT_INSTALL_DIR}/lib/libtskit.dylib")
 
-find_library(TSKIT_LIB tskit
-  PATHS "${TSKIT_ROOT}/lib"
-  REQUIRED)
+find_program(MESON_EXECUTABLE meson REQUIRED)
+find_program(NINJA_EXECUTABLE ninja REQUIRED)
 
-add_library(tskit::tskit IMPORTED INTERFACE)
+ExternalProject_Add(tskit_external
+  SOURCE_DIR  ${TSKIT_SOURCE_DIR}
+  BINARY_DIR  ${TSKIT_BINARY_DIR}
+  INSTALL_DIR ${TSKIT_INSTALL_DIR}
+  PATCH_COMMAND
+    ${CMAKE_COMMAND} -E copy
+      ${CMAKE_SOURCE_DIR}/third_party/patches/tskit_meson_options.txt
+      ${TSKIT_SOURCE_DIR}/meson_options.txt
+    COMMAND ${CMAKE_COMMAND} -E copy
+      ${CMAKE_SOURCE_DIR}/third_party/patches/tskit_meson.build
+      ${TSKIT_SOURCE_DIR}/meson.build
+  CONFIGURE_COMMAND
+    ${MESON_EXECUTABLE} setup ${TSKIT_BINARY_DIR} ${TSKIT_SOURCE_DIR}
+      --prefix=${TSKIT_INSTALL_DIR}
+      --wipe
+      -Dbuild_tests=false
+      -Dbuild_examples=false
+  BUILD_COMMAND
+    ${NINJA_EXECUTABLE} -C ${TSKIT_BINARY_DIR} libtskit.dylib
+  INSTALL_COMMAND
+    ${NINJA_EXECUTABLE} -C ${TSKIT_BINARY_DIR} install
+    COMMAND ${CMAKE_COMMAND} -E copy
+      ${TSKIT_SOURCE_DIR}/subprojects/kastore/kastore.h
+      ${TSKIT_INSTALL_DIR}/include/kastore.h
+  BUILD_BYPRODUCTS ${TSKIT_LIB}
+)
+
+file(MAKE_DIRECTORY "${TSKIT_INSTALL_DIR}/include")
+
+add_library(tskit::tskit IMPORTED SHARED GLOBAL)
+add_dependencies(tskit::tskit tskit_external)
 set_target_properties(tskit::tskit PROPERTIES
-  INTERFACE_INCLUDE_DIRECTORIES "${TSKIT_INCLUDE_DIR}"
-  INTERFACE_LINK_LIBRARIES      "${TSKIT_LIB};m")
+  IMPORTED_LOCATION     ${TSKIT_LIB}
+  INTERFACE_INCLUDE_DIRECTORIES ${TSKIT_INSTALL_DIR}/include
+  INTERFACE_LINK_LIBRARIES m)
 
-message(STATUS "tskit include: ${TSKIT_INCLUDE_DIR}")
-message(STATUS "tskit lib:     ${TSKIT_LIB}")
+message(STATUS "tskit will be built from ${TSKIT_SOURCE_DIR}")
 
 # ---- Project layout ----------------------------------------------------
 set(SARGENT_INCLUDE_DIR "${CMAKE_SOURCE_DIR}/include")
