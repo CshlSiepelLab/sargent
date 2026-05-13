@@ -3,6 +3,7 @@
 add_library(sargent_core STATIC
     bed.c
     trees.c
+    variational.c
 )
 
 target_include_directories(sargent_core PUBLIC

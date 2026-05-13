@@ -1,10 +1,42 @@
 #include <stdlib.h>
 #include <stdio.h>
+#include <string.h>
 #include <getopt.h>
 #include <tskit.h>
 #include "geno.h"
+#include "sargent.h"
+#include "variational.h"
 #include "sargent.help"
 #include <phast/misc.h>
+
+/* Read n phenotype values from f.  Each non-comment line may have one or more
+   whitespace-separated fields; the last field is taken as the phenotype. */
+static double *read_phenotypes(FILE *f, int n)
+{
+    double *y = malloc((size_t)n * sizeof(double));
+    if (!y) return NULL;
+
+    char line[4096];
+    int i = 0;
+    while (i < n && fgets(line, sizeof(line), f)) {
+        if (line[0] == '#') continue;
+        char *last = NULL, *tok = strtok(line, " \t\n\r");
+        while (tok) { last = tok; tok = strtok(NULL, " \t\n\r"); }
+        if (!last) continue;
+        char *end;
+        y[i] = strtod(last, &end);
+        if (end == last) {
+            fprintf(stderr, "ERROR: bad phenotype value on line %d\n", i + 1);
+            free(y); return NULL;
+        }
+        i++;
+    }
+    if (i < n) {
+        fprintf(stderr, "ERROR: expected %d phenotypes, got %d\n", n, i);
+        free(y); return NULL;
+    }
+    return y;
+}
 
 #define CHECK(ret) do {                                                 \
     if ((ret) < 0) {                                                    \
@@ -65,7 +97,6 @@ int main(int argc, char *argv[])
         fprintf(stderr, "ERROR: cannot open %s\n", pheno_file);
         exit(EXIT_FAILURE);
     }
-    fclose(pheno_fh);
 
     if (!silent) {
         fprintf(stderr, "Phenotypes  : %s\n", pheno_file);
@@ -106,8 +137,30 @@ int main(int argc, char *argv[])
     if (!silent)
         fprintf(stderr, "Polymorphic variants: %d\n", gr->n_variants);
 
-    /* placeholder: analysis goes here */
+    /* Read phenotypes now that n is known */
+    double *y = read_phenotypes(pheno_fh, gr->n_samples);
+    fclose(pheno_fh);
+    if (!y) {
+        geno_close(gr);
+        tsk_treeseq_free(&ts);
+        exit(EXIT_FAILURE);
+    }
 
+    /* Build the sargent object and run inference */
+    sargent_t *sg = sargent_new(gr, &ts, y);
+    free(y);
+    if (!sg) {
+        fprintf(stderr, "ERROR: failed to build sargent object.\n");
+        geno_close(gr);
+        tsk_treeseq_free(&ts);
+        exit(EXIT_FAILURE);
+    }
+
+    if (!silent) fprintf(stderr, "Running var_fixed...\n");
+    var_fixed(sg);
+    if (!silent) fprintf(stderr, "h2_fixed = %.4f\n", sg->h2_fixed);
+
+    sargent_free(sg);
     geno_close(gr);
     tsk_treeseq_free(&ts);
     if (!silent) fprintf(stderr, "Done.\n");
