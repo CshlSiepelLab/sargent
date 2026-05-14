@@ -16,6 +16,14 @@ typedef struct {
     double h2_fixed;    /* fixed-effect heritability component */
     double h2_random;   /* random-effect heritability component */
     double sigma2;      /* nongenetic (residual) variance */
+
+    /* BayesR-style continuous mixture prior for fixed effects (beta).
+     * sigma2_mix[k] is the prior variance for component k; component 0 is
+     * always the null (sigma2_mix[0] = 0, no effect).  pi_mix[k] are the
+     * mixture proportions, estimated during inference. */
+    int     K;           /* number of mixture components */
+    double *sigma2_mix;  /* prior variances [K]; owned by sargent_t */
+    double *pi_mix;      /* mixture proportions [K]; sum = 1; owned */
 } sargent_t;
 
 sargent_t *sargent_new(geno_reader_t *gr, tsk_treeseq_t *ts, double *y);

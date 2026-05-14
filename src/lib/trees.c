@@ -237,3 +237,95 @@ geno_reader_t *geno_open_trees(tsk_treeseq_t *ts)
     r->impl       = t;
     return r;
 }
+
+/* ---------------------------------------------------------------------------
+ * tree_cov_matvec: compute out = G_s * in for a single local tree.
+ *
+ * G_s[i,j] = shared branch length between samples i and j
+ *           = sum of branch lengths from root down to MRCA(i,j).
+ *
+ * Algorithm (O(n_nodes) two-pass tree traversal):
+ *
+ *   Post-order pass — subtree sums S[u]:
+ *     leaf (sample) u:  S[u] = in[sample_rank(u)]
+ *     internal node u:  S[u] = sum of S[c] over children c
+ *
+ *   Pre-order pass — accumulated weighted path sums acc[u]:
+ *     root r:           acc[r] = 0  (no branch above root)
+ *     non-root u:       acc[u] = acc[parent[u]] + branch_length(u) * S[u]
+ *
+ *   Result:  out[i] = acc[sample_node(i)]
+ *
+ * work must point to 2 * tsk_treeseq_get_num_nodes(ts) doubles (caller-alloc,
+ * reused across tree iterations to avoid per-tree malloc).
+ * ---------------------------------------------------------------------------*/
+void tree_cov_matvec(double *out, const double *in, int n_indiv,
+                     const tsk_tree_t *tree,
+                     double *work, tsk_id_t *order_buf)
+{
+    const tsk_treeseq_t *ts  = tree->tree_sequence;
+    tsk_size_t           nnd = tsk_treeseq_get_num_nodes(ts);
+
+    double *S   = work;       /* subtree sums,      length nnd */
+    double *acc = work + nnd; /* path accumulators, length nnd */
+
+    /* node times for branch-length calculation */
+    const double *time = ts->tables->nodes.time;
+
+    /* sample → rank map (same for all trees in the sequence) */
+    const tsk_id_t *sample_index_map = tsk_treeseq_get_sample_index_map(ts);
+    const tsk_id_t *samples          = tsk_treeseq_get_samples(ts);
+
+    /* initialise S and acc to zero */
+    for (tsk_size_t i = 0; i < nnd; i++) { S[i] = 0.0; acc[i] = 0.0; }
+
+    /* Post-order pass: compute S[u].
+     * For a sample u with haplotype rank si: S[u] = 0.5 * in[si/2].
+     * Factor of 0.5 means each individual's contribution is split across
+     * its two haplotype nodes; the pair sums to in[indiv] in the subtree. */
+    tsk_size_t n_order = 0;
+    tsk_tree_postorder(tree, order_buf, &n_order);
+
+    for (tsk_size_t k = 0; k < n_order; k++) {
+        tsk_id_t u  = order_buf[k];
+        tsk_id_t si = sample_index_map[u];
+        if (si >= 0) {
+            int indiv = (int)(si / 2);
+            if (indiv < n_indiv)
+                S[u] = 0.5 * in[indiv];
+        } else {
+            for (tsk_id_t c = tree->left_child[u]; c != TSK_NULL;
+                 c = tree->right_sib[c])
+                S[u] += S[c];
+        }
+    }
+
+    /* Pre-order pass: compute acc[u] = sum of (branch_length * S) on the
+     * path from the root down to u.
+     * acc[root] = 0 (no branch above root).
+     * acc[u]    = acc[parent[u]] + (time[parent[u]] - time[u]) * S[u]. */
+    n_order = 0;
+    tsk_tree_preorder(tree, order_buf, &n_order);
+
+    for (tsk_size_t k = 0; k < n_order; k++) {
+        tsk_id_t u = order_buf[k];
+        tsk_id_t p = tree->parent[u];
+        if (p == TSK_NULL) {
+            acc[u] = 0.0;
+        } else {
+            double bl = time[p] - time[u];
+            acc[u] = acc[p] + bl * S[u];
+        }
+    }
+
+    /* Read off: out[i] = acc[hap0(i)] + acc[hap1(i)].
+     * Combined with the 0.5 factors in S, this equals (G_s v)[i]. */
+    for (int i = 0; i < n_indiv; i++) out[i] = 0.0;
+
+    tsk_size_t n_hap = tsk_treeseq_get_num_samples(ts);
+    for (tsk_size_t h = 0; h < n_hap; h++) {
+        int indiv = (int)(h / 2);
+        if (indiv < n_indiv)
+            out[indiv] += acc[samples[h]];
+    }
+}

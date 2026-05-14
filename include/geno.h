@@ -59,3 +59,16 @@ geno_reader_t *geno_open_bed(const char *prefix);  /* .bed/.bim/.fam prefix */
    This allows the same tsk_treeseq_t to be used concurrently for local-tree
    covariance matrices and other tree-sequence operations. */
 geno_reader_t *geno_open_trees(tsk_treeseq_t *ts);
+
+/* Compute out = G_s * in for the local tree pointed to by `tree`, where
+ * G_s[i,j] = total branch length shared between diploid individuals i and j
+ * (sum of branch lengths from root down to their MRCA).
+ *
+ * n_indiv:   number of diploid individuals (n_haplotypes / 2).
+ * work:      caller-allocated scratch, length 2 * tsk_treeseq_get_num_nodes(ts) doubles.
+ * order_buf: caller-allocated scratch, length tsk_treeseq_get_num_nodes(ts) tsk_id_t values.
+ *
+ * Both work and order_buf should be allocated once and reused across tree iterations. */
+void tree_cov_matvec(double *out, const double *in, int n_indiv,
+                     const tsk_tree_t *tree,
+                     double *work, tsk_id_t *order_buf);

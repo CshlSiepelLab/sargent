@@ -4,6 +4,8 @@ add_library(sargent_core STATIC
     bed.c
     trees.c
     variational.c
+    conjgrad.c
+    hutchinson.c
 )
 
 target_include_directories(sargent_core PUBLIC
