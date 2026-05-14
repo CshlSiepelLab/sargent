@@ -111,7 +111,7 @@ static void run_batch(cg_state_t *cg, cg_matvec_fn Av, void *av_data,
 
     /* Step 3: walk tree sequence; for each tree s accumulate B[s] */
     tsk_tree_t tree;
-    int ret = tsk_tree_init(&tree, ts, TSK_NO_SAMPLE_COUNTS);
+    int ret = tsk_tree_init(&tree, ts, 0);
     if (ret < 0) {
         fprintf(stderr, "hutchinson: tsk_tree_init: %s\n", tsk_strerror(ret));
         return;
@@ -164,7 +164,7 @@ void hutch_accumulate(const double *eps, const double *z, int nprobe, int n,
     }
 
     tsk_tree_t tree;
-    int ret = tsk_tree_init(&tree, ts, TSK_NO_SAMPLE_COUNTS);
+    int ret = tsk_tree_init(&tree, ts, 0);
     if (ret < 0) {
         fprintf(stderr, "hutch_accumulate: tsk_tree_init: %s\n", tsk_strerror(ret));
         free(tree_work); free(order_buf); free(gv_buf);

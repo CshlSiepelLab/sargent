@@ -313,7 +313,7 @@ static void v_matvec(double *out, const double *in, int n, void *data)
     for (int i = 0; i < n; i++) out[i] = d->sigma2 * in[i];
 
     tsk_tree_t tree;
-    int ret = tsk_tree_init(&tree, d->ts, TSK_NO_SAMPLE_COUNTS);
+    int ret = tsk_tree_init(&tree, d->ts, 0);
     if (ret < 0) {
         fprintf(stderr, "v_matvec: tsk_tree_init: %s\n", tsk_strerror(ret));
         return;
@@ -338,7 +338,7 @@ static void compute_quad_all(const tsk_treeseq_t *ts, const int *hap_to_indiv,
                               double *work, tsk_id_t *order_buf, double *gv)
 {
     tsk_tree_t tree;
-    int ret = tsk_tree_init(&tree, ts, TSK_NO_SAMPLE_COUNTS);
+    int ret = tsk_tree_init(&tree, ts, 0);
     if (ret < 0) {
         fprintf(stderr, "compute_quad_all: tsk_tree_init: %s\n", tsk_strerror(ret));
         for (int s = 0; s < S; s++) A[s] = 0.0;
