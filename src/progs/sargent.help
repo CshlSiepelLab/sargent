@@ -1,16 +1,22 @@
-char HELP[994] = "\nPROGRAM: sargent\n\
+char HELP[2860] = "\nPROGRAM: sargent\n\
 \n\
 USAGE: sargent [OPTIONS] <phenotypes> <input.trees> [<geno_prefix>]\n\
 \n\
-DESCRIPTION: [placeholder -- fill in description here]\n\
+DESCRIPTION: Fit a Bayesian sparse linear mixed model incorporating ancestral\n\
+recombination graphs (ARGs).  Phenotypes are modelled as y = X*beta + u + eps\n\
+where X*beta is a BayesR fixed-effect component and u is a random effect whose\n\
+covariance is a weighted sum of local-tree kinship matrices from the ARG.\n\
+Inference is performed in two stages: (1) variational coordinate descent for\n\
+fixed effects; (2) REML-style updates for segment weights and residual variance.\n\
 \n\
 ARGUMENTS:\n\
     <phenotypes>\n\
-        Phenotype file (format TBD).\n\
+        Phenotype file.  Each non-comment line should contain one phenotype\n\
+        value (the last whitespace-separated field on the line is used).\n\
 \n\
     <input.trees>\n\
-        Tree sequence file.  Used for local-tree covariance matrices and,\n\
-        when --ts-geno is given, as the source of genotypes.\n\
+        Tree sequence file (.trees).  Used for local-tree covariance matrices\n\
+        and, when --ts-geno is given, as the source of genotypes.\n\
 \n\
     <geno_prefix>\n\
         Prefix for PLINK BED files (<prefix>.bed, <prefix>.bim, <prefix>.fam).\n\
@@ -24,9 +30,37 @@ MAIN OPTIONS:\n\
         Display the current version number and exit.\n\
 \n\
     --silent, -z\n\
-        Omit progress updates to stderr.\n\
+        Omit all progress updates and per-iteration output to stderr.\n\
 \n\
     --ts-geno, -G\n\
         Obtain genotypes from the tree sequence file rather than a BED\n\
         file.  When this option is given, <geno_prefix> must be omitted.\n\
+\n\
+    --fixed-only, -F\n\
+        Run Stage 1 (fixed-effects inference) only.  Produces\n\
+        <outroot>.beta.tsv but not <outroot>.w2.tsv.\n\
+\n\
+    --random-only, -R\n\
+        Run Stage 2 (random-effects inference) only, skipping Stage 1.\n\
+        Fixed effects are set to zero.  Produces <outroot>.w2.tsv but\n\
+        not <outroot>.beta.tsv.\n\
+\n\
+    --outroot <prefix>, -o <prefix>\n\
+        Set the output file prefix (default: \"sargent\").  Output files\n\
+        are named <prefix>.beta.tsv and <prefix>.w2.tsv.\n\
+\n\
+OUTPUT FILES:\n\
+    <outroot>.beta.tsv\n\
+        Fixed-effect estimates.  Written after Stage 1 (or when both\n\
+        stages are run).  Columns: gamma_1 ... gamma_K  E_beta, where\n\
+        gamma_k is the posterior probability that SNP j belongs to\n\
+        mixture component k, and E_beta is the posterior expected value\n\
+        of beta_j.  One row per polymorphic SNP.\n\
+\n\
+    <outroot>.w2.tsv\n\
+        Segment-weight estimates.  Written after Stage 2 (or when both\n\
+        stages are run).  Columns: rho_1 ... rho_M  E_ws2, where rho_m\n\
+        is the posterior responsibility of component m for segment s, and\n\
+        E_ws2 is the posterior expected value of w_s^2.  One row per\n\
+        local tree (segment).\n\
 ";

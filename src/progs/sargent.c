@@ -38,6 +38,68 @@ static double *read_phenotypes(FILE *f, int n)
     return y;
 }
 
+static void write_beta_table(sargent_t *sg, const char *outroot, int silent)
+{
+    int p = sg->p;
+    int K = sg->K;
+
+    char fname[4096];
+    snprintf(fname, sizeof(fname), "%s.beta.tsv", outroot);
+    FILE *f = fopen(fname, "w");
+    if (!f) {
+        fprintf(stderr, "ERROR: cannot open %s for writing\n", fname);
+        return;
+    }
+
+    double *gamma_all = var_fixed_posteriors(sg);
+    if (!gamma_all) {
+        fprintf(stderr, "WARNING: could not compute posteriors; skipping %s\n", fname);
+        fclose(f);
+        return;
+    }
+
+    for (int k = 0; k < K; k++)
+        fprintf(f, "gamma_%d\t", k + 1);
+    fprintf(f, "E_beta\n");
+
+    for (int j = 0; j < p; j++) {
+        for (int k = 0; k < K; k++)
+            fprintf(f, "%.6g\t", gamma_all[j * K + k]);
+        fprintf(f, "%.6g\n", sg->beta[j]);
+    }
+
+    free(gamma_all);
+    fclose(f);
+    if (!silent) fprintf(stderr, "Wrote %s\n", fname);
+}
+
+static void write_w2_table(sargent_t *sg, const char *outroot, int silent)
+{
+    int S = sg->S;
+    int M = sg->M;
+
+    char fname[4096];
+    snprintf(fname, sizeof(fname), "%s.w2.tsv", outroot);
+    FILE *f = fopen(fname, "w");
+    if (!f) {
+        fprintf(stderr, "ERROR: cannot open %s for writing\n", fname);
+        return;
+    }
+
+    for (int m = 0; m < M; m++)
+        fprintf(f, "rho_%d\t", m + 1);
+    fprintf(f, "E_ws2\n");
+
+    for (int s = 0; s < S; s++) {
+        for (int m = 0; m < M; m++)
+            fprintf(f, "%.6g\t", sg->rho[s * M + m]);
+        fprintf(f, "%.6g\n", sg->ws2[s]);
+    }
+
+    fclose(f);
+    if (!silent) fprintf(stderr, "Wrote %s\n", fname);
+}
+
 #define CHECK(ret) do {                                                 \
     if ((ret) < 0) {                                                    \
         fprintf(stderr, "tskit error at %s:%d: %s\n",                  \
@@ -50,21 +112,30 @@ int main(int argc, char *argv[])
 {
     signed char c;
     int opt_idx;
-    int silent  = 0;
-    int ts_geno = 0;
+    int silent      = 0;
+    int ts_geno     = 0;
+    int fixed_only  = 0;
+    int random_only = 0;
+    const char *outroot = "sargent";
 
     struct option long_opts[] = {
-        {"silent",  0, 0, 'z'},
-        {"ts-geno", 0, 0, 'G'},
-        {"version", 0, 0, 'v'},
-        {"help",    0, 0, 'h'},
+        {"silent",      0, 0, 'z'},
+        {"ts-geno",     0, 0, 'G'},
+        {"fixed-only",  0, 0, 'F'},
+        {"random-only", 0, 0, 'R'},
+        {"outroot",     1, 0, 'o'},
+        {"version",     0, 0, 'v'},
+        {"help",        0, 0, 'h'},
         {0, 0, 0, 0}
     };
 
-    while ((c = getopt_long(argc, argv, "zGvh", long_opts, &opt_idx)) != -1) {
+    while ((c = getopt_long(argc, argv, "zGFRo:vh", long_opts, &opt_idx)) != -1) {
         switch (c) {
-        case 'z': silent  = 1; break;
-        case 'G': ts_geno = 1; break;
+        case 'z': silent      = 1;      break;
+        case 'G': ts_geno     = 1;      break;
+        case 'F': fixed_only  = 1;      break;
+        case 'R': random_only = 1;      break;
+        case 'o': outroot     = optarg; break;
         case 'v': printf("sargent version %s\n", SARGENT_VERSION); exit(0);
         case 'h': printf("%s", HELP); exit(0);
         case '?':
@@ -73,7 +144,12 @@ int main(int argc, char *argv[])
         }
     }
 
-    int n_pos = argc - optind;
+    if (fixed_only && random_only) {
+        fprintf(stderr, "ERROR: --fixed-only and --random-only are mutually exclusive.\n");
+        exit(EXIT_FAILURE);
+    }
+
+    int n_pos   = argc - optind;
     int need_pos = ts_geno ? 2 : 3;
     if (n_pos != need_pos) {
         if (ts_geno)
@@ -107,12 +183,10 @@ int main(int argc, char *argv[])
             fprintf(stderr, "Genotypes   : %s.bed\n", geno_prefix);
     }
 
-    /* Load tree sequence (used for local-tree covariance and optionally genotypes) */
     if (!silent) fprintf(stderr, "Reading %s...\n", trees_file);
     tsk_treeseq_t ts;
     CHECK(tsk_treeseq_load(&ts, trees_file, 0));
 
-    /* Open genotype reader */
     geno_reader_t *gr = ts_geno ? geno_open_trees(&ts)
                                 : geno_open_bed(geno_prefix);
     if (!gr) {
@@ -125,7 +199,6 @@ int main(int argc, char *argv[])
         fprintf(stderr, "Samples: %d  Variants (pre-filter): %d\n",
                 gr->n_samples, gr->n_variants);
 
-    /* Precompute per-SNP statistics (allele frequencies, standardization params) */
     if (!silent) fprintf(stderr, "Precomputing variant statistics...\n");
     if (geno_precompute_stats(gr) < 0) {
         fprintf(stderr, "ERROR: precompute_stats failed.\n");
@@ -137,7 +210,6 @@ int main(int argc, char *argv[])
     if (!silent)
         fprintf(stderr, "Polymorphic variants: %d\n", gr->n_variants);
 
-    /* Read phenotypes now that n is known */
     double *y = read_phenotypes(pheno_fh, gr->n_samples);
     fclose(pheno_fh);
     if (!y) {
@@ -146,7 +218,6 @@ int main(int argc, char *argv[])
         exit(EXIT_FAILURE);
     }
 
-    /* Build the sargent object and run inference */
     sargent_t *sg = sargent_new(gr, &ts, y);
     free(y);
     if (!sg) {
@@ -156,9 +227,38 @@ int main(int argc, char *argv[])
         exit(EXIT_FAILURE);
     }
 
-    if (!silent) fprintf(stderr, "Running var_fixed...\n");
-    var_fixed(sg);
-    if (!silent) fprintf(stderr, "h2_fixed = %.4f\n", sg->h2_fixed);
+    /* ---- Stage 1: fixed effects ---- */
+    if (!random_only) {
+        if (!silent)
+            fprintf(stderr, "Stage 1: inferring fixed effects (%d SNPs, K=%d)...\n",
+                    sg->p, sg->K);
+        var_fixed(sg, silent);
+        if (!silent)
+            fprintf(stderr, "Stage 1 done: h2_fixed=%.4f  sigma2=%.4f\n",
+                    sg->h2_fixed, sg->sigma2);
+        write_beta_table(sg, outroot, silent);
+    }
+
+    /* ---- Stage 2: random effects ---- */
+    if (!fixed_only) {
+        if (!silent)
+            fprintf(stderr, "Stage 2: inferring segment weights (%d trees, M=%d)...\n",
+                    sg->S, sg->M);
+        var_random(sg, silent);
+        if (!silent)
+            fprintf(stderr, "Stage 2 done: h2_random=%.4f  sigma2=%.4f\n",
+                    sg->h2_random, sg->sigma2);
+        write_w2_table(sg, outroot, silent);
+    }
+
+    /* ---- Summary statistics ---- */
+    if (!silent) {
+        fprintf(stderr, "\nSummary:\n");
+        fprintf(stderr, "  h2        : %.4f\n", sg->h2);
+        fprintf(stderr, "  h2.fixed  : %.4f\n", sg->h2_fixed);
+        fprintf(stderr, "  h2.random : %.4f\n", sg->h2_random);
+        fprintf(stderr, "  sigma2    : %.4f\n", sg->sigma2);
+    }
 
     sargent_free(sg);
     geno_close(gr);

@@ -76,7 +76,7 @@ static void run_batch(cg_state_t *cg, cg_matvec_fn Av, void *av_data,
                       double *eps_buf, double *z_buf,
                       double *tree_work, tsk_id_t *order_buf,
                       double *gv_buf,
-                      double *B, double scale)
+                      double *B, double *B0_accum, double scale)
 {
     /* Step 1: draw probe vectors */
     for (int k = 0; k < batch_size; k++) {
@@ -87,12 +87,15 @@ static void run_batch(cg_state_t *cg, cg_matvec_fn Av, void *av_data,
             fill_rademacher(eps_k, n, rng_state);
     }
 
-    /* Step 2: solve V z_k = eps_k for each probe */
+    /* Step 2: solve V z_k = eps_k for each probe.
+     * Also accumulate B0 = tr(V^{-1}) = mean(eps_k^T z_k) if requested. */
     for (int k = 0; k < batch_size; k++) {
         double *eps_k = eps_buf + (size_t)k * n;
         double *z_k   = z_buf   + (size_t)k * n;
         memset(z_k, 0, (size_t)n * sizeof(double));  /* cold start */
         cg_solve(cg, Av, av_data, eps_k, z_k);
+        if (B0_accum)
+            *B0_accum += scale * vdot(eps_k, z_k, n);
     }
 
     /* Step 3: walk tree sequence; for each tree s accumulate B[s] */
@@ -126,7 +129,8 @@ static void run_batch(cg_state_t *cg, cg_matvec_fn Av, void *av_data,
 }
 
 void hutch_accumulate(const double *eps, const double *z, int nprobe, int n,
-                      const tsk_treeseq_t *ts, double *B, int S)
+                      const tsk_treeseq_t *ts, double *B, int S,
+                      double *B0_out)
 {
     tsk_size_t n_nodes  = tsk_treeseq_get_num_nodes(ts);
     double    *tree_work = malloc(2 * n_nodes * sizeof(double));
@@ -139,6 +143,14 @@ void hutch_accumulate(const double *eps, const double *z, int nprobe, int n,
     }
 
     for (int s = 0; s < S; s++) B[s] = 0.0;
+    if (B0_out) *B0_out = 0.0;
+
+    /* B0 = tr(V^{-1}) = mean_k(eps_k^T z_k); computed without any tree walk */
+    if (B0_out) {
+        for (int k = 0; k < nprobe; k++)
+            *B0_out += vdot(eps + (size_t)k * n, z + (size_t)k * n, n);
+        *B0_out /= nprobe;
+    }
 
     tsk_tree_t tree;
     int ret = tsk_tree_init(&tree, ts, TSK_NO_SAMPLE_COUNTS);
@@ -171,7 +183,7 @@ void hutch_accumulate(const double *eps, const double *z, int nprobe, int n,
 
 void hutch_trace_all(cg_state_t *cg, cg_matvec_fn Av, void *av_data,
                      const tsk_treeseq_t *ts, int n, int S,
-                     double *B, const hutch_opts_t *opts)
+                     double *B, double *B0_out, const hutch_opts_t *opts)
 {
     /* resolve options */
     hutch_opts_t o = {
@@ -205,6 +217,7 @@ void hutch_trace_all(cg_state_t *cg, cg_matvec_fn Av, void *av_data,
     }
 
     for (int s = 0; s < S; s++) B[s] = 0.0;
+    if (B0_out) *B0_out = 0.0;
 
     int remaining = o.nprobe;
     while (remaining > 0) {
@@ -214,7 +227,7 @@ void hutch_trace_all(cg_state_t *cg, cg_matvec_fn Av, void *av_data,
         run_batch(cg, Av, av_data, ts, n, S,
                   cur, o.use_gaussian, &rng,
                   eps_buf, z_buf, tree_work, order_buf, gv_buf,
-                  B, scale);
+                  B, B0_out, scale);
 
         remaining -= cur;
     }
