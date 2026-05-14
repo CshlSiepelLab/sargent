@@ -1,3 +1,13 @@
+/*
+ * SARGENT: Sparse ARG-based ENcoding of Traits
+ *
+ * Copyright (c) 2026, Cold Spring Harbor Laboratory
+ * All rights reserved.
+ *
+ * This file is part of SARGENT and is distributed under the BSD 3-Clause License.
+ * See the LICENSE file in the project root for details.
+ */
+
 #pragma once
 
 #include "sargent.h"
