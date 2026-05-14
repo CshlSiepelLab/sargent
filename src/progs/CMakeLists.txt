@@ -1,23 +1,21 @@
 # src/progs/CMakeLists.txt
 
-# ---- sargent.help: regenerate from sargent.help_src when it changes ----
-add_custom_command(
-    OUTPUT  "${CMAKE_CURRENT_SOURCE_DIR}/sargent.help"
-    COMMAND bash "${CMAKE_SOURCE_DIR}/src/munge-help.sh"
-                 "${CMAKE_CURRENT_SOURCE_DIR}/sargent.help_src"
-            > "${CMAKE_CURRENT_SOURCE_DIR}/sargent.help"
-    DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/sargent.help_src"
-    COMMENT "Generating sargent.help from sargent.help_src"
-    VERBATIM
-)
-add_custom_target(sargent_help
-    DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/sargent.help"
-)
+# ---- sargent.help.h: generate from sargent_help.txt at configure time ----
+# Re-run cmake when the text file changes to regenerate the header.
+set(_help_txt "${CMAKE_CURRENT_SOURCE_DIR}/sargent_help.txt")
+set(_help_hdr "${CMAKE_CURRENT_SOURCE_DIR}/sargent.help.h")
+
+file(READ "${_help_txt}" _help_raw)
+string(REPLACE "\\" "\\\\" _help_esc "${_help_raw}")
+string(REPLACE "\"" "\\\"" _help_esc "${_help_esc}")
+string(REPLACE "\n" "\\n\"\n\"" _help_esc "${_help_esc}")
+file(WRITE "${_help_hdr}"
+    "/* Auto-generated from sargent_help.txt — do not edit directly. */\n"
+    "static const char HELP[] =\n"
+    "\"${_help_esc}\";\n")
 
 # ---- executables ----
 add_executable(sargent sargent.c)
-
-add_dependencies(sargent sargent_help)
 
 # Read version file and inject as compile definition
 file(READ "${CMAKE_SOURCE_DIR}/version" SARGENT_VERSION_RAW)

@@ -16,7 +16,7 @@
 #include "geno.h"
 #include "sargent.h"
 #include "variational.h"
-#include "sargent.help"
+#include "sargent.help.h"
 
 /* Read n phenotype values from f.  Each non-comment line may have one or more
    whitespace-separated fields; the last field is taken as the phenotype. */
