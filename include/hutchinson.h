@@ -32,30 +32,29 @@ typedef struct {
     unsigned int seed;         /* RNG seed; 0 = use rand() state as-is */
 } hutch_opts_t;
 
-/* Estimate B[s] = tr(V^{-1} G_s) for s = 0 .. S-1.
- *
- * cg:      pre-allocated CG state (n must match).
- * Av:      matvec callback for V = sum_s ws2[s] G_s + sigma2 I.
- * av_data: opaque pointer forwarded to Av.
- * ts:      tree sequence (S trees, n diploid samples).
- * n:       number of individuals.
- * S:       number of local trees (must equal tsk_treeseq_get_num_trees(ts)).
- * B:       output array, length S (caller-allocated, overwritten).
- * opts:    tuning options; NULL for defaults (nprobe=50, Rademacher, all in one batch). */
 /* Estimate B[s] = tr(V^{-1} G_s) for all S trees and, optionally,
  * B0 = tr(V^{-1}) (written to *B0_out if non-NULL).
  *
- * B0 is computed at no extra cost as (1/nprobe) sum_i eps_i^T z_i using the
- * same probe/solution pairs already needed for B[s]. */
-void hutch_trace_all(cg_state_t         *cg,
-                     cg_matvec_fn        Av,
-                     void               *av_data,
+ * cg:           pre-allocated CG state (n must match).
+ * Av:           matvec callback for V = sum_s ws2[s] G_s + sigma2 I.
+ * av_data:      opaque pointer forwarded to Av.
+ * ts:           tree sequence (S trees, n diploid samples).
+ * hap_to_indiv: sample-rank → individual-index mapping (from tsk_build_hap_to_indiv).
+ * n:            number of individuals.
+ * S:            number of local trees.
+ * B:            output array, length S (caller-allocated, overwritten).
+ * B0_out:       if non-NULL, receives tr(V^{-1}) at no extra cost.
+ * opts:         tuning options; NULL for defaults (nprobe=50, Rademacher). */
+void hutch_trace_all(cg_state_t          *cg,
+                     cg_matvec_fn         Av,
+                     void                *av_data,
                      const tsk_treeseq_t *ts,
-                     int                 n,
-                     int                 S,
-                     double             *B,
-                     double             *B0_out,   /* may be NULL */
-                     const hutch_opts_t *opts);
+                     const int           *hap_to_indiv,
+                     int                  n,
+                     int                  S,
+                     double              *B,
+                     double              *B0_out,
+                     const hutch_opts_t  *opts);
 
 /* Lower-level: given pre-computed probe matrix eps[nprobe*n] and solution
  * matrix z[nprobe*n] (row-major, each row a vector of length n), walk the
@@ -66,6 +65,7 @@ void hutch_accumulate(const double        *eps,
                       int                  nprobe,
                       int                  n,
                       const tsk_treeseq_t *ts,
+                      const int           *hap_to_indiv,
                       double              *B,
                       int                  S,
                       double              *B0_out);

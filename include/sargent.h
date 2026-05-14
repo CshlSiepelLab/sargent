@@ -44,6 +44,12 @@ typedef struct {
     double *tau2_mix;    /* prior variances [M]; tau2_mix[0] = 0; owned */
     double *phi_mix;     /* segment mixture proportions [M]; sum = 1; owned */
     double *rho;         /* segment responsibilities [S * M]; owned */
+
+    /* Sample-rank → individual-index mapping, length 2*n.
+     * Built from the tree sequence's individual table at construction time;
+     * passed through to tree_cov_matvec so the diploid pairing is always
+     * derived from the tree sequence metadata rather than assumed from rank/2. */
+    int *hap_to_indiv;
 } sargent_t;
 
 sargent_t *sargent_new(geno_reader_t *gr, tsk_treeseq_t *ts, double *y);

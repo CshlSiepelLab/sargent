@@ -105,6 +105,12 @@ sargent_t *sargent_new(geno_reader_t *gr, tsk_treeseq_t *ts, double *y)
         for (int m = 0; m < sg->M; m++)
             sg->rho[s * sg->M + m] = 1.0 / sg->M;
 
+    sg->hap_to_indiv = tsk_build_hap_to_indiv(ts);
+    if (!sg->hap_to_indiv) {
+        sargent_free(sg);
+        return NULL;
+    }
+
     return sg;
 }
 
@@ -119,6 +125,7 @@ void sargent_free(sargent_t *sg)
     free(sg->tau2_mix);
     free(sg->phi_mix);
     free(sg->rho);
+    free(sg->hap_to_indiv);
     free(sg);
 }
 
@@ -289,10 +296,11 @@ void var_fixed(sargent_t *sg, int silent)
  * Makes one sequential pass over the tree sequence. */
 typedef struct {
     const tsk_treeseq_t *ts;
-    const double        *ws2;    /* E[w_s^2] for each tree, length S */
+    const double        *ws2;        /* E[w_s^2] for each tree, length S */
     double               sigma2;
     int                  n;
     int                  S;
+    const int           *hap_to_indiv;
     double              *work;      /* 2 * n_nodes scratch (borrowed) */
     tsk_id_t            *order_buf; /* n_nodes scratch (borrowed) */
     double              *gv;        /* n scratch (borrowed) */
@@ -314,7 +322,7 @@ static void v_matvec(double *out, const double *in, int n, void *data)
     for (ret = tsk_tree_first(&tree); ret == TSK_TREE_OK && s < d->S;
          ret = tsk_tree_next(&tree), s++) {
         if (d->ws2[s] == 0.0) continue;
-        tree_cov_matvec(d->gv, in, d->n, &tree, d->work, d->order_buf);
+        tree_cov_matvec(d->gv, in, d->n, &tree, d->work, d->order_buf, d->hap_to_indiv);
         for (int i = 0; i < n; i++) out[i] += d->ws2[s] * d->gv[i];
     }
     if (ret < 0)
@@ -323,7 +331,8 @@ static void v_matvec(double *out, const double *in, int n, void *data)
 }
 
 /* Compute A[s] = r_tilde^T G_s r_tilde for all S trees in one pass. */
-static void compute_quad_all(const tsk_treeseq_t *ts, int n, int S,
+static void compute_quad_all(const tsk_treeseq_t *ts, const int *hap_to_indiv,
+                              int n, int S,
                               const double *r_tilde,
                               double *A,
                               double *work, tsk_id_t *order_buf, double *gv)
@@ -338,7 +347,7 @@ static void compute_quad_all(const tsk_treeseq_t *ts, int n, int S,
     int s = 0;
     for (ret = tsk_tree_first(&tree); ret == TSK_TREE_OK && s < S;
          ret = tsk_tree_next(&tree), s++) {
-        tree_cov_matvec(gv, r_tilde, n, &tree, work, order_buf);
+        tree_cov_matvec(gv, r_tilde, n, &tree, work, order_buf, hap_to_indiv);
         double a = 0.0;
         for (int i = 0; i < n; i++) a += r_tilde[i] * gv[i];
         A[s] = a;
@@ -402,7 +411,7 @@ void var_random(sargent_t *sg, int silent)
     /* V matvec callback data — ws2 pointer is live (updated in place) */
     v_matvec_data_t vd = {
         .ts = sg->ts, .ws2 = sg->ws2, .sigma2 = sg->sigma2,
-        .n = n, .S = S,
+        .n = n, .S = S, .hap_to_indiv = sg->hap_to_indiv,
         .work = work, .order_buf = order_buf, .gv = gv,
     };
 
@@ -425,11 +434,11 @@ void var_random(sargent_t *sg, int silent)
         for (int i = 0; i < n; i++) A_0 += r_tilde[i] * r_tilde[i];
 
         /* --- c. A_s = r_tilde^T G_s r_tilde for all s -------------------- */
-        compute_quad_all(sg->ts, n, S, r_tilde, A, work, order_buf, gv);
+        compute_quad_all(sg->ts, sg->hap_to_indiv, n, S, r_tilde, A, work, order_buf, gv);
 
         /* --- d. B_s = tr(V^{-1} G_s) and B_0 = tr(V^{-1}) via Hutchinson - */
         double B_0 = 0.0;
-        hutch_trace_all(cg, v_matvec, &vd, sg->ts, n, S, B, &B_0, &hopts);
+        hutch_trace_all(cg, v_matvec, &vd, sg->ts, sg->hap_to_indiv, n, S, B, &B_0, &hopts);
 
         /* --- e. Update rho_sm, ws2[s], phi_mix ---------------------------- */
         memset(phi_sum, 0, (size_t)M * sizeof(double));

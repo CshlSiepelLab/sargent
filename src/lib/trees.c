@@ -28,10 +28,106 @@ typedef struct {
     tsk_size_t      n_sites_total;
     tsk_vargen_t    vg;
     int             vg_ready;
-    int             vg_pos;        /* sites consumed so far (next call returns site vg_pos) */
+    int             vg_pos;        /* sites consumed so far */
     int            *poly_site_idx; /* [n_variants] poly index -> site index */
     int             cur_poly;
+    int            *hap_to_indiv;  /* [n_haplotypes] sample_rank -> individual */
+    int            *indiv_haps;    /* [2*n_indiv] pairs of sample ranks per individual */
 } trees_impl_t;
+
+/* -------------------------------------------------------------------------
+ * tsk_build_hap_to_indiv: build sample-rank → individual-index mapping.
+ *
+ * Uses the tree sequence's individual table when present (correct for any
+ * sample ordering).  Falls back to rank/2 with a warning when no individual
+ * table exists (valid only if msprime-style consecutive haplotype pairs are
+ * guaranteed).
+ * ---------------------------------------------------------------------- */
+int *tsk_build_hap_to_indiv(const tsk_treeseq_t *ts)
+{
+    tsk_size_t n_hap   = tsk_treeseq_get_num_samples(ts);
+    tsk_size_t n_indiv = tsk_treeseq_get_num_individuals(ts);
+
+    int *h2i = malloc(n_hap * sizeof(int));
+    if (!h2i) return NULL;
+
+    if (n_indiv == 0) {
+        /* No individual table — fall back to rank/2 */
+        if (n_hap > 2)
+            fprintf(stderr,
+                    "trees: no individual table in tree sequence; "
+                    "assuming consecutive rank/2 diploid pairing\n");
+        for (tsk_size_t h = 0; h < n_hap; h++)
+            h2i[h] = (int)(h / 2);
+        return h2i;
+    }
+
+    if (n_indiv * 2 != n_hap) {
+        fprintf(stderr,
+                "trees: %lld individuals but %lld haplotypes; "
+                "expected exactly 2 sample nodes per individual\n",
+                (long long)n_indiv, (long long)n_hap);
+        free(h2i);
+        return NULL;
+    }
+
+    const tsk_id_t *sample_index_map = tsk_treeseq_get_sample_index_map(ts);
+
+    for (tsk_size_t h = 0; h < n_hap; h++) h2i[h] = -1;
+
+    for (tsk_size_t i = 0; i < n_indiv; i++) {
+        tsk_size_t n_nodes = ts->individual_nodes_length[i];
+
+        if (n_nodes != 2) {
+            fprintf(stderr,
+                    "trees: individual %lld has %lld nodes; expected 2 (diploid)\n",
+                    (long long)i, (long long)n_nodes);
+            free(h2i);
+            return NULL;
+        }
+
+        for (tsk_size_t j = 0; j < n_nodes; j++) {
+            tsk_id_t node = ts->individual_nodes[i][j];
+            tsk_id_t rank = sample_index_map[node];
+            if (rank < 0) {
+                fprintf(stderr,
+                        "trees: node %lld for individual %lld is not a sample\n",
+                        (long long)node, (long long)i);
+                free(h2i);
+                return NULL;
+            }
+            h2i[(tsk_size_t)rank] = (int)i;
+        }
+    }
+
+    return h2i;
+}
+
+/* Build indiv_haps[2*i], indiv_haps[2*i+1] = the two sample ranks for
+ * individual i.  Derived by inverting hap_to_indiv. */
+static int *build_indiv_haps(int n_hap, int n_indiv, const int *hap_to_indiv)
+{
+    int *ih = malloc((size_t)(2 * n_indiv) * sizeof(int));
+    if (!ih) return NULL;
+    for (int i = 0; i < 2 * n_indiv; i++) ih[i] = -1;
+
+    int *slot = calloc((size_t)n_indiv, sizeof(int));
+    if (!slot) { free(ih); return NULL; }
+
+    for (int h = 0; h < n_hap; h++) {
+        int ind = hap_to_indiv[h];
+        if (ind < 0 || ind >= n_indiv) continue;
+        int s = slot[ind]++;
+        if (s < 2) ih[2 * ind + s] = h;
+    }
+
+    free(slot);
+    return ih;
+}
+
+/* -------------------------------------------------------------------------
+ * Genotype reader backend — tree sequence
+ * ---------------------------------------------------------------------- */
 
 /* Count non-ancestral alleles for one diploid individual.
    Returns NaN if either haplotype has missing data. */
@@ -41,11 +137,14 @@ static double decode_indiv(int32_t h1, int32_t h2)
     return (double)((h1 > 0) + (h2 > 0));
 }
 
-static void decode_ts_variant(const tsk_variant_t *var, int n_indiv, double *out)
+/* Decode one variant into per-individual dosage using the explicit haplotype
+ * mapping rather than the rank/2 assumption. */
+static void decode_ts_variant(const tsk_variant_t *var, int n_indiv,
+                               const int *indiv_haps, double *out)
 {
     const int32_t *g = var->genotypes;
     for (int i = 0; i < n_indiv; i++)
-        out[i] = decode_indiv(g[2 * i], g[2 * i + 1]);
+        out[i] = decode_indiv(g[indiv_haps[2 * i]], g[indiv_haps[2 * i + 1]]);
 }
 
 static void apply_flags(double *out, int n, const geno_var_stats_t *s, int flags)
@@ -78,15 +177,13 @@ static int init_vargen(trees_impl_t *t)
     return 0;
 }
 
-/* Consume and discard sites until vg_pos == target.
-   After return, the next tsk_vargen_next call yields site `target`. */
 static int skip_to_site(trees_impl_t *t, int target)
 {
     tsk_variant_t *var;
     while (t->vg_pos < target) {
         int ret = tsk_vargen_next(&t->vg, &var);
         if (ret < 0) { fprintf(stderr, "trees: %s\n", tsk_strerror(ret)); return -1; }
-        if (ret == 0) return 0;  /* unexpectedly hit EOF */
+        if (ret == 0) return 0;
         t->vg_pos++;
     }
     return 1;
@@ -110,9 +207,9 @@ static int trees_precompute_stats(geno_reader_t *r)
     while ((ret = tsk_vargen_next(&t->vg, &var)) == 1) {
         int site_idx = t->vg_pos++;
 
-        if (var->num_alleles != 2) continue;  /* skip multi-allelic */
+        if (var->num_alleles != 2) continue;
 
-        decode_ts_variant(var, n, tmp);
+        decode_ts_variant(var, n, t->indiv_haps, tmp);
 
         double sum  = 0.0;
         int   n_obs = 0;
@@ -124,7 +221,7 @@ static int trees_precompute_stats(geno_reader_t *r)
         double mean  = sum / n_obs;
         double p_hat = mean / 2.0;
         double var_  = 2.0 * p_hat * (1.0 - p_hat);
-        if (var_ == 0.0) continue;  /* monomorphic */
+        if (var_ == 0.0) continue;
 
         stats[n_poly].mean   = mean;
         stats[n_poly].scale  = 1.0 / sqrt(var_);
@@ -143,7 +240,7 @@ static int trees_precompute_stats(geno_reader_t *r)
     r->n_variants    = n_poly;
     t->cur_poly      = 0;
 
-    return init_vargen(t);  /* rewind for streaming */
+    return init_vargen(t);
 
 oom:
     free(stats); free(poly_idx); free(tmp);
@@ -170,7 +267,7 @@ static int trees_read_variant(geno_reader_t *r, double *out, int flags)
     if (ret == 0) return 0;
     t->vg_pos++;
 
-    decode_ts_variant(var, r->n_samples, out);
+    decode_ts_variant(var, r->n_samples, t->indiv_haps, out);
     if (flags) apply_flags(out, r->n_samples, &r->stats[t->cur_poly], flags);
     t->cur_poly++;
     return 1;
@@ -193,7 +290,6 @@ static int trees_seek(geno_reader_t *r, int var_idx)
     if (var_idx < 0 || var_idx >= r->n_variants) return -1;
     if (init_vargen(t) < 0) return -1;
     t->cur_poly = var_idx;
-    /* fast-forward to just before target; O(var_idx * n_samples) */
     return skip_to_site(t, t->poly_site_idx[var_idx]) > 0 ? 0 : -1;
 }
 
@@ -209,10 +305,11 @@ static void trees_close(geno_reader_t *r)
     trees_impl_t *t = r->impl;
     if (t->vg_ready) tsk_vargen_free(&t->vg);
     free(t->poly_site_idx);
+    free(t->hap_to_indiv);
+    free(t->indiv_haps);
     free(t);
     free(r->stats);
     free(r);
-    /* ts is NOT freed — caller owns it */
 }
 
 static const geno_ops_t trees_ops = {
@@ -232,18 +329,27 @@ geno_reader_t *geno_open_trees(tsk_treeseq_t *ts)
                 (long long)n_hap);
         return NULL;
     }
+    int n_indiv = (int)(n_hap / 2);
+
+    int *h2i = tsk_build_hap_to_indiv(ts);
+    if (!h2i) return NULL;
+
+    int *ih = build_indiv_haps((int)n_hap, n_indiv, h2i);
+    if (!ih) { free(h2i); return NULL; }
 
     trees_impl_t *t = calloc(1, sizeof(*t));
-    if (!t) return NULL;
+    if (!t) { free(h2i); free(ih); return NULL; }
     t->ts            = ts;
     t->n_haplotypes  = n_hap;
     t->n_sites_total = tsk_treeseq_get_num_sites(ts);
+    t->hap_to_indiv  = h2i;
+    t->indiv_haps    = ih;
 
     geno_reader_t *r = calloc(1, sizeof(*r));
-    if (!r) { free(t); return NULL; }
+    if (!r) { free(h2i); free(ih); free(t); return NULL; }
     r->ops        = &trees_ops;
-    r->n_samples  = (int)(n_hap / 2);
-    r->n_variants = (int)t->n_sites_total;  /* updated to poly count by precompute_stats */
+    r->n_samples  = n_indiv;
+    r->n_variants = (int)t->n_sites_total;
     r->impl       = t;
     return r;
 }
@@ -251,48 +357,44 @@ geno_reader_t *geno_open_trees(tsk_treeseq_t *ts)
 /* ---------------------------------------------------------------------------
  * tree_cov_matvec: compute out = G_s * in for a single local tree.
  *
- * G_s[i,j] = shared branch length between samples i and j
+ * G_s[i,j] = shared branch length between diploid individuals i and j
  *           = sum of branch lengths from root down to MRCA(i,j).
  *
  * Algorithm (O(n_nodes) two-pass tree traversal):
  *
  *   Post-order pass — subtree sums S[u]:
- *     leaf (sample) u:  S[u] = in[sample_rank(u)]
+ *     leaf (sample haplotype h): S[u] = 0.5 * in[hap_to_indiv[rank(h)]]
+ *       (factor 0.5 splits each individual's contribution across its two
+ *        haplotype nodes; the pair sums to in[indiv] in the subtree)
  *     internal node u:  S[u] = sum of S[c] over children c
  *
  *   Pre-order pass — accumulated weighted path sums acc[u]:
- *     root r:           acc[r] = 0  (no branch above root)
- *     non-root u:       acc[u] = acc[parent[u]] + branch_length(u) * S[u]
+ *     root r:  acc[r] = 0
+ *     non-root u:  acc[u] = acc[parent[u]] + branch_length(u) * S[u]
  *
- *   Result:  out[i] = acc[sample_node(i)]
+ *   Result: out[i] = acc[hap_a(i)] + acc[hap_b(i)]
  *
- * work must point to 2 * tsk_treeseq_get_num_nodes(ts) doubles (caller-alloc,
- * reused across tree iterations to avoid per-tree malloc).
+ * hap_to_indiv maps sample rank → individual index; build once with
+ * tsk_build_hap_to_indiv and reuse across all tree iterations.
  * ---------------------------------------------------------------------------*/
 void tree_cov_matvec(double *out, const double *in, int n_indiv,
                      const tsk_tree_t *tree,
-                     double *work, tsk_id_t *order_buf)
+                     double *work, tsk_id_t *order_buf,
+                     const int *hap_to_indiv)
 {
     const tsk_treeseq_t *ts  = tree->tree_sequence;
     tsk_size_t           nnd = tsk_treeseq_get_num_nodes(ts);
 
-    double *S   = work;       /* subtree sums,      length nnd */
-    double *acc = work + nnd; /* path accumulators, length nnd */
+    double *S   = work;
+    double *acc = work + nnd;
 
-    /* node times for branch-length calculation */
-    const double *time = ts->tables->nodes.time;
-
-    /* sample → rank map (same for all trees in the sequence) */
+    const double   *time             = ts->tables->nodes.time;
     const tsk_id_t *sample_index_map = tsk_treeseq_get_sample_index_map(ts);
     const tsk_id_t *samples          = tsk_treeseq_get_samples(ts);
 
-    /* initialise S and acc to zero */
     for (tsk_size_t i = 0; i < nnd; i++) { S[i] = 0.0; acc[i] = 0.0; }
 
-    /* Post-order pass: compute S[u].
-     * For a sample u with haplotype rank si: S[u] = 0.5 * in[si/2].
-     * Factor of 0.5 means each individual's contribution is split across
-     * its two haplotype nodes; the pair sums to in[indiv] in the subtree. */
+    /* Post-order: S[u] = weighted sum of in-vector over subtree of u */
     tsk_size_t n_order = 0;
     tsk_tree_postorder(tree, order_buf, &n_order);
 
@@ -300,8 +402,8 @@ void tree_cov_matvec(double *out, const double *in, int n_indiv,
         tsk_id_t u  = order_buf[k];
         tsk_id_t si = sample_index_map[u];
         if (si >= 0) {
-            int indiv = (int)(si / 2);
-            if (indiv < n_indiv)
+            int indiv = hap_to_indiv[(int)si];
+            if (indiv >= 0 && indiv < n_indiv)
                 S[u] = 0.5 * in[indiv];
         } else {
             for (tsk_id_t c = tree->left_child[u]; c != TSK_NULL;
@@ -310,10 +412,7 @@ void tree_cov_matvec(double *out, const double *in, int n_indiv,
         }
     }
 
-    /* Pre-order pass: compute acc[u] = sum of (branch_length * S) on the
-     * path from the root down to u.
-     * acc[root] = 0 (no branch above root).
-     * acc[u]    = acc[parent[u]] + (time[parent[u]] - time[u]) * S[u]. */
+    /* Pre-order: acc[u] = cumulative (branch_length × S) from root to u */
     n_order = 0;
     tsk_tree_preorder(tree, order_buf, &n_order);
 
@@ -328,14 +427,13 @@ void tree_cov_matvec(double *out, const double *in, int n_indiv,
         }
     }
 
-    /* Read off: out[i] = acc[hap0(i)] + acc[hap1(i)].
-     * Combined with the 0.5 factors in S, this equals (G_s v)[i]. */
+    /* Read off: out[i] = acc[hap_a(i)] + acc[hap_b(i)] */
     for (int i = 0; i < n_indiv; i++) out[i] = 0.0;
 
     tsk_size_t n_hap = tsk_treeseq_get_num_samples(ts);
     for (tsk_size_t h = 0; h < n_hap; h++) {
-        int indiv = (int)(h / 2);
-        if (indiv < n_indiv)
+        int indiv = hap_to_indiv[(int)h];
+        if (indiv >= 0 && indiv < n_indiv)
             out[indiv] += acc[samples[h]];
     }
 }
