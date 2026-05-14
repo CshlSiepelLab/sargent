@@ -1,11 +1,9 @@
 SARGENT: Sparse ARG-based ENcoding of Traits
 ---------------------------------------------
 
-Primary Author:
+Primary Authors:
+    Nurdan Kuru (Cold Spring Harbor Laboratory)
     Adam Siepel (Cold Spring Harbor Laboratory)
-
-Contributors:
-    Nurdan Kuru (CSHL)
 
 Acknowledgments:
     SARGENT makes use of the PHAST software library (BSD license) and the
