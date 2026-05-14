@@ -1,4 +1,4 @@
-# sargent
+# SARGENT: Sparse ARG-based ENcoding of Traits
 
 ## Dependencies
 
