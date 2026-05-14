@@ -8,21 +8,6 @@ set(CMAKE_C_STANDARD 99)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-# allows use of upper case PHAST_ROOT / TSKIT_ROOT
-if(POLICY CMP0144)
-  cmake_policy(SET CMP0144 NEW)
-endif()
-
-# ---- PHAST dependency --------------------------------------------------
-set(PHAST_ROOT "" CACHE PATH "PHAST install prefix (contains lib/cmake/phast)")
-
-if(NOT PHAST_ROOT)
-  message(FATAL_ERROR "PHAST_ROOT must be set. Pass -DPHAST_ROOT=/path/to/phast.")
-endif()
-list(PREPEND CMAKE_PREFIX_PATH "${PHAST_ROOT}")
-find_package(phast CONFIG REQUIRED)
-message(STATUS "PHAST found at ${PHAST_ROOT}")
-
 # ---- tskit dependency (built from submodule via meson) -----------------
 include(ExternalProject)
 

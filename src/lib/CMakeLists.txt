@@ -17,9 +17,6 @@ target_link_libraries(sargent_core PUBLIC
     m
 )
 
-if(TARGET phast::phast_core)
-  target_link_libraries(sargent_core PUBLIC phast::phast_core)
-endif()
 
 find_package(OpenMP)
 if(OpenMP_C_FOUND)

@@ -17,7 +17,6 @@
 #include "sargent.h"
 #include "variational.h"
 #include "sargent.help"
-#include <phast/misc.h>
 
 /* Read n phenotype values from f.  Each non-comment line may have one or more
    whitespace-separated fields; the last field is taken as the phenotype. */
@@ -178,7 +177,7 @@ int main(int argc, char *argv[])
     const char *trees_file  = argv[optind + 1];
     const char *geno_prefix = ts_geno ? NULL : argv[optind + 2];
 
-    FILE *pheno_fh = phast_fopen(pheno_file, "r");
+    FILE *pheno_fh = fopen(pheno_file, "r");
     if (!pheno_fh) {
         fprintf(stderr, "ERROR: cannot open %s\n", pheno_file);
         exit(EXIT_FAILURE);

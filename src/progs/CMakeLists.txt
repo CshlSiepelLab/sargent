@@ -27,6 +27,6 @@ message(STATUS "SARGENT_VERSION='${SARGENT_VERSION}'")
 target_compile_definitions(sargent PRIVATE SARGENT_VERSION="${SARGENT_VERSION}")
 
 target_compile_options(sargent PRIVATE -Wall -Wextra)
-target_link_libraries(sargent PRIVATE sargent_core phast::phast_core)
+target_link_libraries(sargent PRIVATE sargent_core)
 
 install(TARGETS sargent RUNTIME DESTINATION bin)

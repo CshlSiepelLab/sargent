@@ -6,8 +6,8 @@ Primary Authors:
     Adam Siepel (Cold Spring Harbor Laboratory)
 
 Acknowledgments:
-    SARGENT makes use of the PHAST software library (BSD license) and the
-    tskit library (MIT license).  We acknowledge contributors to both projects.
+    SARGENT makes use of the tskit library (MIT license).
+    We acknowledge contributors to the tskit project.
 
 Funding:
     This work has been supported in part by US National Institutes of
