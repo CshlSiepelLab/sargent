@@ -22,14 +22,14 @@
 /* Default BayesR mixture grid: null + three effect-size classes.
  * sigma2_mix values are set relative to var(y) in sargent_new. */
 #define VAR_DEFAULT_K        4
-#define VAR_DEFAULT_M        4
+#define VAR_DEFAULT_M        2       /* spike-and-slab for random effects: null + slab */
 #define VAR_FIXED_MAX_ITER   500
-#define VAR_RANDOM_MAX_ITER  500
+#define VAR_RANDOM_MAX_ITER  100     /* total EM iterations (burn-in + averaging) */
+#define VAR_RANDOM_BURN_IN   40      /* iterations before Polyak-Ruppert averaging starts */
 #define VAR_FIXED_TOL        1e-4
-#define VAR_RANDOM_TOL       1e-4   /* convergence threshold for rel_dsig */
 #define PI_FLOOR             1e-10   /* lower bound on pi/phi_mix to avoid log(0) */
 #define SCORE_CAP            50.0    /* clip tau^2*(A-B)/2 before softmax */
-#define VAR_N_SEGMENTS       50      /* target pruned segment count for Stage 2 */
+#define VAR_N_SEGMENTS       0       /* 0 = no pruning; use all original trees */
 
 /* Map each of the S_orig original trees to one of n_target pruned segments
  * using equal-count binning: segment sp = floor(s * n_target / S_orig). */
@@ -146,10 +146,8 @@ sargent_t *sargent_new(geno_reader_t *gr, tsk_treeseq_t *ts, double *y)
      * Use S_orig (not S_pruned) because v_matvec sums ALL original trees,
      * each contributing ws2[prune_map[s]] * G_s. */
     double seg_scale = vy / ((double)(sg->S_orig > 0 ? sg->S_orig : 1) * fmax(gscale, 1.0));
-    sg->tau2_mix[0] = 0.0;
-    sg->tau2_mix[1] = 0.01  * seg_scale;
-    sg->tau2_mix[2] = 0.1   * seg_scale;
-    sg->tau2_mix[3] = 1.0   * seg_scale;
+    sg->tau2_mix[0] = 0.0;           /* null component */
+    sg->tau2_mix[1] = 1.0 * seg_scale;  /* slab component */
 
     /* Uniform initial responsibilities and proportions */
     for (int m = 0; m < sg->M; m++)
@@ -433,9 +431,8 @@ void var_random(sargent_t *sg, int silent)
     int S      = sg->S;
     int nprobe = sg->nprobe;
 
-    /* Allocate ws2 if needed; initialise to tau2_mix[M-1]/2 so that the
-     * first CG solve sees a non-trivial V and the REML score has the right
-     * sign (positive signal, not dominated by the initialisation bias). */
+    /* Allocate ws2 if needed; initialise to tau2_mix[M-1]/2.
+     * With spike-and-slab (M=2): ws2[s] = rho_init(0.5) * tau2_init = 0.5*tau2. */
     if (!sg->ws2) {
         sg->ws2 = malloc((size_t)S * sizeof(double));
         if (!sg->ws2) { fprintf(stderr, "var_random: out of memory\n"); return; }
@@ -444,10 +441,13 @@ void var_random(sargent_t *sg, int silent)
     }
 
     /* Working arrays */
-    double   *r        = malloc((size_t)n * sizeof(double));
-    double   *r_tilde  = calloc((size_t)n, sizeof(double));
-    double   *A        = malloc((size_t)S * sizeof(double));
-    double   *B        = malloc((size_t)S * sizeof(double));
+    double   *r          = malloc((size_t)n * sizeof(double));
+    double   *r_tilde    = calloc((size_t)n,  sizeof(double));
+    double   *A          = malloc((size_t)S * sizeof(double));
+    double   *B          = malloc((size_t)S * sizeof(double));
+    double   *rho        = malloc((size_t)S * sizeof(double));
+    double   *ws2_accum  = calloc((size_t)S,  sizeof(double));
+    double   *rho_accum  = calloc((size_t)S,  sizeof(double));
 
     tsk_size_t n_nodes   = tsk_treeseq_get_num_nodes(sg->ts);
     double    *work      = malloc(2 * n_nodes * sizeof(double));
@@ -456,7 +456,8 @@ void var_random(sargent_t *sg, int silent)
 
     cg_state_t *cg = cg_state_new(n, NULL);
 
-    if (!r || !r_tilde || !A || !B || !work || !order_buf || !gv || !cg) {
+    if (!r || !r_tilde || !A || !B || !rho || !ws2_accum || !rho_accum ||
+        !work || !order_buf || !gv || !cg) {
         fprintf(stderr, "var_random: out of memory\n");
         goto cleanup;
     }
@@ -488,9 +489,18 @@ void var_random(sargent_t *sg, int silent)
     };
 
     if (!silent)
-        fprintf(stderr, "var_random: using CG-Hutchinson path (n=%d)\n", n);
+        fprintf(stderr, "var_random: spike-and-slab EM (n=%d, S=%d)\n", n, S);
 
-    double old_sigma2 = sg->sigma2;
+    /* Spike-and-slab global parameters */
+    double tau2     = sg->tau2_mix[sg->M - 1];
+    double phi      = sg->phi_mix[sg->M - 1];
+    double old_tau2 = tau2;
+
+    /* Initialise per-segment responsibilities */
+    for (int s = 0; s < S; s++) rho[s] = phi;
+
+    double sigma2_accum = 0.0;
+    int    n_accum      = 0;
 
     for (int iter = 0; iter < VAR_RANDOM_MAX_ITER; iter++) {
 
@@ -509,58 +519,91 @@ void var_random(sargent_t *sg, int silent)
         hutch_trace_all(cg, v_matvec, &vd, sg->ts, sg->hap_to_indiv,
                         n, S, sg->S_orig, sg->prune_map, B, &B_0, &hopts);
 
-        /* --- REML EM update for ws2 ----------------------------------------
-         * Per-segment multiplicative update: ws2[s]_new = ws2[s]_old * A[s] / B[s].
-         * Fixed point: A[s] = B[s] for all s, i.e. each segment's REML score = 0.
-         * ws2 is floored at ws2_floor to prevent collapse; the Hutchinson noise
-         * (~32% per segment with nprobe=10) will keep ws2[s] from reaching exact 0. */
-        double ws2_max   = var_y / fmax(S, 1);
-        double ws2_floor = 1e-12 * ws2_max;
-        double sum_A = 0.0, sum_B = 0.0, ws2_mean_old = 0.0, ws2_mean_new = 0.0;
-        for (int s = 0; s < S; s++) ws2_mean_old += sg->ws2[s];
-        ws2_mean_old /= fmax(S, 1);
-
+        /* E-step: rho[s] = P(z_s=1 | data) via mean-field REML score.
+         * score_s = logit(phi) + tau2/2 * (A[s]-B[s]) where A[s]-B[s] is the
+         * REML gradient; positive for trees with heritable signal. */
+        double logit_phi = log(phi / (1.0 - phi));
         for (int s = 0; s < S; s++) {
-            sum_A += A[s];
-            sum_B += B[s];
-            if (B[s] > 1e-30)
-                sg->ws2[s] *= A[s] / B[s];
-            if (sg->ws2[s] < ws2_floor) sg->ws2[s] = ws2_floor;
-            if (sg->ws2[s] > ws2_max)   sg->ws2[s] = ws2_max;
-            ws2_mean_new += sg->ws2[s];
+            double score = logit_phi + 0.5 * tau2 * (A[s] - B[s]);
+            score = fmax(-SCORE_CAP, fmin(SCORE_CAP, score));
+            rho[s] = 1.0 / (1.0 + exp(-score));
         }
-        ws2_mean_new /= fmax(S, 1);
 
-        double max_rel_ws2 = fabs(ws2_mean_new - ws2_mean_old) /
-                             (ws2_mean_old + 1e-30);
+        /* M-step: tau2 — global pooled REML EM using rho-weighted A and B */
+        double rho_A = 0.0, rho_B = 0.0;
+        for (int s = 0; s < S; s++) {
+            rho_A += rho[s] * A[s];
+            rho_B += rho[s] * B[s];
+        }
+        if (rho_B > 1e-30 && rho_A > 0.0)
+            tau2 *= rho_A / rho_B;
+        if (tau2 > var_y)   tau2 = var_y;
+        if (tau2 < 1e-30)   tau2 = 1e-30;
 
-        /* --- Update sigma2 (REML EM step) ---------------------------------- */
+        /* M-step: phi — proportion of non-null segments */
+        double rho_sum = 0.0;
+        for (int s = 0; s < S; s++) rho_sum += rho[s];
+        phi = rho_sum / S;
+        phi = fmax(1.0 / S, fmin(1.0 - 1.0 / S, phi));
+
+        /* Update ws2[s] = rho[s] * tau2 for next V solve */
+        double ws2_mean = 0.0;
+        for (int s = 0; s < S; s++) {
+            sg->ws2[s] = rho[s] * tau2;
+            ws2_mean += sg->ws2[s];
+        }
+        ws2_mean /= S;
+
+        /* sigma2 update (standard REML EM) */
         if (B_0 > 0.0) {
             sg->sigma2 *= A_0 / B_0;
             if (sg->sigma2 < 1e-10 * var_y) sg->sigma2 = 1e-10 * var_y;
             if (sg->sigma2 > var_y)         sg->sigma2 = var_y;
         }
 
-        sg->h2_random = (var_y > 0.0) ? fmax(0.0, 1.0 - sg->sigma2/var_y - sg->h2_fixed) : 0.0;
-        sg->h2        = sg->h2_fixed + sg->h2_random;
+        double h2_rand_curr = (var_y > 0.0) ?
+            fmax(0.0, 1.0 - sg->sigma2/var_y - sg->h2_fixed) : 0.0;
+        double rel_dtau2 = fabs(tau2 - old_tau2) / (old_tau2 + 1e-15);
 
-        double rel_change = fabs(sg->sigma2 - old_sigma2) / (old_sigma2 + 1e-15);
+        /* Polyak-Ruppert accumulation after burn-in */
+        if (iter >= VAR_RANDOM_BURN_IN) {
+            sigma2_accum += sg->sigma2;
+            for (int s = 0; s < S; s++) {
+                ws2_accum[s]  += sg->ws2[s];
+                rho_accum[s]  += rho[s];
+            }
+            n_accum++;
+        }
 
         if (!silent) {
             fprintf(stderr, "var_random iter %3d: sigma2=%.4f  h2_rand=%.4f"
-                    "  ws2_mean=%.3e  sumA=%.3e  sumB=%.3e"
-                    "  B0=%.2e  rel_dsig=%.2e  rel_ws2=%.2e\n",
-                    iter + 1, sg->sigma2, sg->h2_random,
-                    ws2_mean_new, sum_A, sum_B,
-                    B_0, rel_change, max_rel_ws2);
+                    "  phi=%.4f  tau2=%.3e  ws2_mean=%.3e"
+                    "  B0=%.2e  rel_dtau2=%.2e%s\n",
+                    iter + 1, sg->sigma2, h2_rand_curr,
+                    phi, tau2, ws2_mean, B_0, rel_dtau2,
+                    iter >= VAR_RANDOM_BURN_IN ? " [avg]" : "");
         }
 
-        old_sigma2 = sg->sigma2;
-        /* Convergence: sigma2 stable for at least 2 consecutive iterations.
-         * ws2 oscillates at the Hutchinson noise floor and is not checked here. */
-        if (iter >= 1 && rel_change < VAR_RANDOM_TOL)
-            break;
+        old_tau2 = tau2;
     }
+
+    /* Apply Polyak-Ruppert averages to sg fields */
+    if (n_accum > 0) {
+        sg->sigma2 = sigma2_accum / n_accum;
+        for (int s = 0; s < S; s++) {
+            sg->ws2[s]          = ws2_accum[s] / n_accum;
+            sg->rho[s * 2 + 0]  = 1.0 - rho_accum[s] / n_accum;  /* null */
+            sg->rho[s * 2 + 1]  = rho_accum[s] / n_accum;         /* non-null */
+        }
+    }
+
+    sg->h2_random = (var_y > 0.0) ?
+        fmax(0.0, 1.0 - sg->sigma2/var_y - sg->h2_fixed) : 0.0;
+    sg->h2 = sg->h2_fixed + sg->h2_random;
+
+    /* Store converged tau2 and phi back into sg for inspection/output */
+    sg->tau2_mix[sg->M - 1] = tau2;
+    sg->phi_mix[sg->M - 1]  = phi;
 
 cleanup:
     cg_state_free(cg);
@@ -568,6 +611,9 @@ cleanup:
     free(r_tilde);
     free(A);
     free(B);
+    free(rho);
+    free(ws2_accum);
+    free(rho_accum);
     free(work);
     free(order_buf);
     free(gv);
