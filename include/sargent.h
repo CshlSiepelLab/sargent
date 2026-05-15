@@ -51,6 +51,13 @@ typedef struct {
      * derived from the tree sequence metadata rather than assumed from rank/2. */
     int *hap_to_indiv;
 
+    /* Tree pruning for Stage 2.
+     * Adjacent local trees are coarsened into S pruned segments before
+     * inference.  S_orig is the original tree count; prune_map[s_orig]
+     * gives the pruned segment index for original tree s_orig. */
+    int  S_orig;       /* original (unpruned) tree count */
+    int *prune_map;    /* prune_map[s_orig] = s_pruned; length S_orig; owned */
+
     /* Tuning parameters for Stage 2. */
     int nprobe;    /* Hutchinson probe count; default 10 */
 } sargent_t;

@@ -49,6 +49,10 @@ typedef struct {
  * B:            output array, length S (caller-allocated, overwritten).
  * B0_out:       if non-NULL, receives tr(V^{-1}) at no extra cost.
  * opts:         tuning options; NULL for defaults (nprobe=50, Rademacher). */
+/* S is the pruned segment count (length of B).
+ * S_orig is the original tree count (for tskit iteration).
+ * prune_map[s_orig] = s_pruned; only the representative (first) tree of each
+ * pruned segment has its G_s MVP evaluated. */
 void hutch_trace_all(cg_state_t          *cg,
                      cg_matvec_fn         Av,
                      void                *av_data,
@@ -56,6 +60,8 @@ void hutch_trace_all(cg_state_t          *cg,
                      const int           *hap_to_indiv,
                      int                  n,
                      int                  S,
+                     int                  S_orig,
+                     const int           *prune_map,
                      double              *B,
                      double              *B0_out,
                      const hutch_opts_t  *opts);
@@ -72,4 +78,6 @@ void hutch_accumulate(const double        *eps,
                       const int           *hap_to_indiv,
                       double              *B,
                       int                  S,
+                      int                  S_orig,
+                      const int           *prune_map,
                       double              *B0_out);

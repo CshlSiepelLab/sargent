@@ -24,11 +24,31 @@
 #define VAR_DEFAULT_K        4
 #define VAR_DEFAULT_M        4
 #define VAR_FIXED_MAX_ITER   500
-#define VAR_RANDOM_MAX_ITER  200
+#define VAR_RANDOM_MAX_ITER  500
 #define VAR_FIXED_TOL        1e-4
-#define VAR_RANDOM_TOL       1e-3   /* convergence threshold for rel_dsig */
+#define VAR_RANDOM_TOL       1e-4   /* convergence threshold for rel_dsig */
 #define PI_FLOOR             1e-10   /* lower bound on pi/phi_mix to avoid log(0) */
 #define SCORE_CAP            50.0    /* clip tau^2*(A-B)/2 before softmax */
+#define VAR_N_SEGMENTS       50      /* target pruned segment count for Stage 2 */
+
+/* Map each of the S_orig original trees to one of n_target pruned segments
+ * using equal-count binning: segment sp = floor(s * n_target / S_orig). */
+static int *build_prune_map(int S_orig, int n_target)
+{
+    if (S_orig <= 0) {
+        int *pm = malloc(sizeof(int));
+        return pm;
+    }
+    int *pm = malloc((size_t)S_orig * sizeof(int));
+    if (!pm) return NULL;
+    if (n_target <= 0 || S_orig <= n_target) {
+        for (int s = 0; s < S_orig; s++) pm[s] = s;
+    } else {
+        for (int s = 0; s < S_orig; s++)
+            pm[s] = (int)((long long)s * n_target / S_orig);
+    }
+    return pm;
+}
 
 /* -------------------------------------------------------------------------
  * sargent_new / sargent_free
@@ -53,7 +73,16 @@ sargent_t *sargent_new(geno_reader_t *gr, tsk_treeseq_t *ts, double *y)
     sg->ts = ts;
     sg->n  = gr->n_samples;
     sg->p  = gr->n_variants;
-    sg->S  = (int)tsk_treeseq_get_num_trees(ts);
+    sg->S_orig = (int)tsk_treeseq_get_num_trees(ts);
+
+    sg->prune_map = build_prune_map(sg->S_orig, VAR_N_SEGMENTS);
+    if (!sg->prune_map) { free(sg); return NULL; }
+    int S_pruned = (sg->S_orig > 0) ? sg->prune_map[sg->S_orig - 1] + 1 : 0;
+    sg->S = S_pruned;
+
+    if (sg->S_orig != sg->S)
+        fprintf(stderr, "sargent: pruned %d trees → %d segments\n",
+                sg->S_orig, sg->S);
 
     sg->y = malloc((size_t)sg->n * sizeof(double));
     if (!sg->y) { free(sg); return NULL; }
@@ -113,7 +142,10 @@ sargent_t *sargent_new(geno_reader_t *gr, tsk_treeseq_t *ts, double *y)
     /* Estimate E[tr(G_s)/n] so tau2_mix is in phenotype-variance units
      * regardless of branch-length scale (e.g. generations vs coalescent). */
     double gscale    = estimate_g_scale(ts, sg->hap_to_indiv, sg->n, 0u);
-    double seg_scale = vy / ((double)(sg->S > 0 ? sg->S : 1) * fmax(gscale, 1.0));
+    /* Calibrate tau2_mix so total initial random effect ≈ vy.
+     * Use S_orig (not S_pruned) because v_matvec sums ALL original trees,
+     * each contributing ws2[prune_map[s]] * G_s. */
+    double seg_scale = vy / ((double)(sg->S_orig > 0 ? sg->S_orig : 1) * fmax(gscale, 1.0));
     sg->tau2_mix[0] = 0.0;
     sg->tau2_mix[1] = 0.01  * seg_scale;
     sg->tau2_mix[2] = 0.1   * seg_scale;
@@ -143,6 +175,7 @@ void sargent_free(sargent_t *sg)
     free(sg->phi_mix);
     free(sg->rho);
     free(sg->hap_to_indiv);
+    free(sg->prune_map);
     free(sg);
 }
 
@@ -318,10 +351,12 @@ void var_fixed(sargent_t *sg, int silent)
  * Makes one sequential pass over the tree sequence. */
 typedef struct {
     const tsk_treeseq_t *ts;
-    const double        *ws2;        /* E[w_s^2] for each tree, length S */
+    const double        *ws2;        /* E[w_s^2] for each pruned segment, length S */
     double               sigma2;
     int                  n;
-    int                  S;
+    int                  S;          /* pruned segment count (length of ws2) */
+    int                  S_orig;     /* original tree count (for tskit iteration) */
+    const int           *prune_map;  /* length S_orig: orig tree → pruned seg */
     const int           *hap_to_indiv;
     double              *work;      /* 2 * n_nodes scratch (borrowed) */
     tsk_id_t            *order_buf; /* n_nodes scratch (borrowed) */
@@ -348,41 +383,44 @@ static void v_matvec(double *out, const double *in, int n, void *data)
         return;
     }
     int s = 0;
-    for (ret = tsk_tree_first(&tree); ret == TSK_TREE_OK && s < d->S;
+    for (ret = tsk_tree_first(&tree); ret == TSK_TREE_OK && s < d->S_orig;
          ret = tsk_tree_next(&tree), s++) {
-        if (d->ws2[s] == 0.0) continue;
+        int sp = d->prune_map[s];
+        if (d->ws2[sp] == 0.0) continue;
         tree_cov_matvec(d->gv, in, d->n, &tree, d->work, d->order_buf, d->hap_to_indiv);
-        for (int i = 0; i < n; i++) out[i] += d->ws2[s] * d->gv[i];
+        for (int i = 0; i < n; i++) out[i] += d->ws2[sp] * d->gv[i];
     }
     if (ret < 0)
         fprintf(stderr, "v_matvec: tree error: %s\n", tsk_strerror(ret));
     tsk_tree_free(&tree);
 }
 
-/* Compute A[s] = r_tilde^T G_s r_tilde for all S trees in one pass. */
+/* Compute A[sp] = r_tilde^T G_sp r_tilde for all S pruned segments.
+ * Iterates S_orig original trees; only the representative (first) tree of
+ * each pruned segment is evaluated. */
 static void compute_quad_all(const tsk_treeseq_t *ts, const int *hap_to_indiv,
-                              int n, int S,
+                              int n, int S, int S_orig, const int *prune_map,
                               const double *r_tilde,
                               double *A,
                               double *work, tsk_id_t *order_buf, double *gv)
 {
+    for (int sp = 0; sp < S; sp++) A[sp] = 0.0;
+
     tsk_tree_t tree;
     int ret = tsk_tree_init(&tree, ts, 0);
     if (ret < 0) {
         fprintf(stderr, "compute_quad_all: tsk_tree_init: %s\n", tsk_strerror(ret));
-        for (int s = 0; s < S; s++) A[s] = 0.0;
         return;
     }
     int s = 0;
-    for (ret = tsk_tree_first(&tree); ret == TSK_TREE_OK && s < S;
+    for (ret = tsk_tree_first(&tree); ret == TSK_TREE_OK && s < S_orig;
          ret = tsk_tree_next(&tree), s++) {
+        int sp = prune_map[s];
         tree_cov_matvec(gv, r_tilde, n, &tree, work, order_buf, hap_to_indiv);
         double a = 0.0;
         for (int i = 0; i < n; i++) a += r_tilde[i] * gv[i];
-        A[s] = a;
+        A[sp] += a;   /* accumulate all trees in bin */
     }
-    /* zero any remaining entries if tree sequence shorter than expected */
-    for (; s < S; s++) A[s] = 0.0;
     if (ret < 0)
         fprintf(stderr, "compute_quad_all: tree error: %s\n", tsk_strerror(ret));
     tsk_tree_free(&tree);
@@ -393,13 +431,16 @@ void var_random(sargent_t *sg, int silent)
 {
     int n      = sg->n;
     int S      = sg->S;
-    int M      = sg->M;
     int nprobe = sg->nprobe;
 
-    /* Allocate ws2 if needed; start from zero (will be overwritten on iter 0) */
+    /* Allocate ws2 if needed; initialise to tau2_mix[M-1]/2 so that the
+     * first CG solve sees a non-trivial V and the REML score has the right
+     * sign (positive signal, not dominated by the initialisation bias). */
     if (!sg->ws2) {
-        sg->ws2 = calloc((size_t)S, sizeof(double));
+        sg->ws2 = malloc((size_t)S * sizeof(double));
         if (!sg->ws2) { fprintf(stderr, "var_random: out of memory\n"); return; }
+        double ws2_init = sg->tau2_mix[sg->M - 1] * 0.5;
+        for (int s = 0; s < S; s++) sg->ws2[s] = ws2_init;
     }
 
     /* Working arrays */
@@ -407,8 +448,6 @@ void var_random(sargent_t *sg, int silent)
     double   *r_tilde  = calloc((size_t)n, sizeof(double));
     double   *A        = malloc((size_t)S * sizeof(double));
     double   *B        = malloc((size_t)S * sizeof(double));
-    double   *log_rho  = malloc((size_t)M * sizeof(double));
-    double   *phi_sum  = malloc((size_t)M * sizeof(double));
 
     tsk_size_t n_nodes   = tsk_treeseq_get_num_nodes(sg->ts);
     double    *work      = malloc(2 * n_nodes * sizeof(double));
@@ -417,8 +456,7 @@ void var_random(sargent_t *sg, int silent)
 
     cg_state_t *cg = cg_state_new(n, NULL);
 
-    if (!r || !r_tilde || !A || !B || !log_rho || !phi_sum ||
-        !work || !order_buf || !gv || !cg) {
+    if (!r || !r_tilde || !A || !B || !work || !order_buf || !gv || !cg) {
         fprintf(stderr, "var_random: out of memory\n");
         goto cleanup;
     }
@@ -441,7 +479,8 @@ void var_random(sargent_t *sg, int silent)
 
     v_matvec_data_t vd = {
         .ts = sg->ts, .ws2 = sg->ws2, .sigma2 = sg->sigma2,
-        .n = n, .S = S, .hap_to_indiv = sg->hap_to_indiv,
+        .n = n, .S = S, .S_orig = sg->S_orig, .prune_map = sg->prune_map,
+        .hap_to_indiv = sg->hap_to_indiv,
         .work = work, .order_buf = order_buf, .gv = gv,
     };
     hutch_opts_t hopts = {
@@ -464,44 +503,36 @@ void var_random(sargent_t *sg, int silent)
         A_0 = 0.0;
         for (int i = 0; i < n; i++) A_0 += r_tilde[i] * r_tilde[i];
 
-        compute_quad_all(sg->ts, sg->hap_to_indiv, n, S,
+        compute_quad_all(sg->ts, sg->hap_to_indiv, n, S, sg->S_orig, sg->prune_map,
                          r_tilde, A, work, order_buf, gv);
 
         hutch_trace_all(cg, v_matvec, &vd, sg->ts, sg->hap_to_indiv,
-                        n, S, B, &B_0, &hopts);
+                        n, S, sg->S_orig, sg->prune_map, B, &B_0, &hopts);
 
-        /* --- Update rho_sm, ws2[s], phi_mix -------------------------------- */
-        memset(phi_sum, 0, (size_t)M * sizeof(double));
-        double ws2_ref = sg->tau2_mix[M - 1] + 1e-30;
-        double max_rel_ws2 = 0.0;
+        /* --- REML EM update for ws2 ----------------------------------------
+         * Per-segment multiplicative update: ws2[s]_new = ws2[s]_old * A[s] / B[s].
+         * Fixed point: A[s] = B[s] for all s, i.e. each segment's REML score = 0.
+         * ws2 is floored at ws2_floor to prevent collapse; the Hutchinson noise
+         * (~32% per segment with nprobe=10) will keep ws2[s] from reaching exact 0. */
+        double ws2_max   = var_y / fmax(S, 1);
+        double ws2_floor = 1e-12 * ws2_max;
+        double sum_A = 0.0, sum_B = 0.0, ws2_mean_old = 0.0, ws2_mean_new = 0.0;
+        for (int s = 0; s < S; s++) ws2_mean_old += sg->ws2[s];
+        ws2_mean_old /= fmax(S, 1);
 
         for (int s = 0; s < S; s++) {
-            double lmax = -1e300;
-            for (int m = 0; m < M; m++) {
-                double score = sg->tau2_mix[m] * 0.5 * (A[s] - B[s]);
-                score = fmax(-SCORE_CAP, fmin(SCORE_CAP, score));
-                log_rho[m] = log(sg->phi_mix[m] + PI_FLOOR) + score;
-                if (log_rho[m] > lmax) lmax = log_rho[m];
-            }
-            double sum = 0.0;
-            for (int m = 0; m < M; m++) {
-                sg->rho[s * M + m] = exp(log_rho[m] - lmax);
-                sum += sg->rho[s * M + m];
-            }
-            double ws2_old = sg->ws2[s];
-            double ws2_new = 0.0;
-            for (int m = 0; m < M; m++) {
-                sg->rho[s * M + m] /= sum;
-                ws2_new += sg->rho[s * M + m] * sg->tau2_mix[m];
-                phi_sum[m] += sg->rho[s * M + m];
-            }
-            sg->ws2[s] = ws2_new;
-            double rel = fabs(ws2_new - ws2_old) / (ws2_old + ws2_ref);
-            if (rel > max_rel_ws2) max_rel_ws2 = rel;
+            sum_A += A[s];
+            sum_B += B[s];
+            if (B[s] > 1e-30)
+                sg->ws2[s] *= A[s] / B[s];
+            if (sg->ws2[s] < ws2_floor) sg->ws2[s] = ws2_floor;
+            if (sg->ws2[s] > ws2_max)   sg->ws2[s] = ws2_max;
+            ws2_mean_new += sg->ws2[s];
         }
+        ws2_mean_new /= fmax(S, 1);
 
-        for (int m = 0; m < M; m++)
-            sg->phi_mix[m] = phi_sum[m] / S;
+        double max_rel_ws2 = fabs(ws2_mean_new - ws2_mean_old) /
+                             (ws2_mean_old + 1e-30);
 
         /* --- Update sigma2 (REML EM step) ---------------------------------- */
         if (B_0 > 0.0) {
@@ -516,22 +547,17 @@ void var_random(sargent_t *sg, int silent)
         double rel_change = fabs(sg->sigma2 - old_sigma2) / (old_sigma2 + 1e-15);
 
         if (!silent) {
-            /* count non-null trees for diagnostics */
-            int n_nonnull = 0;
-            for (int s = 0; s < S; s++) if (sg->ws2[s] != 0.0) n_nonnull++;
             fprintf(stderr, "var_random iter %3d: sigma2=%.4f  h2_rand=%.4f"
-                    "  max_rel_ws2=%.2e  B0=%.2e  rel_dsig=%.2e"
-                    "  nonnull=%d  phi=[",
+                    "  ws2_mean=%.3e  sumA=%.3e  sumB=%.3e"
+                    "  B0=%.2e  rel_dsig=%.2e  rel_ws2=%.2e\n",
                     iter + 1, sg->sigma2, sg->h2_random,
-                    max_rel_ws2, B_0, rel_change, n_nonnull);
-            for (int m = 0; m < M; m++)
-                fprintf(stderr, " %.3f", sg->phi_mix[m]);
-            fprintf(stderr, " ]\n");
+                    ws2_mean_new, sum_A, sum_B,
+                    B_0, rel_change, max_rel_ws2);
         }
 
         old_sigma2 = sg->sigma2;
         /* Convergence: sigma2 stable for at least 2 consecutive iterations.
-         * ws2 oscillates at the Hutchinson noise floor (~3%) and is not checked. */
+         * ws2 oscillates at the Hutchinson noise floor and is not checked here. */
         if (iter >= 1 && rel_change < VAR_RANDOM_TOL)
             break;
     }
@@ -542,8 +568,6 @@ cleanup:
     free(r_tilde);
     free(A);
     free(B);
-    free(log_rho);
-    free(phi_sum);
     free(work);
     free(order_buf);
     free(gv);
