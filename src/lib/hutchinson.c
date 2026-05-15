@@ -16,7 +16,10 @@
 #include "hutchinson.h"
 #include "geno.h"       /* tree_cov_matvec */
 
-#define HUTCH_DEFAULT_NPROBE 50
+#define HUTCH_DEFAULT_NPROBE    10
+#define HUTCH_DEFAULT_PROBE_TOL 1e-3  /* CG tolerance for probe solves; coarser than
+                                         main solve because probe statistical error
+                                         (O(1/sqrt(nprobe))) dominates anyway */
 
 static void fill_rademacher(double *v, int n, unsigned int *rng_state)
 {
@@ -200,13 +203,16 @@ void hutch_trace_all(cg_state_t *cg, cg_matvec_fn Av, void *av_data,
 {
     /* resolve options */
     hutch_opts_t o = {
-        .nprobe       = HUTCH_DEFAULT_NPROBE,
-        .batch_size   = 0,
-        .use_gaussian = 0,
-        .seed         = 0,
+        .nprobe        = HUTCH_DEFAULT_NPROBE,
+        .batch_size    = 0,
+        .use_gaussian  = 0,
+        .seed          = 0,
+        .probe_cg_tol  = HUTCH_DEFAULT_PROBE_TOL,
+        .probe_cg_max  = 0,
     };
     if (opts) o = *opts;
-    if (o.nprobe <= 0) o.nprobe = HUTCH_DEFAULT_NPROBE;
+    if (o.nprobe      <= 0)   o.nprobe      = HUTCH_DEFAULT_NPROBE;
+    if (o.probe_cg_tol <= 0.0) o.probe_cg_tol = HUTCH_DEFAULT_PROBE_TOL;
 
     int batch = (o.batch_size > 0 && o.batch_size < o.nprobe)
                 ? o.batch_size : o.nprobe;
@@ -214,6 +220,15 @@ void hutch_trace_all(cg_state_t *cg, cg_matvec_fn Av, void *av_data,
     unsigned int rng = (o.seed != 0) ? o.seed : 0x87654321u;
     /* mix in current rand() state if seed is 0 */
     if (o.seed == 0) rng ^= (unsigned int)rand();
+
+    /* Use a separate CG state with a looser tolerance for the probe solves.
+     * Statistical error (O(1/sqrt(nprobe))) dominates over the ~1% CG bias. */
+    cg_opts_t probe_cg_opts = {
+        .tol      = o.probe_cg_tol,
+        .abs_tol  = 0.0,
+        .max_iter = (o.probe_cg_max > 0) ? o.probe_cg_max : n,
+    };
+    cg_state_t *probe_cg = cg_state_new(n, &probe_cg_opts);
 
     /* allocate probe and solution matrices for one batch */
     double *eps_buf = malloc((size_t)batch * n * sizeof(double));
@@ -224,7 +239,7 @@ void hutch_trace_all(cg_state_t *cg, cg_matvec_fn Av, void *av_data,
     tsk_id_t  *order_buf = malloc(n_nodes * sizeof(tsk_id_t));
     double    *gv_buf    = malloc((size_t)n * sizeof(double));
 
-    if (!eps_buf || !z_buf || !tree_work || !order_buf || !gv_buf) {
+    if (!probe_cg || !eps_buf || !z_buf || !tree_work || !order_buf || !gv_buf) {
         fprintf(stderr, "hutch_trace_all: out of memory\n");
         goto cleanup;
     }
@@ -237,7 +252,7 @@ void hutch_trace_all(cg_state_t *cg, cg_matvec_fn Av, void *av_data,
         int cur = (remaining < batch) ? remaining : batch;
         double scale = 1.0 / o.nprobe;  /* normalise over total probes */
 
-        run_batch(cg, Av, av_data, ts, hap_to_indiv, n, S,
+        run_batch(probe_cg, Av, av_data, ts, hap_to_indiv, n, S,
                   cur, o.use_gaussian, &rng,
                   eps_buf, z_buf, tree_work, order_buf, gv_buf,
                   B, B0_out, scale);
@@ -246,6 +261,7 @@ void hutch_trace_all(cg_state_t *cg, cg_matvec_fn Av, void *av_data,
     }
 
 cleanup:
+    cg_state_free(probe_cg);
     free(eps_buf);
     free(z_buf);
     free(tree_work);

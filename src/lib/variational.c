@@ -25,8 +25,8 @@
 #define VAR_DEFAULT_M        4
 #define VAR_FIXED_MAX_ITER   500
 #define VAR_RANDOM_MAX_ITER  200
-#define VAR_FIXED_TOL        1e-6
-#define VAR_RANDOM_TOL       1e-4
+#define VAR_FIXED_TOL        1e-4
+#define VAR_RANDOM_TOL       1e-3   /* convergence threshold for rel_dsig */
 #define PI_FLOOR             1e-10   /* lower bound on pi/phi_mix to avoid log(0) */
 #define SCORE_CAP            50.0    /* clip tau^2*(A-B)/2 before softmax */
 
@@ -59,8 +59,15 @@ sargent_t *sargent_new(geno_reader_t *gr, tsk_treeseq_t *ts, double *y)
     if (!sg->y) { free(sg); return NULL; }
     memcpy(sg->y, y, (size_t)sg->n * sizeof(double));
 
+    /* Center phenotype: LMM/BayesR are translation-invariant only when y is
+     * zero-mean.  Subtract sample mean so the intercept is implicit. */
+    double ymean = 0.0;
+    for (int i = 0; i < sg->n; i++) ymean += sg->y[i];
+    ymean /= sg->n;
+    for (int i = 0; i < sg->n; i++) sg->y[i] -= ymean;
+
     /* Initialise residual variance from data */
-    double vy = vec_var(y, sg->n);
+    double vy = vec_var(sg->y, sg->n);
     sg->sigma2 = vy;
 
     /* BayesR-style mixture prior: null + three effect-size classes.
@@ -82,8 +89,19 @@ sargent_t *sargent_new(geno_reader_t *gr, tsk_treeseq_t *ts, double *y)
         sg->pi_mix[k] = 1.0 / sg->K;
 
     /* Segment-weight mixture prior.
-     * tau2_mix is scaled by vy/S so that the total random-effect variance
-     * (if all S segments are in the largest component) is of order vy. */
+     * tau2_mix is scaled so that the total random-effect variance
+     * (if all S segments are in the largest component) is of order vy.
+     *
+     * G_s entries are in branch-length units (e.g. generations), so we
+     * calibrate by estimating E[tr(G_s)/n] via a single Hutchinson probe.
+     * This makes tau2_mix independent of the branch-length scale. */
+    /* Build diploid mapping first — needed for both G_s tree walks below. */
+    sg->hap_to_indiv = tsk_build_hap_to_indiv(ts);
+    if (!sg->hap_to_indiv) {
+        sargent_free(sg);
+        return NULL;
+    }
+
     sg->M = VAR_DEFAULT_M;
     sg->tau2_mix = malloc((size_t)sg->M * sizeof(double));
     sg->phi_mix  = malloc((size_t)sg->M * sizeof(double));
@@ -92,7 +110,10 @@ sargent_t *sargent_new(geno_reader_t *gr, tsk_treeseq_t *ts, double *y)
         sargent_free(sg);
         return NULL;
     }
-    double seg_scale = vy / (sg->S > 0 ? sg->S : 1);
+    /* Estimate E[tr(G_s)/n] so tau2_mix is in phenotype-variance units
+     * regardless of branch-length scale (e.g. generations vs coalescent). */
+    double gscale    = estimate_g_scale(ts, sg->hap_to_indiv, sg->n, 0u);
+    double seg_scale = vy / ((double)(sg->S > 0 ? sg->S : 1) * fmax(gscale, 1.0));
     sg->tau2_mix[0] = 0.0;
     sg->tau2_mix[1] = 0.01  * seg_scale;
     sg->tau2_mix[2] = 0.1   * seg_scale;
@@ -105,11 +126,7 @@ sargent_t *sargent_new(geno_reader_t *gr, tsk_treeseq_t *ts, double *y)
         for (int m = 0; m < sg->M; m++)
             sg->rho[s * sg->M + m] = 1.0 / sg->M;
 
-    sg->hap_to_indiv = tsk_build_hap_to_indiv(ts);
-    if (!sg->hap_to_indiv) {
-        sargent_free(sg);
-        return NULL;
-    }
+    sg->nprobe = 10;   /* default; override via sg->nprobe before calling var_random */
 
     return sg;
 }
@@ -181,6 +198,7 @@ void var_fixed(sargent_t *sg, int silent)
     }
 
     double var_y = vec_var(sg->y, n);
+    double old_sigma2 = sg->sigma2;
 
     for (int iter = 0; iter < VAR_FIXED_MAX_ITER; iter++) {
 
@@ -206,19 +224,21 @@ void var_fixed(sargent_t *sg, int silent)
             for (int i = 0; i < n; i++) xr += g[i] * r[i];
             double t_j = xr / sg->sigma2;
 
-            /* Log unnormalised responsibilities.
-             * For component k: log γ_jk ∝ log π_k + log N(t_j; 0, u_bar σ_k² + 1).
-             * Constant -0.5 log(2π) is dropped (cancels in normalisation).
-             * Null component (σ_k² = 0): log N(t_j; 0, 1) = -0.5 t_j². */
+            /* Log unnormalised responsibilities (Wakefield ABF form).
+             * z_j = t_j / sqrt(u_bar) is the standardised z-score (~N(0,1) under null).
+             * Null  (sk²=0): log γ ∝ log π_k − ½ z_j²
+             * Other (sk²>0): log γ ∝ log π_k − ½(log s_k + z_j²/s_k)
+             * where s_k = u_bar·σ_k² + 1.  Constant -½ log(2π) cancels. */
+            double z_sq = t_j * t_j / u_bar;  /* ~chi2(1) under null */
             double lmax = -1e300;
             for (int k = 0; k < K; k++) {
                 double sk2 = sg->sigma2_mix[k];
                 double log_pi_k = log(sg->pi_mix[k] + PI_FLOOR);
                 if (sk2 == 0.0) {
-                    log_g[k] = log_pi_k - 0.5 * t_j * t_j;
+                    log_g[k] = log_pi_k - 0.5 * z_sq;
                 } else {
                     double s_k = u_bar * sk2 + 1.0;
-                    log_g[k] = log_pi_k - 0.5 * (log(s_k) + t_j * t_j / s_k);
+                    log_g[k] = log_pi_k - 0.5 * (log(s_k) + z_sq / s_k);
                 }
                 if (log_g[k] > lmax) lmax = log_g[k];
             }
@@ -269,16 +289,18 @@ void var_fixed(sargent_t *sg, int silent)
         /* Update h2_fixed: fraction of phenotypic variance explained by X β̂ */
         sg->h2_fixed  = (var_y > 0.0) ? 1.0 - sg->sigma2 / var_y : 0.0;
 
+        double rel_dsig = fabs(sg->sigma2 - old_sigma2) / (old_sigma2 + 1e-15);
         if (!silent) {
             fprintf(stderr, "var_fixed iter %3d: max_delta=%.2e  sigma2=%.4f"
-                    "  h2_fixed=%.4f  pi=[",
-                    iter + 1, max_delta, sg->sigma2, sg->h2_fixed);
+                    "  h2_fixed=%.4f  rel_dsig=%.2e  pi=[",
+                    iter + 1, max_delta, sg->sigma2, sg->h2_fixed, rel_dsig);
             for (int k = 0; k < K; k++)
                 fprintf(stderr, " %.3f", sg->pi_mix[k]);
             fprintf(stderr, " ]\n");
         }
 
-        if (max_delta < VAR_FIXED_TOL) break;
+        old_sigma2 = sg->sigma2;
+        if (rel_dsig < VAR_FIXED_TOL) break;
     }
 
     free(g);
@@ -311,6 +333,13 @@ static void v_matvec(double *out, const double *in, int n, void *data)
     v_matvec_data_t *d = data;
 
     for (int i = 0; i < n; i++) out[i] = d->sigma2 * in[i];
+
+    /* Skip tree iteration entirely when all segment weights are zero */
+    int has_random = 0;
+    for (int s = 0; s < d->S; s++) {
+        if (d->ws2[s] != 0.0) { has_random = 1; break; }
+    }
+    if (!has_random) return;
 
     tsk_tree_t tree;
     int ret = tsk_tree_init(&tree, d->ts, 0);
@@ -359,11 +388,13 @@ static void compute_quad_all(const tsk_treeseq_t *ts, const int *hap_to_indiv,
     tsk_tree_free(&tree);
 }
 
+
 void var_random(sargent_t *sg, int silent)
 {
-    int n = sg->n;
-    int S = sg->S;
-    int M = sg->M;
+    int n      = sg->n;
+    int S      = sg->S;
+    int M      = sg->M;
+    int nprobe = sg->nprobe;
 
     /* Allocate ws2 if needed; start from zero (will be overwritten on iter 0) */
     if (!sg->ws2) {
@@ -373,14 +404,14 @@ void var_random(sargent_t *sg, int silent)
 
     /* Working arrays */
     double   *r        = malloc((size_t)n * sizeof(double));
-    double   *r_tilde  = calloc((size_t)n, sizeof(double)); /* warm-start: keep between iters */
+    double   *r_tilde  = calloc((size_t)n, sizeof(double));
     double   *A        = malloc((size_t)S * sizeof(double));
     double   *B        = malloc((size_t)S * sizeof(double));
     double   *log_rho  = malloc((size_t)M * sizeof(double));
     double   *phi_sum  = malloc((size_t)M * sizeof(double));
 
-    tsk_size_t n_nodes  = tsk_treeseq_get_num_nodes(sg->ts);
-    double    *work     = malloc(2 * n_nodes * sizeof(double));
+    tsk_size_t n_nodes   = tsk_treeseq_get_num_nodes(sg->ts);
+    double    *work      = malloc(2 * n_nodes * sizeof(double));
     tsk_id_t  *order_buf = malloc(n_nodes * sizeof(tsk_id_t));
     double    *gv        = malloc((size_t)n * sizeof(double));
 
@@ -408,54 +439,50 @@ void var_random(sargent_t *sg, int silent)
 
     double var_y = vec_var(sg->y, n);
 
-    /* V matvec callback data — ws2 pointer is live (updated in place) */
     v_matvec_data_t vd = {
         .ts = sg->ts, .ws2 = sg->ws2, .sigma2 = sg->sigma2,
         .n = n, .S = S, .hap_to_indiv = sg->hap_to_indiv,
         .work = work, .order_buf = order_buf, .gv = gv,
     };
-
     hutch_opts_t hopts = {
-        .nprobe = 50, .batch_size = 0, .use_gaussian = 0, .seed = 0,
+        .nprobe = nprobe, .batch_size = 0, .use_gaussian = 0, .seed = 0,
     };
+
+    if (!silent)
+        fprintf(stderr, "var_random: using CG-Hutchinson path (n=%d)\n", n);
 
     double old_sigma2 = sg->sigma2;
 
     for (int iter = 0; iter < VAR_RANDOM_MAX_ITER; iter++) {
 
-        /* Keep V matvec in sync with current sigma2 (ws2 pointer stays live) */
+        double A_0, B_0 = 0.0;
+
         vd.sigma2 = sg->sigma2;
 
-        /* --- a. Solve V r_tilde = r (warm-start from previous r_tilde) --- */
         cg_solve(cg, v_matvec, &vd, r, r_tilde);
 
-        /* --- b. A_0 = r_tilde^T r_tilde ----------------------------------- */
-        double A_0 = 0.0;
+        A_0 = 0.0;
         for (int i = 0; i < n; i++) A_0 += r_tilde[i] * r_tilde[i];
 
-        /* --- c. A_s = r_tilde^T G_s r_tilde for all s -------------------- */
-        compute_quad_all(sg->ts, sg->hap_to_indiv, n, S, r_tilde, A, work, order_buf, gv);
+        compute_quad_all(sg->ts, sg->hap_to_indiv, n, S,
+                         r_tilde, A, work, order_buf, gv);
 
-        /* --- d. B_s = tr(V^{-1} G_s) and B_0 = tr(V^{-1}) via Hutchinson - */
-        double B_0 = 0.0;
-        hutch_trace_all(cg, v_matvec, &vd, sg->ts, sg->hap_to_indiv, n, S, B, &B_0, &hopts);
+        hutch_trace_all(cg, v_matvec, &vd, sg->ts, sg->hap_to_indiv,
+                        n, S, B, &B_0, &hopts);
 
-        /* --- e. Update rho_sm, ws2[s], phi_mix ---------------------------- */
+        /* --- Update rho_sm, ws2[s], phi_mix -------------------------------- */
         memset(phi_sum, 0, (size_t)M * sizeof(double));
-        double max_delta_ws2 = 0.0;
+        double ws2_ref = sg->tau2_mix[M - 1] + 1e-30;
+        double max_rel_ws2 = 0.0;
 
         for (int s = 0; s < S; s++) {
             double lmax = -1e300;
             for (int m = 0; m < M; m++) {
                 double score = sg->tau2_mix[m] * 0.5 * (A[s] - B[s]);
-                /* Clip to prevent exp overflow; large positive score drives
-                 * all weight to component m, which is the correct behavior. */
                 score = fmax(-SCORE_CAP, fmin(SCORE_CAP, score));
                 log_rho[m] = log(sg->phi_mix[m] + PI_FLOOR) + score;
                 if (log_rho[m] > lmax) lmax = log_rho[m];
             }
-
-            /* Softmax normalisation */
             double sum = 0.0;
             for (int m = 0; m < M; m++) {
                 sg->rho[s * M + m] = exp(log_rho[m] - lmax);
@@ -469,39 +496,43 @@ void var_random(sargent_t *sg, int silent)
                 phi_sum[m] += sg->rho[s * M + m];
             }
             sg->ws2[s] = ws2_new;
-            double d = fabs(ws2_new - ws2_old);
-            if (d > max_delta_ws2) max_delta_ws2 = d;
+            double rel = fabs(ws2_new - ws2_old) / (ws2_old + ws2_ref);
+            if (rel > max_rel_ws2) max_rel_ws2 = rel;
         }
 
-        /* Update segment mixture proportions: phi_m = (Σ_s rho_sm) / S */
         for (int m = 0; m < M; m++)
             sg->phi_mix[m] = phi_sum[m] / S;
 
-        /* --- f. Update sigma2: sigma2 <- sigma2 * A_0 / B_0 (REML step) -- */
+        /* --- Update sigma2 (REML EM step) ---------------------------------- */
         if (B_0 > 0.0) {
             sg->sigma2 *= A_0 / B_0;
             if (sg->sigma2 < 1e-10 * var_y) sg->sigma2 = 1e-10 * var_y;
             if (sg->sigma2 > var_y)         sg->sigma2 = var_y;
         }
 
-        /* Update summary statistics */
         sg->h2_random = (var_y > 0.0) ? fmax(0.0, 1.0 - sg->sigma2/var_y - sg->h2_fixed) : 0.0;
         sg->h2        = sg->h2_fixed + sg->h2_random;
 
         double rel_change = fabs(sg->sigma2 - old_sigma2) / (old_sigma2 + 1e-15);
 
         if (!silent) {
+            /* count non-null trees for diagnostics */
+            int n_nonnull = 0;
+            for (int s = 0; s < S; s++) if (sg->ws2[s] != 0.0) n_nonnull++;
             fprintf(stderr, "var_random iter %3d: sigma2=%.4f  h2_rand=%.4f"
-                    "  max_dws2=%.2e  B0=%.2e  rel_dsig=%.2e  phi=[",
+                    "  max_rel_ws2=%.2e  B0=%.2e  rel_dsig=%.2e"
+                    "  nonnull=%d  phi=[",
                     iter + 1, sg->sigma2, sg->h2_random,
-                    max_delta_ws2, B_0, rel_change);
+                    max_rel_ws2, B_0, rel_change, n_nonnull);
             for (int m = 0; m < M; m++)
                 fprintf(stderr, " %.3f", sg->phi_mix[m]);
             fprintf(stderr, " ]\n");
         }
 
         old_sigma2 = sg->sigma2;
-        if (rel_change < VAR_RANDOM_TOL && max_delta_ws2 < VAR_RANDOM_TOL)
+        /* Convergence: sigma2 stable for at least 2 consecutive iterations.
+         * ws2 oscillates at the Hutchinson noise floor (~3%) and is not checked. */
+        if (iter >= 1 && rel_change < VAR_RANDOM_TOL)
             break;
     }
 
@@ -564,15 +595,17 @@ double *var_fixed_posteriors(sargent_t *sg)
         for (int i = 0; i < n; i++) xr += g[i] * r[i];
         double t_j = xr / sg->sigma2;
 
+        double u_bar_post = (double)n / sg->sigma2;
+        double z_sq = t_j * t_j / u_bar_post;
         double lmax = -1e300;
         for (int k = 0; k < K; k++) {
             double sk2 = sg->sigma2_mix[k];
             double log_pi_k = log(sg->pi_mix[k] + PI_FLOOR);
             if (sk2 == 0.0) {
-                log_g[k] = log_pi_k - 0.5 * t_j * t_j;
+                log_g[k] = log_pi_k - 0.5 * z_sq;
             } else {
-                double s_k = u_bar * sk2 + 1.0;
-                log_g[k] = log_pi_k - 0.5 * (log(s_k) + t_j * t_j / s_k);
+                double s_k = u_bar_post * sk2 + 1.0;
+                log_g[k] = log_pi_k - 0.5 * (log(s_k) + z_sq / s_k);
             }
             if (log_g[k] > lmax) lmax = log_g[k];
         }

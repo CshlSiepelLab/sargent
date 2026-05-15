@@ -70,6 +70,13 @@ geno_reader_t *geno_open_bed(const char *prefix);  /* .bed/.bim/.fam prefix */
    covariance matrices and other tree-sequence operations. */
 geno_reader_t *geno_open_trees(tsk_treeseq_t *ts);
 
+/* Estimate E[tr(G_s)/n] using a single Rademacher probe over all trees.
+ * Used to calibrate the tau2_mix prior grid to phenotype-variance units
+ * regardless of branch-length scale (e.g. generations vs coalescent units).
+ * Returns 1.0 on allocation failure. */
+double estimate_g_scale(const tsk_treeseq_t *ts, const int *hap_to_indiv,
+                        int n_indiv, unsigned int rng_seed);
+
 /* Build a sample-rank → individual-index mapping from the tree sequence's
  * individual table.  Returns a malloc'd array of length n_haplotypes where
  * result[rank] = individual index for haplotype sample rank `rank`.

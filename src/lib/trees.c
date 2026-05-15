@@ -437,3 +437,57 @@ void tree_cov_matvec(double *out, const double *in, int n_indiv,
             out[indiv] += acc[samples[h]];
     }
 }
+
+/* Estimate E[tr(G_s)/n] using a single Rademacher probe over all trees.
+ *
+ * Performs one complete tree-sequence walk; for each tree s computes
+ *   eps^T (G_s eps) / n
+ * which is an unbiased estimator of tr(G_s)/n.  Averaging over all S trees
+ * gives an estimate of the mean per-tree kinship scale.  This scale factor
+ * is used to calibrate the tau2_mix prior grid so that it is expressed in
+ * phenotype-variance units regardless of branch-length scale.
+ *
+ * Returns 1.0 on allocation failure or empty tree sequence. */
+double estimate_g_scale(const tsk_treeseq_t *ts, const int *hap_to_indiv,
+                        int n_indiv, unsigned int rng_seed)
+{
+    int S = (int)tsk_treeseq_get_num_trees(ts);
+    if (S <= 0 || n_indiv <= 0) return 1.0;
+
+    tsk_size_t nnd = tsk_treeseq_get_num_nodes(ts);
+    double   *work     = malloc(2 * nnd * sizeof(double));
+    tsk_id_t *order_buf = malloc(nnd * sizeof(tsk_id_t));
+    double   *eps      = malloc((size_t)n_indiv * sizeof(double));
+    double   *gv       = malloc((size_t)n_indiv * sizeof(double));
+    if (!work || !order_buf || !eps || !gv) {
+        free(work); free(order_buf); free(eps); free(gv);
+        return 1.0;
+    }
+
+    /* Rademacher probe: each entry ±1 */
+    unsigned int rng = (rng_seed != 0) ? rng_seed : 0xDEADBEEFu;
+    for (int i = 0; i < n_indiv; i++) {
+        rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5;
+        eps[i] = (rng & 1u) ? 1.0 : -1.0;
+    }
+
+    double sum = 0.0;
+    int    count = 0;
+    tsk_tree_t tree;
+    int ret = tsk_tree_init(&tree, ts, 0);
+    if (ret < 0) goto cleanup;
+
+    for (ret = tsk_tree_first(&tree); ret == TSK_TREE_OK;
+         ret = tsk_tree_next(&tree)) {
+        tree_cov_matvec(gv, eps, n_indiv, &tree, work, order_buf, hap_to_indiv);
+        double dot = 0.0;
+        for (int i = 0; i < n_indiv; i++) dot += eps[i] * gv[i];
+        sum += dot / n_indiv;
+        count++;
+    }
+    tsk_tree_free(&tree);
+
+cleanup:
+    free(work); free(order_buf); free(eps); free(gv);
+    return (count > 0 && sum > 0.0) ? sum / count : 1.0;
+}

@@ -50,6 +50,9 @@ typedef struct {
      * passed through to tree_cov_matvec so the diploid pairing is always
      * derived from the tree sequence metadata rather than assumed from rank/2. */
     int *hap_to_indiv;
+
+    /* Tuning parameters for Stage 2. */
+    int nprobe;    /* Hutchinson probe count; default 10 */
 } sargent_t;
 
 sargent_t *sargent_new(geno_reader_t *gr, tsk_treeseq_t *ts, double *y);

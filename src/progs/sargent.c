@@ -125,6 +125,7 @@ int main(int argc, char *argv[])
     int ts_geno     = 0;
     int fixed_only  = 0;
     int random_only = 0;
+    int nprobe      = 0;   /* 0 = use sargent_t default (10) */
     const char *outroot = "sargent";
 
     struct option long_opts[] = {
@@ -133,18 +134,20 @@ int main(int argc, char *argv[])
         {"fixed-only",  0, 0, 'F'},
         {"random-only", 0, 0, 'R'},
         {"outroot",     1, 0, 'o'},
+        {"nprobe",      1, 0, 'N'},
         {"version",     0, 0, 'v'},
         {"help",        0, 0, 'h'},
         {0, 0, 0, 0}
     };
 
-    while ((c = getopt_long(argc, argv, "zGFRo:vh", long_opts, &opt_idx)) != -1) {
+    while ((c = getopt_long(argc, argv, "zGFRo:N:vh", long_opts, &opt_idx)) != -1) {
         switch (c) {
-        case 'z': silent      = 1;      break;
-        case 'G': ts_geno     = 1;      break;
-        case 'F': fixed_only  = 1;      break;
-        case 'R': random_only = 1;      break;
-        case 'o': outroot     = optarg; break;
+        case 'z': silent      = 1;           break;
+        case 'G': ts_geno     = 1;           break;
+        case 'F': fixed_only  = 1;           break;
+        case 'R': random_only = 1;           break;
+        case 'o': outroot     = optarg;      break;
+        case 'N': nprobe      = atoi(optarg); break;
         case 'v': printf("sargent version %s\n", SARGENT_VERSION); exit(0);
         case 'h': printf("%s", HELP); exit(0);
         case '?':
@@ -235,6 +238,7 @@ int main(int argc, char *argv[])
         tsk_treeseq_free(&ts);
         exit(EXIT_FAILURE);
     }
+    if (nprobe > 0) sg->nprobe = nprobe;
 
     /* ---- Stage 1: fixed effects ---- */
     if (!random_only) {

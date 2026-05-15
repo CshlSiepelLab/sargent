@@ -25,11 +25,15 @@
 #include "conjgrad.h"
 
 typedef struct {
-    int          nprobe;       /* number of Hutchinson probes (default 50) */
+    int          nprobe;       /* number of Hutchinson probes (default 10) */
     int          batch_size;   /* probes held in memory at once; 0 = all nprobe.
                                   reduce to limit RAM at the cost of extra tree passes */
     int          use_gaussian; /* 0 = Rademacher (default), 1 = standard normal */
     unsigned int seed;         /* RNG seed; 0 = use rand() state as-is */
+    double       probe_cg_tol; /* CG tolerance for probe solves; 0 = default (1e-3).
+                                  Probe solves only need ~1% accuracy since statistical
+                                  error from finite nprobe dominates. */
+    int          probe_cg_max; /* CG iteration cap for probe solves; 0 = n */
 } hutch_opts_t;
 
 /* Estimate B[s] = tr(V^{-1} G_s) for all S trees and, optionally,

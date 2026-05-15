@@ -202,6 +202,13 @@ def main():
     dosage = np.stack(dosage_list)   # (p, n_indiv)
     positions = pos_list
 
+    # Standardize dosage to match SARGENT's GENO_STANDARDIZE (zero-mean, unit-variance).
+    # betas are therefore in units of per-s.d. of genotype, consistent with inference.
+    dmean = dosage.mean(axis=1, keepdims=True)
+    dstd  = dosage.std(axis=1, keepdims=True)
+    dstd[dstd == 0] = 1.0   # avoid divide-by-zero for monomorphic sites
+    dosage_std = (dosage - dmean) / dstd
+
     # ---- 3. Fixed effects --------------------------------------------------
     sigma2_mix = np.array(args.sigma2_mix, dtype=float)
     K = len(sigma2_mix)
@@ -223,14 +230,14 @@ def main():
         if sigma2_mix[k] > 0:
             beta[j] = rng.normal(0.0, math.sqrt(sigma2_mix[k]))
 
-    # Fixed-effect phenotype contribution
-    y_fixed = dosage.T @ beta           # (n_indiv,)
+    # Fixed-effect phenotype contribution (uses standardized genotypes)
+    y_fixed = dosage_std.T @ beta           # (n_indiv,)
 
     var_fixed = float(np.var(y_fixed))
     if var_fixed > 0 and args.h2_fixed > 0:
         scale_f = math.sqrt(args.h2_fixed / var_fixed)
         beta   *= scale_f
-        y_fixed = dosage.T @ beta
+        y_fixed = dosage_std.T @ beta
     elif args.h2_fixed == 0:
         beta[:] = 0.0
         y_fixed[:] = 0.0
