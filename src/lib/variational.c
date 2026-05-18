@@ -156,7 +156,10 @@ sargent_t *sargent_new(geno_reader_t *gr, tsk_treeseq_t *ts, double *y)
         for (int m = 0; m < sg->M; m++)
             sg->rho[s * sg->M + m] = 1.0 / sg->M;
 
-    sg->nprobe = 10;   /* default; override via sg->nprobe before calling var_random */
+    sg->nprobe     = 10;   /* default; override via sg->nprobe before calling var_random */
+    sg->prior_type = 0;    /* default: Beta-Bernoulli spike-and-slab */
+    sg->phi_alpha  = 1.0;  /* uniform Beta(1,1) hyperprior on phi */
+    sg->phi_beta   = 1.0;
 
     return sg;
 }
@@ -431,8 +434,9 @@ void var_random(sargent_t *sg, int silent)
     int S      = sg->S;
     int nprobe = sg->nprobe;
 
-    /* Allocate ws2 if needed; initialise to tau2_mix[M-1]/2.
-     * With spike-and-slab (M=2): ws2[s] = rho_init(0.5) * tau2_init = 0.5*tau2. */
+    /* Allocate ws2 if needed; initialise to half of tau2_mix[M-1] so the
+     * first V-solve sees a non-trivial covariance and the REML scores have
+     * the correct sign. */
     if (!sg->ws2) {
         sg->ws2 = malloc((size_t)S * sizeof(double));
         if (!sg->ws2) { fprintf(stderr, "var_random: out of memory\n"); return; }
@@ -445,9 +449,7 @@ void var_random(sargent_t *sg, int silent)
     double   *r_tilde    = calloc((size_t)n,  sizeof(double));
     double   *A          = malloc((size_t)S * sizeof(double));
     double   *B          = malloc((size_t)S * sizeof(double));
-    double   *rho        = malloc((size_t)S * sizeof(double));
     double   *ws2_accum  = calloc((size_t)S,  sizeof(double));
-    double   *rho_accum  = calloc((size_t)S,  sizeof(double));
 
     tsk_size_t n_nodes   = tsk_treeseq_get_num_nodes(sg->ts);
     double    *work      = malloc(2 * n_nodes * sizeof(double));
@@ -456,7 +458,7 @@ void var_random(sargent_t *sg, int silent)
 
     cg_state_t *cg = cg_state_new(n, NULL);
 
-    if (!r || !r_tilde || !A || !B || !rho || !ws2_accum || !rho_accum ||
+    if (!r || !r_tilde || !A || !B || !ws2_accum ||
         !work || !order_buf || !gv || !cg) {
         fprintf(stderr, "var_random: out of memory\n");
         goto cleanup;
@@ -488,24 +490,23 @@ void var_random(sargent_t *sg, int silent)
         .nprobe = nprobe, .batch_size = 0, .use_gaussian = 0, .seed = 0,
     };
 
+    int horseshoe = (sg->prior_type == 1);
     if (!silent)
-        fprintf(stderr, "var_random: spike-and-slab EM (n=%d, S=%d)\n", n, S);
+        fprintf(stderr, "var_random: per-tree REML EM (n=%d, S=%d, prior=%s)\n",
+                n, S, horseshoe ? "horseshoe" : "beta-bernoulli");
 
-    /* Spike-and-slab global parameters */
-    double tau2     = sg->tau2_mix[sg->M - 1];
-    double phi      = sg->phi_mix[sg->M - 1];
-    double old_tau2 = tau2;
-
-    /* Initialise per-segment responsibilities */
-    for (int s = 0; s < S; s++) rho[s] = phi;
+    /* Per-tree ws2 bounds: floor prevents collapse to exact zero; ceiling
+     * prevents runaway on a single tree. */
+    double ws2_max   = var_y / fmax(S, 1);
+    double ws2_floor = 1e-12 * ws2_max;
 
     double sigma2_accum = 0.0;
     int    n_accum      = 0;
+    double old_sigma2   = sg->sigma2;
 
     for (int iter = 0; iter < VAR_RANDOM_MAX_ITER; iter++) {
 
         double A_0, B_0 = 0.0;
-
         vd.sigma2 = sg->sigma2;
 
         cg_solve(cg, v_matvec, &vd, r, r_tilde);
@@ -519,91 +520,92 @@ void var_random(sargent_t *sg, int silent)
         hutch_trace_all(cg, v_matvec, &vd, sg->ts, sg->hap_to_indiv,
                         n, S, sg->S_orig, sg->prune_map, B, &B_0, &hopts);
 
-        /* E-step: rho[s] = P(z_s=1 | data) via mean-field REML score.
-         * score_s = logit(phi) + tau2/2 * (A[s]-B[s]) where A[s]-B[s] is the
-         * REML gradient; positive for trees with heritable signal. */
-        double logit_phi = log(phi / (1.0 - phi));
-        for (int s = 0; s < S; s++) {
-            double score = logit_phi + 0.5 * tau2 * (A[s] - B[s]);
-            score = fmax(-SCORE_CAP, fmin(SCORE_CAP, score));
-            rho[s] = 1.0 / (1.0 + exp(-score));
-        }
-
-        /* M-step: tau2 — global pooled REML EM using rho-weighted A and B */
-        double rho_A = 0.0, rho_B = 0.0;
-        for (int s = 0; s < S; s++) {
-            rho_A += rho[s] * A[s];
-            rho_B += rho[s] * B[s];
-        }
-        if (rho_B > 1e-30 && rho_A > 0.0)
-            tau2 *= rho_A / rho_B;
-        if (tau2 > var_y)   tau2 = var_y;
-        if (tau2 < 1e-30)   tau2 = 1e-30;
-
-        /* M-step: phi — proportion of non-null segments */
-        double rho_sum = 0.0;
-        for (int s = 0; s < S; s++) rho_sum += rho[s];
-        phi = rho_sum / S;
-        phi = fmax(1.0 / S, fmin(1.0 - 1.0 / S, phi));
-
-        /* Update ws2[s] = rho[s] * tau2 for next V solve */
+        /* Per-tree REML EM: ws2[s] ← ws2[s] × A[s]/B[s].
+         * Fixed point: A[s] = B[s] for every segment s.  Null segments
+         * (A[s] < B[s]) shrink toward ws2_floor; active segments grow until
+         * their REML score reaches zero.  This is the per-segment analogue of
+         * the standard REML multiplicative update. */
         double ws2_mean = 0.0;
         for (int s = 0; s < S; s++) {
-            sg->ws2[s] = rho[s] * tau2;
+            if (B[s] > 1e-30)
+                sg->ws2[s] *= A[s] / B[s];
+            sg->ws2[s] = fmax(ws2_floor, fmin(ws2_max, sg->ws2[s]));
             ws2_mean += sg->ws2[s];
         }
         ws2_mean /= S;
 
-        /* sigma2 update (standard REML EM) */
+        /* sigma2 REML EM update */
         if (B_0 > 0.0) {
             sg->sigma2 *= A_0 / B_0;
-            if (sg->sigma2 < 1e-10 * var_y) sg->sigma2 = 1e-10 * var_y;
-            if (sg->sigma2 > var_y)         sg->sigma2 = var_y;
+            sg->sigma2 = fmax(1e-10 * var_y, fmin(var_y, sg->sigma2));
         }
 
-        double h2_rand_curr = (var_y > 0.0) ?
-            fmax(0.0, 1.0 - sg->sigma2/var_y - sg->h2_fixed) : 0.0;
-        double rel_dtau2 = fabs(tau2 - old_tau2) / (old_tau2 + 1e-15);
+        double h2_rand = (var_y > 0.0) ?
+            fmax(0.0, 1.0 - sg->sigma2 / var_y - sg->h2_fixed) : 0.0;
+        double rel_dsig = fabs(sg->sigma2 - old_sigma2) / (old_sigma2 + 1e-15);
 
         /* Polyak-Ruppert accumulation after burn-in */
         if (iter >= VAR_RANDOM_BURN_IN) {
             sigma2_accum += sg->sigma2;
-            for (int s = 0; s < S; s++) {
-                ws2_accum[s]  += sg->ws2[s];
-                rho_accum[s]  += rho[s];
-            }
+            for (int s = 0; s < S; s++) ws2_accum[s] += sg->ws2[s];
             n_accum++;
         }
 
-        if (!silent) {
+        if (!silent)
             fprintf(stderr, "var_random iter %3d: sigma2=%.4f  h2_rand=%.4f"
-                    "  phi=%.4f  tau2=%.3e  ws2_mean=%.3e"
-                    "  B0=%.2e  rel_dtau2=%.2e%s\n",
-                    iter + 1, sg->sigma2, h2_rand_curr,
-                    phi, tau2, ws2_mean, B_0, rel_dtau2,
+                    "  ws2_mean=%.3e  B0=%.2e  rel_dsig=%.2e%s\n",
+                    iter + 1, sg->sigma2, h2_rand, ws2_mean, B_0, rel_dsig,
                     iter >= VAR_RANDOM_BURN_IN ? " [avg]" : "");
-        }
 
-        old_tau2 = tau2;
+        old_sigma2 = sg->sigma2;
     }
 
-    /* Apply Polyak-Ruppert averages to sg fields */
+    /* Apply Polyak-Ruppert averages */
     if (n_accum > 0) {
         sg->sigma2 = sigma2_accum / n_accum;
-        for (int s = 0; s < S; s++) {
-            sg->ws2[s]          = ws2_accum[s] / n_accum;
-            sg->rho[s * 2 + 0]  = 1.0 - rho_accum[s] / n_accum;  /* null */
-            sg->rho[s * 2 + 1]  = rho_accum[s] / n_accum;         /* non-null */
-        }
+        for (int s = 0; s < S; s++)
+            sg->ws2[s] = ws2_accum[s] / n_accum;
     }
 
     sg->h2_random = (var_y > 0.0) ?
-        fmax(0.0, 1.0 - sg->sigma2/var_y - sg->h2_fixed) : 0.0;
+        fmax(0.0, 1.0 - sg->sigma2 / var_y - sg->h2_fixed) : 0.0;
     sg->h2 = sg->h2_fixed + sg->h2_random;
 
-    /* Store converged tau2 and phi back into sg for inspection/output */
-    sg->tau2_mix[sg->M - 1] = tau2;
-    sg->phi_mix[sg->M - 1]  = phi;
+    /* Post-hoc activation probability from converged ws2 values.
+     *
+     * After REML convergence, null trees cluster near ws2_floor and active
+     * trees sit orders of magnitude higher.  We classify in log-space using a
+     * threshold midway between floor and ceiling:
+     *   ws2_thresh = sqrt(ws2_floor × ws2_max) = 1e-6 × ws2_max
+     *
+     * Score: log(ws2[s] / ws2_thresh), shifted by logit(phi_ref).
+     *   phi_ref = phi_alpha / (phi_alpha + phi_beta)   (BB prior mean)
+     *   phi_ref = 0.5                                   (horseshoe: symmetric)
+     *
+     * Trees well above the threshold get rho ≈ 1; trees at the floor get
+     * rho ≈ 0.  The Beta hyperprior (via phi_ref) shifts the decision
+     * boundary: large phi_beta / phi_alpha (sparse prior, e.g. --pi0 0.9)
+     * requires ws2[s] to be much larger than ws2_thresh to be called active. */
+    {
+        double ws2_thresh = sqrt(ws2_floor * ws2_max);   /* = 1e-6 × ws2_max */
+        double phi_ref    = horseshoe ? 0.5
+                            : sg->phi_alpha / (sg->phi_alpha + sg->phi_beta + 1e-15);
+        double logit_phi  = log(phi_ref / (1.0 - phi_ref + 1e-15));
+
+        double rho_sum = 0.0;
+        for (int s = 0; s < S; s++) {
+            double lw     = log(fmax(sg->ws2[s], ws2_floor) / ws2_thresh);
+            double score  = logit_phi + lw;
+            score         = fmax(-SCORE_CAP, fmin(SCORE_CAP, score));
+            double rho_s  = 1.0 / (1.0 + exp(-score));
+            sg->rho[s * 2 + 0] = 1.0 - rho_s;  /* null */
+            sg->rho[s * 2 + 1] = rho_s;          /* non-null */
+            rho_sum += rho_s;
+        }
+        sg->phi_mix[sg->M - 1] = rho_sum / fmax(S, 1);
+        /* Store the threshold scale so callers can recover tau2 ≈ ws2_thresh */
+        sg->tau2_mix[sg->M - 1] = ws2_thresh;
+    }
 
 cleanup:
     cg_state_free(cg);
@@ -611,9 +613,7 @@ cleanup:
     free(r_tilde);
     free(A);
     free(B);
-    free(rho);
     free(ws2_accum);
-    free(rho_accum);
     free(work);
     free(order_buf);
     free(gv);

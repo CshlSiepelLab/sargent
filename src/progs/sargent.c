@@ -125,7 +125,9 @@ int main(int argc, char *argv[])
     int ts_geno     = 0;
     int fixed_only  = 0;
     int random_only = 0;
+    int horseshoe   = 0;
     int nprobe      = 0;   /* 0 = use sargent_t default (10) */
+    double pi0      = -1.0; /* < 0 means unset */
     const char *outroot = "sargent";
 
     struct option long_opts[] = {
@@ -133,6 +135,8 @@ int main(int argc, char *argv[])
         {"ts-geno",     0, 0, 'G'},
         {"fixed-only",  0, 0, 'F'},
         {"random-only", 0, 0, 'R'},
+        {"horseshoe",   0, 0, 'H'},
+        {"pi0",         1, 0, 'P'},
         {"outroot",     1, 0, 'o'},
         {"nprobe",      1, 0, 'N'},
         {"version",     0, 0, 'v'},
@@ -140,14 +144,16 @@ int main(int argc, char *argv[])
         {0, 0, 0, 0}
     };
 
-    while ((c = getopt_long(argc, argv, "zGFRo:N:vh", long_opts, &opt_idx)) != -1) {
+    while ((c = getopt_long(argc, argv, "zGFRHo:N:P:vh", long_opts, &opt_idx)) != -1) {
         switch (c) {
-        case 'z': silent      = 1;           break;
-        case 'G': ts_geno     = 1;           break;
-        case 'F': fixed_only  = 1;           break;
-        case 'R': random_only = 1;           break;
-        case 'o': outroot     = optarg;      break;
-        case 'N': nprobe      = atoi(optarg); break;
+        case 'z': silent      = 1;                break;
+        case 'G': ts_geno     = 1;                break;
+        case 'F': fixed_only  = 1;                break;
+        case 'R': random_only = 1;                break;
+        case 'H': horseshoe   = 1;                break;
+        case 'P': pi0         = atof(optarg);     break;
+        case 'o': outroot     = optarg;           break;
+        case 'N': nprobe      = atoi(optarg);     break;
         case 'v': printf("sargent version %s\n", SARGENT_VERSION); exit(0);
         case 'h': printf("%s", HELP); exit(0);
         case '?':
@@ -238,7 +244,14 @@ int main(int argc, char *argv[])
         tsk_treeseq_free(&ts);
         exit(EXIT_FAILURE);
     }
-    if (nprobe > 0) sg->nprobe = nprobe;
+    if (nprobe > 0)  sg->nprobe = nprobe;
+    if (horseshoe)   sg->prior_type = 1;
+    if (pi0 > 0.0 && pi0 < 1.0 && !horseshoe) {
+        /* Beta(1, pi0/(1-pi0)) hyperprior: prior mean of phi = 1-pi0.
+         * E.g. pi0=0.9 → Beta(1,9), prior mean phi=0.1 (10% active). */
+        sg->phi_alpha = 1.0;
+        sg->phi_beta  = pi0 / (1.0 - pi0);
+    }
 
     /* ---- Stage 1: fixed effects ---- */
     if (!random_only) {
@@ -255,8 +268,8 @@ int main(int argc, char *argv[])
     /* ---- Stage 2: random effects ---- */
     if (!fixed_only) {
         if (!silent)
-            fprintf(stderr, "Stage 2: inferring segment weights (%d trees, M=%d)...\n",
-                    sg->S, sg->M);
+            fprintf(stderr, "Stage 2: inferring segment weights (%d trees, prior=%s)...\n",
+                    sg->S, sg->prior_type == 1 ? "horseshoe" : "beta-bernoulli");
         var_random(sg, silent);
         if (!silent)
             fprintf(stderr, "Stage 2 done: h2_random=%.4f  sigma2=%.4f\n",
