@@ -118,7 +118,8 @@ def sim_random_effect(ts, hap_ranks, n_indiv, ws2_vec, rng):
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--n-indiv",     type=int,   default=200,  help="diploid individuals")
+    ap.add_argument("--n-indiv",     type=int,   default=200,  help="diploid individuals (training set)")
+    ap.add_argument("--n-test",      type=int,   default=0,    help="additional held-out test individuals (0 = no test split)")
     ap.add_argument("--length",      type=float, default=5e6,  help="sequence length (bp)")
     ap.add_argument("--recomb-rate", type=float, default=1e-8, help="recombination rate per bp per gen")
     ap.add_argument("--mut-rate",    type=float, default=1e-8, help="mutation rate per bp per gen")
@@ -135,12 +136,32 @@ def main():
     ap.add_argument("--pi-mix",      type=float, nargs="+", default=None,
                     help="fixed-effect mixture proportions (default: uniform)")
     # Segment-weight mixture (tau² relative to var_pheno/S)
-    ap.add_argument("--tau2-frac",   type=float, nargs="+",
-                    default=[0.0, 0.01, 0.1, 1.0],
-                    help="segment-weight fractions relative to var_pheno/S (first must be 0)")
+    # Two presets: 'sparse' (default, spike-and-slab style, ~15% active)
+    #              'diffuse' (uniform 4-component, ~75% active — legacy behaviour)
+    # If --tau2-frac / --phi-mix are given explicitly, --regime is ignored.
+    ap.add_argument("--regime",      type=str,   default="sparse",
+                    choices=["sparse", "diffuse"],
+                    help="ws² mixture regime (default: sparse)")
+    ap.add_argument("--tau2-frac",   type=float, nargs="+", default=None,
+                    help="segment-weight fractions relative to var_pheno/S (first must be 0; overrides --regime)")
     ap.add_argument("--phi-mix",     type=float, nargs="+", default=None,
-                    help="segment-weight mixture proportions (default: uniform)")
+                    help="segment-weight mixture proportions (overrides --regime)")
     args = ap.parse_args()
+
+    # Apply --regime presets if mixture not given explicitly.
+    # Sparse defaults are designed to be identifiable at n=100: only ~5% of trees
+    # are active, so each active tree carries a large per-tree variance share,
+    # large enough to rise above Hutchinson noise.
+    if args.tau2_frac is None and args.phi_mix is None:
+        if args.regime == "sparse":
+            # 3-component spike-and-slab: 95% null, 4% medium slab, 1% large slab
+            args.tau2_frac = [0.0, 0.1, 1.0]
+            args.phi_mix   = [0.95, 0.04, 0.01]
+        else:   # diffuse
+            args.tau2_frac = [0.0, 0.01, 0.1, 1.0]
+            args.phi_mix   = [0.25, 0.25, 0.25, 0.25]
+    elif args.tau2_frac is None or args.phi_mix is None:
+        sys.exit("ERROR: --tau2-frac and --phi-mix must be given together")
 
     if args.h2_fixed + args.h2_random > 1.0:
         sys.exit("ERROR: h2_fixed + h2_random must be ≤ 1")
@@ -150,10 +171,11 @@ def main():
     rng = np.random.default_rng(args.seed)
 
     # ---- 1. Simulate ARG and mutations -------------------------------------
-    print(f"Simulating ARG: n={args.n_indiv} individuals, L={args.length:.0f} bp ...",
-          flush=True)
+    n_total = args.n_indiv + args.n_test
+    print(f"Simulating ARG: n_train={args.n_indiv} + n_test={args.n_test} "
+          f"= {n_total} individuals, L={args.length:.0f} bp ...", flush=True)
     ts = msprime.sim_ancestry(
-        samples=args.n_indiv,
+        samples=n_total,
         sequence_length=args.length,
         recombination_rate=args.recomb_rate,
         population_size=args.Ne,
@@ -283,25 +305,75 @@ def main():
     # ---- 6. Write outputs -------------------------------------------------
     print(f"Writing outputs with prefix '{args.out}' ...", flush=True)
 
-    ts.dump(args.out + ".trees")
+    n_train = args.n_indiv
+    n_test  = args.n_test
+    has_test = n_test > 0
+    ts_train = None
 
-    np.savetxt(args.out + ".phen", y, fmt="%.8g")
+    if has_test:
+        # Save full ARG (needed for cross-kinship between train and test in prediction)
+        ts.dump(args.out + ".full.trees")
+        # Build the train tree sequence by simplifying to train sample nodes
+        train_sample_nodes = []
+        for i in range(n_train):
+            train_sample_nodes.extend(ts.individual(i).nodes)
+        ts_train = ts.simplify(samples=train_sample_nodes)
+        ts_train.dump(args.out + ".trees")
 
-    write_plink(args.out, dosage, positions, n_indiv, p)
+        # Train: phenotypes, genotypes for first n_train individuals
+        np.savetxt(args.out + ".phen", y[:n_train], fmt="%.8g")
+        write_plink(args.out, dosage[:, :n_train], positions, n_train, p)
+
+        # Test: phenotypes, genotypes for last n_test individuals
+        np.savetxt(args.out + ".test.phen", y[n_train:], fmt="%.8g")
+        write_plink(args.out + ".test", dosage[:, n_train:], positions, n_test, p)
+
+        # Also save full phen for completeness
+        np.savetxt(args.out + ".full.phen", y, fmt="%.8g")
+        # Per-individual true components (for evaluation of prediction quality)
+        with open(args.out + ".test.true_components.tsv", "w") as f:
+            f.write("idx\ty_fixed\ty_random\ty_total\n")
+            for i in range(n_test):
+                gi = n_train + i
+                f.write(f"{i}\t{y_fixed[gi]:.8g}\t{y_random[gi]:.8g}\t{y[gi]:.8g}\n")
+    else:
+        ts.dump(args.out + ".trees")
+        np.savetxt(args.out + ".phen", y, fmt="%.8g")
+        write_plink(args.out, dosage, positions, n_train, p)
 
     with open(args.out + ".true_beta.tsv", "w") as f:
         f.write("snp_idx\tbp_pos\tbeta\n")
         for j in causal_idx:
             f.write(f"{j}\t{positions[j]}\t{beta[j]:.8g}\n")
 
+    # ws2_vec is defined on the FULL ARG's trees (or on the only ARG if no test split).
+    # If there is a test split, we also record train-tree ws² indexed by the simplified
+    # train tree sequence. Each train tree inherits ws² from the full-ARG tree containing
+    # its midpoint.
     with open(args.out + ".true_ws2.tsv", "w") as f:
         f.write("tree_idx\tws2\n")
-        for s, w in enumerate(ws2_vec):
-            f.write(f"{s}\t{w:.8g}\n")
+        if has_test:
+            full_breaks = list(ts.breakpoints())
+            for s, tr in enumerate(ts_train.trees()):
+                mid = 0.5 * (tr.interval.left + tr.interval.right)
+                full_s = max(0, min(len(ws2_vec) - 1,
+                                    np.searchsorted(full_breaks, mid, side="right") - 1))
+                f.write(f"{s}\t{ws2_vec[full_s]:.8g}\n")
+            with open(args.out + ".full.true_ws2.tsv", "w") as g:
+                g.write("tree_idx\tws2\n")
+                for s, w in enumerate(ws2_vec):
+                    g.write(f"{s}\t{w:.8g}\n")
+        else:
+            for s, w in enumerate(ws2_vec):
+                f.write(f"{s}\t{w:.8g}\n")
 
     params = {
-        "n_indiv":         n_indiv,
-        "n_trees":         n_trees,
+        "n_indiv":         n_train,
+        "n_test":          n_test,
+        "n_total":         n_train + n_test,
+        "n_trees":         (ts_train.num_trees if (has_test and ts_train is not None)
+                            else n_trees),
+        "n_trees_full":    n_trees,
         "n_variants":      p,
         "n_causal":        n_causal,
         "length":          args.length,
@@ -314,6 +386,7 @@ def main():
         "h2_fixed_realised":  h2_fixed_realised,
         "h2_random_realised": h2_random_realised,
         "sigma2":          sigma2,
+        "regime":          args.regime,
         "sigma2_mix":      list(sigma2_mix),
         "pi_mix":          list(pi_mix),
         "tau2_frac":       list(tau2_frac),
@@ -324,8 +397,13 @@ def main():
         json.dump(params, f, indent=2)
 
     print(f"\nDone.")
-    print(f"  n_indiv          : {n_indiv}")
-    print(f"  n_trees          : {n_trees}")
+    if has_test:
+        print(f"  n_train / n_test : {n_train} / {n_test}")
+        print(f"  n_trees (train)  : {ts_train.num_trees}")
+        print(f"  n_trees (full)   : {n_trees}")
+    else:
+        print(f"  n_indiv          : {n_indiv}")
+        print(f"  n_trees          : {n_trees}")
     print(f"  n_variants       : {p}")
     print(f"  n_causal (fixed) : {n_causal}")
     print(f"  h2_fixed  target / realised : {args.h2_fixed:.3f} / {h2_fixed_realised:.4f}")

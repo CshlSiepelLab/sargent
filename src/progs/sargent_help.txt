@@ -45,6 +45,19 @@ MAIN OPTIONS:
         Fixed effects are set to zero.  Produces <outroot>.w2.tsv but
         not <outroot>.beta.tsv.
 
+    --horseshoe, -H
+        Use the horseshoe prior for Stage 2 segment weights instead of
+        the default Beta-Bernoulli spike-and-slab.  The horseshoe applies
+        continuous shrinkage: activation probability phi_ref=0.5 with no
+        directional bias toward sparsity.  Cannot be combined with --pi0.
+
+    --pi0 <val>, -P <val>
+        Prior expected fraction of null segments (0 < val < 1).  Sets a
+        Beta(1, pi0/(1-pi0)) hyperprior on the activation probability phi,
+        giving prior mean phi=1-pi0 (e.g. --pi0 0.9 gives prior mean
+        phi=0.1, favouring 90% null segments).  Default: Beta(1,1).
+        Ignored when --horseshoe is active.
+
     --outroot <prefix>, -o <prefix>
         Set the output file prefix (default: "sargent").  Output files
         are named <prefix>.beta.tsv and <prefix>.w2.tsv.
