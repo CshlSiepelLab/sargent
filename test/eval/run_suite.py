@@ -170,7 +170,34 @@ def run_one(case_dir, case_name, sargent_bin, args, outdir):
             record["beta_error"] = (f"length mismatch: {len(inferred_beta)} "
                                     f"vs {params['n_variants']}")
 
+    # Out-of-sample prediction (only if dataset has a test split)
+    if params.get("n_test", 0) > 0 and os.path.exists(prefix + ".full.trees"):
+        try:
+            pred = run_prediction(prefix, out_prefix)
+            for k in ("bayesR", "gblup", "arg_blup_uniform", "sargent"):
+                if k in pred:
+                    record[f"{k}_R2"] = pred[k]["r2"]
+                    record[f"{k}_r"]  = pred[k]["r"]
+        except Exception as e:
+            record["predict_error"] = f"{type(e).__name__}: {e}"
+
     return record
+
+
+def run_prediction(case_prefix, sargent_prefix):
+    """Invoke predict.py inline (subprocess to keep module separation simple)."""
+    import subprocess, json as _json
+    cmd = [sys.executable,
+           os.path.join(SCRIPT_DIR, "predict.py"),
+           "--case-prefix",    case_prefix,
+           "--sargent-prefix", sargent_prefix]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr[-500:])
+    # Read the JSON output
+    json_path = sargent_prefix + ".predict.json"
+    with open(json_path) as f:
+        return _json.load(f)
 
 
 def print_summary(records):
@@ -249,6 +276,33 @@ def write_markdown(records, path, args):
                         f"{fmt(r.get('recall_rho'))} | "
                         f"{fmt(r.get('ws2_corr_active'))} |\n")
             f.write("\n")
+
+            # Out-of-sample prediction
+            if any("bayesR_R2" in r for r in scale_recs):
+                f.write("### Out-of-sample prediction (R²)\n\n")
+                f.write("| case | BayesR | GBLUP | ARG-BLUP-uniform | SARGENT |\n")
+                f.write("|---|---:|---:|---:|---:|\n")
+                for r in scale_recs:
+                    if "bayesR_R2" not in r:
+                        continue
+                    f.write(f"| {r['case']} | "
+                            f"{fmt(r.get('bayesR_R2'))} | "
+                            f"{fmt(r.get('gblup_R2'))} | "
+                            f"{fmt(r.get('arg_blup_uniform_R2'))} | "
+                            f"{fmt(r.get('sargent_R2'))} |\n")
+                f.write("\n")
+                f.write("### Out-of-sample prediction (r = Pearson correlation)\n\n")
+                f.write("| case | BayesR | GBLUP | ARG-BLUP-uniform | SARGENT |\n")
+                f.write("|---|---:|---:|---:|---:|\n")
+                for r in scale_recs:
+                    if "bayesR_r" not in r:
+                        continue
+                    f.write(f"| {r['case']} | "
+                            f"{fmt(r.get('bayesR_r'))} | "
+                            f"{fmt(r.get('gblup_r'))} | "
+                            f"{fmt(r.get('arg_blup_uniform_r'))} | "
+                            f"{fmt(r.get('sargent_r'))} |\n")
+                f.write("\n")
 
             # Fixed-effects (beta) recovery
             f.write("### Fixed-effects (β) recovery\n\n")

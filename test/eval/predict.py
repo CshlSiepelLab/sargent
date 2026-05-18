@@ -86,15 +86,16 @@ def load_ws2(w2_tsv):
 # Per-tree kinship from a tskit tree sequence
 # ---------------------------------------------------------------------------
 
-def per_tree_kinship(ts, sample_nodes_a, sample_nodes_b=None):
-    """For each tree in ts, return an (a × b) kinship matrix.
+def streaming_combined_kinship(ts, sample_nodes_a, weights_per_tree,
+                               sample_nodes_b=None):
+    """Compute Σ_s weights_per_tree[s] · G_s without storing per-tree kinship.
 
-    Kinship between samples i, j is 0.5 · Σ_b bl(b) · I_b(i) · I_b(j)
+    Kinship between samples i, j on tree s is 0.5 · Σ_b bl(b) · I_b(i) · I_b(j)
     where I_b(k)=1 iff sample k is in the subtree below branch b.
 
-    If sample_nodes_b is None, computes a square matrix on sample_nodes_a only.
+    weights_per_tree: array of length ts.num_trees (or None for uniform sum).
 
-    Returns: numpy array of shape (S, n_a, n_b).
+    Returns: (n_a × n_b) numpy array containing the weighted sum.
     """
     if sample_nodes_b is None:
         sample_nodes_b = sample_nodes_a
@@ -104,41 +105,49 @@ def per_tree_kinship(ts, sample_nodes_a, sample_nodes_b=None):
     sample_set_a = set(sample_nodes_a)
     sample_set_b = set(sample_nodes_b)
 
-    S = ts.num_trees
-    out = np.zeros((S, n_a, n_b), dtype=np.float64)
+    K = np.zeros((n_a, n_b), dtype=np.float64)
+    have_weights = weights_per_tree is not None
 
     for s, tree in enumerate(ts.trees()):
-        # For each branch (non-root node), gather leaves below and accumulate.
+        w = float(weights_per_tree[s]) if have_weights else 1.0
+        if w == 0.0:
+            continue
+        scale = 0.5 * w
         for nd in tree.nodes(order="preorder"):
             parent = tree.parent(nd)
             if parent == tskit.NULL:
                 continue
             bl = tree.branch_length(nd)
-            # Collect descendant samples in our two sets
             below = list(tree.samples(nd))
             ia = [rank_a[x] for x in below if x in sample_set_a]
             ib = [rank_b[x] for x in below if x in sample_set_b]
             if not ia or not ib:
                 continue
-            # Outer-product update: G_s[ia, ib] += 0.5 * bl
             ia_arr = np.array(ia, dtype=int)
             ib_arr = np.array(ib, dtype=int)
-            out[s][np.ix_(ia_arr, ib_arr)] += 0.5 * bl
+            K[np.ix_(ia_arr, ib_arr)] += scale * bl
 
-    return out
+    return K
 
 
-def combined_kinship(G_per_tree, weights):
-    """K = Σ_s weights[s] · G_per_tree[s].  G_per_tree shape (S, n_a, n_b)."""
-    return np.einsum("s,sij->ij", weights, G_per_tree)
+def hap_to_indiv_2d(K_hap, n_a, n_b=None):
+    """Collapse haplotype-level (2n_a x 2n_b) to individual-level (n_a x n_b).
+
+    Each individual contributes two haplotypes; K_ind[i,j] = (1/2) Σ over the
+    four (h_i, h_j) pairs.
+    """
+    if n_b is None:
+        n_b = n_a
+    return K_hap.reshape(n_a, 2, n_b, 2).sum(axis=(1, 3)) * 0.5
 
 
 # ---------------------------------------------------------------------------
 # Predictors
 # ---------------------------------------------------------------------------
 
-def predict_bayesR(X_test, beta):
-    return X_test.T @ beta
+def predict_bayesR(X_test, beta, mean_y):
+    """Predict via fixed effects only, adding back the training mean."""
+    return X_test.T @ beta + mean_y
 
 
 def fit_blup(y_train, K_train_train, h2_init=0.5, max_iter=50, tol=1e-5):
@@ -196,21 +205,18 @@ def predict_blup(K_test_train, alpha, mean_y):
     return K_test_train @ alpha + mean_y
 
 
-def predict_sargent(X_test, beta, ws2,
-                    y_train, X_train,
-                    G_per_tree_train, G_per_tree_test_train):
-    """Full SARGENT prediction.
+def predict_sargent(X_test, beta, K_train, K_cross,
+                    y_train, X_train):
+    """Full SARGENT prediction with pre-combined kinship.
 
-    y_test_hat = X_test β + K_test_train V_train^{-1} (y_train - X_train β)
-       where V_train = Σ_s ws²[s] G_s + σ² I
-    σ² is re-estimated as residual variance after fixed effects.
+    y_test_hat = mean_y + X_test β + K_test_train V_train^{-1} (y_train - mean_y - X_train β)
+       where V_train = K_train + σ² I and K_train = Σ_s ws²[s] G_s.
+    σ² is set to the residual variance after fixed effects + random component contribution.
     """
     n = len(y_train)
-    r = y_train - X_train.T @ beta
+    mean_y = y_train.mean()
+    r = (y_train - mean_y) - X_train.T @ beta
     var_r = float(np.var(r))
-    # Use the model's own variance partition: σ² inferred is var_r minus the random part
-    K_train = combined_kinship(G_per_tree_train, ws2)
-    # Estimate σ² by REML-like update conditional on ws²
     sigma2 = max(var_r - np.trace(K_train) / n, 1e-6 * var_r)
     V = K_train + sigma2 * np.eye(n)
     try:
@@ -219,10 +225,8 @@ def predict_sargent(X_test, beta, ws2,
         V = V + 1e-6 * np.eye(n)
         L = np.linalg.cholesky(V)
     Vinv_r = np.linalg.solve(L.T, np.linalg.solve(L, r))
-
-    K_cross = combined_kinship(G_per_tree_test_train, ws2)
     u_test  = K_cross @ Vinv_r
-    y_test_hat = X_test.T @ beta + u_test
+    y_test_hat = mean_y + X_test.T @ beta + u_test
     return y_test_hat, sigma2
 
 
@@ -330,29 +334,8 @@ def main():
     for i in range(n_train, n_total):
         test_nodes.extend(ts_full.individual(i).nodes)
 
-    # Per-tree haplotype kinship in the FULL ARG.
-    # Note: G_s here is at haplotype-pair resolution; we then average over the two
-    # haplotypes per individual to get the per-individual kinship.
-    print(f"Computing kinship for {ts_full.num_trees} full-ARG trees ...", flush=True)
-    G_hap_train = per_tree_kinship(ts_full, train_nodes)               # (S, 2*n_train, 2*n_train)
-    G_hap_cross = per_tree_kinship(ts_full, test_nodes, train_nodes)   # (S, 2*n_test, 2*n_train)
-
-    # Convert haplotype kinship to per-individual: G_ind[i,j] = (1/2) * Σ_{h_i, h_j} G_hap[h_i, h_j]
-    # (Matches simulate.py's u = (1/√2) · sum convention if we square the (1/√2) → 1/2.)
-    def hap_to_indiv(G_hap, n_a, n_b=None):
-        if n_b is None:
-            n_b = n_a
-        S = G_hap.shape[0]
-        out = np.zeros((S, n_a, n_b), dtype=np.float64)
-        for s in range(S):
-            M = G_hap[s].reshape(n_a, 2, n_b, 2).sum(axis=(1, 3)) * 0.5
-            out[s] = M
-        return out
-
-    G_train_full = hap_to_indiv(G_hap_train, n_train)                  # (S_full, n_train, n_train)
-    G_cross_full = hap_to_indiv(G_hap_cross, n_test, n_train)          # (S_full, n_test, n_train)
-
-    # Now map ws² (defined on TRAIN.trees) to full-ARG tree indices
+    # Map ws² (indexed against train.trees) to full-ARG tree indices, since
+    # all our kinship computation is done in the full-ARG framework.
     if ws2 is not None and len(ws2) == ts_train_only.num_trees:
         idx_map = map_train_to_full(ts_train_only, ts_full)
         ws2_full = ws2[idx_map]
@@ -360,6 +343,28 @@ def main():
         ws2_full = ws2
     else:
         ws2_full = None
+
+    # Streaming kinship computation (avoids storing per-tree (n×n) matrices):
+    #   K_uniform_train: Σ_s G_s / S_full       — for ARG-BLUP-uniform
+    #   K_uniform_cross
+    #   K_sargent_train: Σ_s ws²[s] · G_s        — for full SARGENT
+    #   K_sargent_cross
+    S_full = ts_full.num_trees
+    ones = np.ones(S_full) / S_full
+
+    print(f"Computing combined kinship over {S_full} full-ARG trees ...", flush=True)
+    K_uni_train_hap  = streaming_combined_kinship(ts_full, train_nodes, ones)
+    K_uni_cross_hap  = streaming_combined_kinship(ts_full, test_nodes, ones, train_nodes)
+    K_uni_train = hap_to_indiv_2d(K_uni_train_hap, n_train)
+    K_uni_cross = hap_to_indiv_2d(K_uni_cross_hap, n_test, n_train)
+
+    if ws2_full is not None:
+        K_sg_train_hap = streaming_combined_kinship(ts_full, train_nodes, ws2_full)
+        K_sg_cross_hap = streaming_combined_kinship(ts_full, test_nodes, ws2_full, train_nodes)
+        K_sg_train = hap_to_indiv_2d(K_sg_train_hap, n_train)
+        K_sg_cross = hap_to_indiv_2d(K_sg_cross_hap, n_test, n_train)
+    else:
+        K_sg_train = K_sg_cross = None
 
     # -----------------------------------------------------------------------
     # Predictors
@@ -383,7 +388,7 @@ def main():
 
     # (a) BayesR-only
     print("Predicting: BayesR-only ...", flush=True)
-    y_hat_b = predict_bayesR(X_test, beta)
+    y_hat_b = predict_bayesR(X_test, beta, y_train.mean())
     results["bayesR"] = metrics(y_hat_b, y_true_test)
 
     # (b) GBLUP — single genome-wide GRM, fitted h² on training
@@ -397,22 +402,18 @@ def main():
 
     # (c) ARG-BLUP uniform — average of per-tree kinship
     print("Predicting: ARG-BLUP-uniform ...", flush=True)
-    K_a_train = G_train_full.mean(axis=0)
-    K_a_cross = G_cross_full.mean(axis=0)
-    s2, su2, alpha, mean_y = fit_blup(y_train, K_a_train)
-    y_hat_a = predict_blup(K_a_cross, alpha, mean_y)
+    s2, su2, alpha, mean_y = fit_blup(y_train, K_uni_train)
+    y_hat_a = predict_blup(K_uni_cross, alpha, mean_y)
     results["arg_blup_uniform"] = metrics(y_hat_a, y_true_test)
     results["arg_blup_uniform_h2"] = su2 / (su2 + s2)
 
     # (d) Full SARGENT
     y_hat_s = None
-    if ws2_full is not None and has_beta:
+    if ws2_full is not None and has_beta and K_sg_train is not None:
         print("Predicting: full SARGENT ...", flush=True)
         y_hat_s, sigma2_used = predict_sargent(
-            X_test, beta, ws2_full,
+            X_test, beta, K_sg_train, K_sg_cross,
             y_train=y_train, X_train=X_train,
-            G_per_tree_train=G_train_full,
-            G_per_tree_test_train=G_cross_full,
         )
         results["sargent"] = metrics(y_hat_s, y_true_test)
         results["sargent_sigma2"] = sigma2_used

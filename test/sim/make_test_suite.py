@@ -66,7 +66,7 @@ SCALES = {
 }
 
 
-def generate_one(case, scale_cfg, outdir, seed_offset, regime, dry_run, python_bin):
+def generate_one(case, scale_cfg, outdir, seed_offset, regime, n_test, dry_run, python_bin):
     name  = case["name"]
     scale_name = scale_cfg["_scale_name"]
     dest  = os.path.join(outdir, scale_name, name)
@@ -83,6 +83,7 @@ def generate_one(case, scale_cfg, outdir, seed_offset, regime, dry_run, python_b
     cmd = [
         python_bin, SIMULATE_PY,
         "--n-indiv",     str(scale_cfg["n_indiv"]),
+        "--n-test",      str(n_test),
         "--length",      str(scale_cfg["length"]),
         "--recomb-rate", str(scale_cfg["recomb_rate"]),
         "--mut-rate",    str(scale_cfg["mut_rate"]),
@@ -126,6 +127,8 @@ def main():
     ap.add_argument("--regime",       default="sparse",
                     choices=["sparse", "diffuse"],
                     help="ws² mixture regime passed to simulate.py (default: sparse)")
+    ap.add_argument("--n-test",       type=int, default=0,
+                    help="held-out test individuals per case (default: 0)")
     ap.add_argument("--seeds-offset", type=int, default=0,
                     help="add this to all seeds (for replicate runs)")
     ap.add_argument("--dry-run",      action="store_true",
@@ -150,7 +153,7 @@ def main():
               f"regime={args.regime}) ===", flush=True)
         for case in CASES:
             generate_one(case, cfg, args.outdir, args.seeds_offset, args.regime,
-                         args.dry_run, args.python)
+                         args.n_test, args.dry_run, args.python)
         print(flush=True)
 
     print("Done.", flush=True)
