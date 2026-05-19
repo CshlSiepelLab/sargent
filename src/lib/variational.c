@@ -157,7 +157,6 @@ sargent_t *sargent_new(geno_reader_t *gr, tsk_treeseq_t *ts, double *y)
             sg->rho[s * sg->M + m] = 1.0 / sg->M;
 
     sg->nprobe     = 10;   /* default; override via sg->nprobe before calling var_random */
-    sg->prior_type = 0;    /* default: Beta-Bernoulli spike-and-slab */
     sg->phi_alpha  = 1.0;  /* uniform Beta(1,1) hyperprior on phi */
     sg->phi_beta   = 1.0;
 
@@ -507,13 +506,12 @@ void var_random(sargent_t *sg, int silent)
         .nprobe = nprobe, .batch_size = 0, .use_gaussian = 0, .seed = 0,
     };
 
-    int horseshoe = (sg->prior_type == 1);
     int uniform   = sg->uniform_random;
     if (!silent)
-        fprintf(stderr, "var_random: %s (n=%d, S=%d, prior=%s)\n",
+        fprintf(stderr, "var_random: %s (n=%d, S=%d)\n",
                 uniform ? "uniform-kinship REML"
                         : "per-tree REML EM",
-                n, S, horseshoe ? "horseshoe" : "beta-bernoulli");
+                n, S);
 
     /* Per-tree ws2 bounds: floor prevents collapse to exact zero; ceiling
      * prevents runaway on a single tree.  In uniform mode the same ws2_max is
@@ -617,7 +615,6 @@ void var_random(sargent_t *sg, int silent)
      *
      * Score: log(ws2[s] / ws2_thresh), shifted by logit(phi_ref).
      *   phi_ref = phi_alpha / (phi_alpha + phi_beta)   (BB prior mean)
-     *   phi_ref = 0.5                                   (horseshoe: symmetric)
      *
      * Trees well above the threshold get rho ≈ 1; trees at the floor get
      * rho ≈ 0.  The Beta hyperprior (via phi_ref) shifts the decision
@@ -625,8 +622,7 @@ void var_random(sargent_t *sg, int silent)
      * requires ws2[s] to be much larger than ws2_thresh to be called active. */
     {
         double ws2_thresh = sqrt(ws2_floor * ws2_max);   /* = 1e-6 × ws2_max */
-        double phi_ref    = horseshoe ? 0.5
-                            : sg->phi_alpha / (sg->phi_alpha + sg->phi_beta + 1e-15);
+        double phi_ref    = sg->phi_alpha / (sg->phi_alpha + sg->phi_beta + 1e-15);
         double logit_phi  = log(phi_ref / (1.0 - phi_ref + 1e-15));
 
         double rho_sum = 0.0;
@@ -742,15 +738,14 @@ void var_joint(sargent_t *sg, int silent)
         .nprobe = sg->nprobe, .batch_size = 0, .use_gaussian = 0, .seed = 0,
     };
 
-    int horseshoe = (sg->prior_type == 1);
     int uniform   = sg->uniform_random;
     if (!silent)
         fprintf(stderr,
                 "var_joint: interleaved coordinate descent "
-                "(n=%d, p=%d, S=%d, %s%s, max_outer=%d)\n",
+                "(n=%d, p=%d, S=%d, %s, max_outer=%d)\n",
                 n, p, S,
                 uniform ? "uniform-random" : "per-tree",
-                horseshoe ? ", horseshoe" : "", max_outer);
+                max_outer);
 
     double sigma2_accum = 0.0;
     int    n_accum      = 0;
@@ -914,8 +909,7 @@ void var_joint(sargent_t *sg, int silent)
     /* --- Post-hoc rho (identical to var_random) --- */
     {
         double ws2_thresh = sqrt(ws2_floor * ws2_max);
-        double phi_ref    = horseshoe ? 0.5
-                            : sg->phi_alpha / (sg->phi_alpha + sg->phi_beta + 1e-15);
+        double phi_ref    = sg->phi_alpha / (sg->phi_alpha + sg->phi_beta + 1e-15);
         double logit_phi  = log(phi_ref / (1.0 - phi_ref + 1e-15));
         double rho_sum    = 0.0;
         for (int s = 0; s < S; s++) {

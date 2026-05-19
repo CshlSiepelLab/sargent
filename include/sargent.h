@@ -61,13 +61,8 @@ typedef struct {
     /* Tuning parameters for Stage 2. */
     int nprobe;    /* Hutchinson probe count; default 10 */
 
-    /* Prior type for Stage 2 segment weights.
-     * 0 = Beta-Bernoulli spike-and-slab (default).
-     * 1 = Horseshoe continuous shrinkage. */
-    int prior_type;
-
     /* Beta(phi_alpha, phi_beta) hyperprior on the activation probability phi
-     * (Beta-Bernoulli mode only).  Posterior mean update:
+     * for the spike-and-slab post-hoc classification.  Posterior mean update:
      *   phi = (phi_alpha + sum_s rho_s) / (phi_alpha + phi_beta + S)
      * Defaults to 1/1 (uniform).  Set phi_beta >> 1 for a sparse prior. */
     double phi_alpha;

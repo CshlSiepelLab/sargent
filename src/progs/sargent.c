@@ -125,7 +125,6 @@ int main(int argc, char *argv[])
     int ts_geno     = 0;
     int fixed_only  = 0;
     int random_only = 0;
-    int horseshoe   = 0;
     int nprobe      = 0;   /* 0 = use sargent_t default (10) */
     int uniform_rand= 0;
     int em_iters    = 0;   /* 0 = sequential; >0 = run var_em with this many outer iters */
@@ -138,7 +137,6 @@ int main(int argc, char *argv[])
         {"ts-geno",        0, 0, 'G'},
         {"fixed-only",     0, 0, 'F'},
         {"random-only",    0, 0, 'R'},
-        {"horseshoe",      0, 0, 'H'},
         {"pi0",            1, 0, 'P'},
         {"outroot",        1, 0, 'o'},
         {"nprobe",         1, 0, 'N'},
@@ -150,13 +148,12 @@ int main(int argc, char *argv[])
         {0, 0, 0, 0}
     };
 
-    while ((c = getopt_long(argc, argv, "zGFRHUE:Q:o:N:P:vh", long_opts, &opt_idx)) != -1) {
+    while ((c = getopt_long(argc, argv, "zGFRUE:Q:o:N:P:vh", long_opts, &opt_idx)) != -1) {
         switch (c) {
         case 'z': silent       = 1;                break;
         case 'G': ts_geno      = 1;                break;
         case 'F': fixed_only   = 1;                break;
         case 'R': random_only  = 1;                break;
-        case 'H': horseshoe    = 1;                break;
         case 'U': uniform_rand = 1;                break;
         case 'E': em_iters     = atoi(optarg);     break;
         case 'Q': pca_d        = atoi(optarg);     break;
@@ -254,11 +251,10 @@ int main(int argc, char *argv[])
         exit(EXIT_FAILURE);
     }
     if (nprobe > 0)  sg->nprobe = nprobe;
-    if (horseshoe)   sg->prior_type = 1;
     if (uniform_rand) sg->uniform_random = 1;
     if (em_iters > 0) sg->em_iters = em_iters;
     if (pca_d > 0)    sg->pca_d = pca_d;
-    if (pi0 > 0.0 && pi0 < 1.0 && !horseshoe) {
+    if (pi0 > 0.0 && pi0 < 1.0) {
         /* Beta(1, pi0/(1-pi0)) hyperprior: prior mean of phi = 1-pi0.
          * E.g. pi0=0.9 → Beta(1,9), prior mean phi=0.1 (10% active). */
         sg->phi_alpha = 1.0;
@@ -280,9 +276,8 @@ int main(int argc, char *argv[])
         /* ---- Joint variational coordinate descent ---- */
         if (!silent)
             fprintf(stderr,
-                    "Joint EM: %d outer iters (%d SNPs K=%d, %d trees prior=%s%s)...\n",
+                    "Joint EM: %d outer iters (%d SNPs K=%d, %d trees%s)...\n",
                     em_iters, sg->p, sg->K, sg->S,
-                    sg->prior_type == 1 ? "horseshoe" : "beta-bernoulli",
                     sg->uniform_random ? ", uniform-random" : "");
         var_joint(sg, silent);
         if (!silent)
@@ -306,9 +301,8 @@ int main(int argc, char *argv[])
         /* ---- Stage 2: random effects ---- */
         if (!fixed_only) {
             if (!silent)
-                fprintf(stderr, "Stage 2: inferring segment weights (%d trees, prior=%s%s)...\n",
-                        sg->S, sg->prior_type == 1 ? "horseshoe" : "beta-bernoulli",
-                        sg->uniform_random ? ", uniform-random" : "");
+                fprintf(stderr, "Stage 2: inferring segment weights (%d trees%s)...\n",
+                        sg->S, sg->uniform_random ? ", uniform-random" : "");
             var_random(sg, silent);
             if (!silent)
                 fprintf(stderr, "Stage 2 done: h2_random=%.4f  sigma2=%.4f\n",

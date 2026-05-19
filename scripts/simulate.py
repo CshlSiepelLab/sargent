@@ -233,8 +233,14 @@ def main():
     # Decide which variants will be written to the BED file (the "observed panel").
     # Variants are still in the ARG and can carry true β; this controls what Stage 1
     # sees as X.
+    #
+    # Use a SEPARATE rng stream (derived from args.seed but a different generator)
+    # so the bed-coverage draw does not perturb the phenotype-generation rng state.
+    # This guarantees that fixing --seed produces identical β, ws², and y across
+    # different --bed-coverage values — only the BED panel itself changes.
     if args.bed_coverage < 1.0:
-        bed_mask = rng.random(p) < args.bed_coverage
+        bed_rng = np.random.default_rng(args.seed + 1_000_003)
+        bed_mask = bed_rng.random(p) < args.bed_coverage
         if not bed_mask.any():
             sys.exit("ERROR: bed-coverage produced an empty BED panel; raise f")
         n_bed = int(bed_mask.sum())
