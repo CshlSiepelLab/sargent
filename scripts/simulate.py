@@ -127,6 +127,10 @@ def main():
     ap.add_argument("--h2-fixed",    type=float, default=0.3,  help="target fixed-effect heritability")
     ap.add_argument("--h2-random",   type=float, default=0.3,  help="target random-effect heritability")
     ap.add_argument("--n-causal",    type=int,   default=20,   help="number of causal SNPs (fixed effects)")
+    ap.add_argument("--bed-coverage", type=float, default=1.0,
+                    help="fraction of polymorphic SNPs to keep in the BED file (0 < f <= 1). "
+                         "Hidden SNPs still contribute to y via their true β and remain in the "
+                         "ARG/.trees output. Default: 1.0 (no hiding).")
     ap.add_argument("--seed",        type=int,   default=42,   help="random seed")
     ap.add_argument("--out",         type=str,   default="sim", help="output prefix")
     # BayesR-style mixture for fixed effects (sigma² relative to var_pheno=1)
@@ -167,6 +171,8 @@ def main():
         sys.exit("ERROR: h2_fixed + h2_random must be ≤ 1")
     if args.h2_fixed < 0 or args.h2_random < 0:
         sys.exit("ERROR: heritabilities must be non-negative")
+    if not (0.0 < args.bed_coverage <= 1.0):
+        sys.exit("ERROR: --bed-coverage must satisfy 0 < f <= 1")
 
     rng = np.random.default_rng(args.seed)
 
@@ -223,6 +229,19 @@ def main():
 
     dosage = np.stack(dosage_list)   # (p, n_indiv)
     positions = pos_list
+
+    # Decide which variants will be written to the BED file (the "observed panel").
+    # Variants are still in the ARG and can carry true β; this controls what Stage 1
+    # sees as X.
+    if args.bed_coverage < 1.0:
+        bed_mask = rng.random(p) < args.bed_coverage
+        if not bed_mask.any():
+            sys.exit("ERROR: bed-coverage produced an empty BED panel; raise f")
+        n_bed = int(bed_mask.sum())
+        print(f"  Keeping {n_bed}/{p} variants in BED ({100*n_bed/p:.1f}%)", flush=True)
+    else:
+        bed_mask = np.ones(p, dtype=bool)
+        n_bed = p
 
     # Standardize dosage to match SARGENT's GENO_STANDARDIZE (zero-mean, unit-variance).
     # betas are therefore in units of per-s.d. of genotype, consistent with inference.
@@ -310,6 +329,10 @@ def main():
     has_test = n_test > 0
     ts_train = None
 
+    # Restrict the BED panel to variants chosen by --bed-coverage.
+    bed_dosage   = dosage[bed_mask]
+    bed_positions = [positions[j] for j in range(p) if bed_mask[j]]
+
     if has_test:
         # Save full ARG (needed for cross-kinship between train and test in prediction)
         ts.dump(args.out + ".full.trees")
@@ -320,13 +343,14 @@ def main():
         ts_train = ts.simplify(samples=train_sample_nodes)
         ts_train.dump(args.out + ".trees")
 
-        # Train: phenotypes, genotypes for first n_train individuals
+        # Train: phenotypes + BED-panel genotypes for first n_train individuals
         np.savetxt(args.out + ".phen", y[:n_train], fmt="%.8g")
-        write_plink(args.out, dosage[:, :n_train], positions, n_train, p)
+        write_plink(args.out, bed_dosage[:, :n_train], bed_positions, n_train, n_bed)
 
-        # Test: phenotypes, genotypes for last n_test individuals
+        # Test: phenotypes + BED-panel genotypes for last n_test individuals
         np.savetxt(args.out + ".test.phen", y[n_train:], fmt="%.8g")
-        write_plink(args.out + ".test", dosage[:, n_train:], positions, n_test, p)
+        write_plink(args.out + ".test", bed_dosage[:, n_train:], bed_positions,
+                    n_test, n_bed)
 
         # Also save full phen for completeness
         np.savetxt(args.out + ".full.phen", y, fmt="%.8g")
@@ -339,12 +363,18 @@ def main():
     else:
         ts.dump(args.out + ".trees")
         np.savetxt(args.out + ".phen", y, fmt="%.8g")
-        write_plink(args.out, dosage, positions, n_train, p)
+        write_plink(args.out, bed_dosage, bed_positions, n_train, n_bed)
+
+    # Map full-panel indices to BED-panel indices (for SNPs that are in the BED)
+    bed_idx_of = np.full(p, -1, dtype=int)
+    bed_idx_of[bed_mask] = np.arange(n_bed)
 
     with open(args.out + ".true_beta.tsv", "w") as f:
-        f.write("snp_idx\tbp_pos\tbeta\n")
+        f.write("snp_idx\tbp_pos\tbeta\tin_bed\tbed_idx\n")
         for j in causal_idx:
-            f.write(f"{j}\t{positions[j]}\t{beta[j]:.8g}\n")
+            in_bed = 1 if bed_mask[j] else 0
+            f.write(f"{j}\t{positions[j]}\t{beta[j]:.8g}\t{in_bed}\t"
+                    f"{bed_idx_of[j] if in_bed else -1}\n")
 
     # ws2_vec is defined on the FULL ARG's trees (or on the only ARG if no test split).
     # If there is a test split, we also record train-tree ws² indexed by the simplified
@@ -374,8 +404,11 @@ def main():
         "n_trees":         (ts_train.num_trees if (has_test and ts_train is not None)
                             else n_trees),
         "n_trees_full":    n_trees,
-        "n_variants":      p,
+        "n_variants":      n_bed,
+        "n_variants_full": p,
+        "bed_coverage":    args.bed_coverage,
         "n_causal":        n_causal,
+        "n_causal_in_bed": int(bed_mask[causal_idx].sum()),
         "length":          args.length,
         "recomb_rate":     args.recomb_rate,
         "mut_rate":        args.mut_rate,

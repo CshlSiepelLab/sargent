@@ -161,6 +161,11 @@ sargent_t *sargent_new(geno_reader_t *gr, tsk_treeseq_t *ts, double *y)
     sg->phi_alpha  = 1.0;  /* uniform Beta(1,1) hyperprior on phi */
     sg->phi_beta   = 1.0;
 
+    /* Alternative-mode flags; off by default */
+    sg->uniform_random = 0;
+    sg->em_iters       = 0;
+    sg->pca_d          = 0;
+
     return sg;
 }
 
@@ -200,6 +205,11 @@ void sargent_free(sargent_t *sg)
  * ---------------------------------------------------------------------- */
 void var_fixed(sargent_t *sg, int silent)
 {
+    var_fixed_with_offset(sg, NULL, silent);
+}
+
+void var_fixed_with_offset(sargent_t *sg, const double *offset, int silent)
+{
     int n = sg->n;
     int p = sg->p;
     int K = sg->K;
@@ -220,9 +230,14 @@ void var_fixed(sargent_t *sg, int silent)
         return;
     }
 
-    /* Initialise residuals r = y - X β.
-     * On first call β = 0 so r = y; on re-entry the current β is used. */
+    /* Initialise residuals r = (y - offset) - X β.
+     * On first call β = 0 so r = y - offset; on re-entry the current β is used.
+     * The offset (typically u_hat from a joint-EM step) is subtracted once
+     * here; var_fixed itself does not modify sg->y. */
     memcpy(r, sg->y, (size_t)n * sizeof(double));
+    if (offset) {
+        for (int i = 0; i < n; i++) r[i] -= offset[i];
+    }
     for (int j = 0; j < p; j++) {
         if (sg->beta[j] == 0.0) continue;
         geno_seek(sg->gr, j);
@@ -231,6 +246,8 @@ void var_fixed(sargent_t *sg, int silent)
         for (int i = 0; i < n; i++) r[i] -= b * g[i];
     }
 
+    /* var_y uses the original y (so h2_fixed is reported on the original scale,
+     * not on the offset-corrected response). */
     double var_y = vec_var(sg->y, n);
     double old_sigma2 = sg->sigma2;
 
@@ -491,12 +508,16 @@ void var_random(sargent_t *sg, int silent)
     };
 
     int horseshoe = (sg->prior_type == 1);
+    int uniform   = sg->uniform_random;
     if (!silent)
-        fprintf(stderr, "var_random: per-tree REML EM (n=%d, S=%d, prior=%s)\n",
+        fprintf(stderr, "var_random: %s (n=%d, S=%d, prior=%s)\n",
+                uniform ? "uniform-kinship REML"
+                        : "per-tree REML EM",
                 n, S, horseshoe ? "horseshoe" : "beta-bernoulli");
 
     /* Per-tree ws2 bounds: floor prevents collapse to exact zero; ceiling
-     * prevents runaway on a single tree. */
+     * prevents runaway on a single tree.  In uniform mode the same ws2_max is
+     * used as the cap on the single shared σ_u²/S value. */
     double ws2_max   = var_y / fmax(S, 1);
     double ws2_floor = 1e-12 * ws2_max;
 
@@ -520,19 +541,35 @@ void var_random(sargent_t *sg, int silent)
         hutch_trace_all(cg, v_matvec, &vd, sg->ts, sg->hap_to_indiv,
                         n, S, sg->S_orig, sg->prune_map, B, &B_0, &hopts);
 
-        /* Per-tree REML EM: ws2[s] ← ws2[s] × A[s]/B[s].
-         * Fixed point: A[s] = B[s] for every segment s.  Null segments
-         * (A[s] < B[s]) shrink toward ws2_floor; active segments grow until
-         * their REML score reaches zero.  This is the per-segment analogue of
-         * the standard REML multiplicative update. */
+        /* REML EM update for segment weights.
+         *
+         * Per-tree mode (default): ws2[s] ← ws2[s] × A[s]/B[s].
+         *   Fixed point A[s] = B[s] for every segment s.  Null segments shrink
+         *   toward ws2_floor; active segments grow until their REML score is 0.
+         *
+         * Uniform mode: ws2[s] ≡ σ_u²/S for all s, where
+         *   σ_u² ← σ_u² × Σ_s A[s] / Σ_s B[s].
+         *   Equivalent to fitting a single random-effect variance against the
+         *   uniformly-weighted kinship K = Σ_s G_s / S. */
         double ws2_mean = 0.0;
-        for (int s = 0; s < S; s++) {
-            if (B[s] > 1e-30)
-                sg->ws2[s] *= A[s] / B[s];
-            sg->ws2[s] = fmax(ws2_floor, fmin(ws2_max, sg->ws2[s]));
-            ws2_mean += sg->ws2[s];
+        if (uniform) {
+            double A_sum = 0.0, B_sum = 0.0;
+            for (int s = 0; s < S; s++) { A_sum += A[s]; B_sum += B[s]; }
+            double ws2_old = sg->ws2[0];
+            double ws2_new = ws2_old;
+            if (B_sum > 1e-30) ws2_new = ws2_old * A_sum / B_sum;
+            ws2_new = fmax(ws2_floor, fmin(ws2_max, ws2_new));
+            for (int s = 0; s < S; s++) sg->ws2[s] = ws2_new;
+            ws2_mean = ws2_new;
+        } else {
+            for (int s = 0; s < S; s++) {
+                if (B[s] > 1e-30)
+                    sg->ws2[s] *= A[s] / B[s];
+                sg->ws2[s] = fmax(ws2_floor, fmin(ws2_max, sg->ws2[s]));
+                ws2_mean += sg->ws2[s];
+            }
+            ws2_mean /= S;
         }
-        ws2_mean /= S;
 
         /* sigma2 REML EM update */
         if (B_0 > 0.0) {
@@ -617,6 +654,288 @@ cleanup:
     free(work);
     free(order_buf);
     free(gv);
+}
+
+/* =========================================================================
+ * var_joint: interleaved coordinate descent for β, ws², σ² (joint EM)
+ * =========================================================================
+ *
+ * Each outer iteration performs:
+ *   1. r = y - Xβ           (residual)
+ *   2. r̃ = V^{-1} r         (one CG solve; V = Σ ws²·G_s + σ²I)
+ *   3. Compute A[s], B[s], A_0, B_0   (per-segment quadratic forms + traces)
+ *   4. ONE sweep over β_j using V-aware precision v_jj ≈ tr(V^{-1}) = B_0
+ *      and t_j = x_j^T r̃ + β_j_old · v_jj  (leave-one-out add-back)
+ *   5. Update π_k (BayesR mixture proportions)
+ *   6. Update ws²[s] via REML EM (per-tree or uniform mode)
+ *   7. Update σ² via REML EM (multiplicative)
+ *
+ * The β update uses the current (stale w.r.t. β-sweep) r̃; r̃ is recomputed at
+ * the start of the next iter.  This is the standard mean-field VB pattern:
+ * each parameter sees the latest value of the others between outer iterations.
+ *
+ * Initialised with β = 0 and warm uniform ws² so the very first β-sweep
+ * already sees a non-trivial random offset and cannot cannibalise.
+ *
+ * Post-hoc rho is computed after convergence, matching var_random.
+ * ====================================================================== */
+void var_joint(sargent_t *sg, int silent)
+{
+    int n      = sg->n;
+    int p      = sg->p;
+    int S      = sg->S;
+    int K      = sg->K;
+    int max_outer = sg->em_iters > 0 ? sg->em_iters : 100;
+    int burn_in   = max_outer / 2;
+    if (burn_in < 1)  burn_in = 1;
+    if (burn_in > 40) burn_in = 40;
+
+    /* Allocate β (zero) if not already done */
+    if (!sg->beta) {
+        sg->beta = calloc((size_t)p, sizeof(double));
+        if (!sg->beta) { fprintf(stderr, "var_joint: out of memory\n"); return; }
+    }
+
+    /* Allocate ws² with warm uniform init if not already done */
+    if (!sg->ws2) {
+        sg->ws2 = malloc((size_t)S * sizeof(double));
+        if (!sg->ws2) { fprintf(stderr, "var_joint: out of memory\n"); return; }
+        double ws2_init = sg->tau2_mix[sg->M - 1] * 0.5;
+        for (int s = 0; s < S; s++) sg->ws2[s] = ws2_init;
+    }
+
+    /* Working buffers */
+    double   *r          = malloc((size_t)n * sizeof(double));
+    double   *r_tilde    = calloc((size_t)n,  sizeof(double));
+    double   *A          = malloc((size_t)S * sizeof(double));
+    double   *B          = malloc((size_t)S * sizeof(double));
+    double   *g          = malloc((size_t)n * sizeof(double));
+    double   *log_g      = malloc((size_t)K * sizeof(double));
+    double   *gamma      = malloc((size_t)K * sizeof(double));
+    double   *gamma_sum  = malloc((size_t)K * sizeof(double));
+    double   *ws2_accum  = calloc((size_t)S,  sizeof(double));
+
+    tsk_size_t n_nodes   = tsk_treeseq_get_num_nodes(sg->ts);
+    double    *work      = malloc(2 * n_nodes * sizeof(double));
+    tsk_id_t  *order_buf = malloc(n_nodes * sizeof(tsk_id_t));
+    double    *gv        = malloc((size_t)n * sizeof(double));
+
+    cg_state_t *cg = cg_state_new(n, NULL);
+
+    if (!r || !r_tilde || !A || !B || !g || !log_g || !gamma || !gamma_sum ||
+        !ws2_accum || !work || !order_buf || !gv || !cg) {
+        fprintf(stderr, "var_joint: out of memory\n");
+        goto cleanup;
+    }
+
+    double var_y     = vec_var(sg->y, n);
+    double ws2_max   = var_y / fmax(S, 1);
+    double ws2_floor = 1e-12 * ws2_max;
+
+    v_matvec_data_t vd = {
+        .ts = sg->ts, .ws2 = sg->ws2, .sigma2 = sg->sigma2,
+        .n = n, .S = S, .S_orig = sg->S_orig, .prune_map = sg->prune_map,
+        .hap_to_indiv = sg->hap_to_indiv,
+        .work = work, .order_buf = order_buf, .gv = gv,
+    };
+    hutch_opts_t hopts = {
+        .nprobe = sg->nprobe, .batch_size = 0, .use_gaussian = 0, .seed = 0,
+    };
+
+    int horseshoe = (sg->prior_type == 1);
+    int uniform   = sg->uniform_random;
+    if (!silent)
+        fprintf(stderr,
+                "var_joint: interleaved coordinate descent "
+                "(n=%d, p=%d, S=%d, %s%s, max_outer=%d)\n",
+                n, p, S,
+                uniform ? "uniform-random" : "per-tree",
+                horseshoe ? ", horseshoe" : "", max_outer);
+
+    double sigma2_accum = 0.0;
+    int    n_accum      = 0;
+    double old_sigma2   = sg->sigma2;
+
+    for (int outer = 0; outer < max_outer; outer++) {
+
+        /* --- 1. Compute residual r = y - X β --- */
+        memcpy(r, sg->y, (size_t)n * sizeof(double));
+        int any_beta = 0;
+        for (int j = 0; j < p; j++) {
+            if (sg->beta[j] != 0.0) { any_beta = 1; break; }
+        }
+        if (any_beta) {
+            geno_rewind(sg->gr);
+            for (int j = 0; j < p; j++) {
+                if (geno_read_variant(sg->gr, g, GENO_STANDARDIZE) <= 0) break;
+                if (sg->beta[j] == 0.0) continue;
+                for (int i = 0; i < n; i++) r[i] -= sg->beta[j] * g[i];
+            }
+        }
+
+        /* --- 2. r̃ = V^{-1} r --- */
+        vd.sigma2 = sg->sigma2;
+        cg_solve(cg, v_matvec, &vd, r, r_tilde);
+
+        /* --- 3. A_0, A[s], B_0, B[s] --- */
+        double A_0 = 0.0, B_0 = 0.0;
+        for (int i = 0; i < n; i++) A_0 += r_tilde[i] * r_tilde[i];
+        compute_quad_all(sg->ts, sg->hap_to_indiv, n, S, sg->S_orig, sg->prune_map,
+                         r_tilde, A, work, order_buf, gv);
+        hutch_trace_all(cg, v_matvec, &vd, sg->ts, sg->hap_to_indiv,
+                        n, S, sg->S_orig, sg->prune_map, B, &B_0, &hopts);
+
+        /* --- 4. One β sweep with V-aware precision v_jj ≈ tr(V^{-1}) = B_0 --- */
+        double v_jj = (B_0 > 0.0) ? B_0 : (double)n / sg->sigma2;
+        memset(gamma_sum, 0, (size_t)K * sizeof(double));
+        double max_dbeta = 0.0;
+        int    n_read    = 0;
+
+        geno_rewind(sg->gr);
+        for (int j = 0; j < p; j++) {
+            if (geno_read_variant(sg->gr, g, GENO_STANDARDIZE) <= 0) break;
+            n_read++;
+            double beta_old = sg->beta[j];
+
+            /* t_j = x_j^T r̃ + β_old · v_jj  (LOO add-back via v_jj approximation) */
+            double xrt = 0.0;
+            for (int i = 0; i < n; i++) xrt += g[i] * r_tilde[i];
+            double t_j = xrt + beta_old * v_jj;
+
+            /* BayesR mixture posterior, identical form to var_fixed but with the
+             * V-aware precision v_jj in place of n/σ². */
+            double z_sq = t_j * t_j / v_jj;
+            double lmax = -1e300;
+            for (int k = 0; k < K; k++) {
+                double sk2 = sg->sigma2_mix[k];
+                double log_pi_k = log(sg->pi_mix[k] + PI_FLOOR);
+                if (sk2 == 0.0) {
+                    log_g[k] = log_pi_k - 0.5 * z_sq;
+                } else {
+                    double s_k = v_jj * sk2 + 1.0;
+                    log_g[k] = log_pi_k - 0.5 * (log(s_k) + z_sq / s_k);
+                }
+                if (log_g[k] > lmax) lmax = log_g[k];
+            }
+            double sum_g = 0.0;
+            for (int k = 0; k < K; k++) {
+                gamma[k] = exp(log_g[k] - lmax);
+                sum_g += gamma[k];
+            }
+            for (int k = 0; k < K; k++) gamma[k] /= sum_g;
+
+            double beta_new = 0.0;
+            for (int k = 0; k < K; k++) {
+                if (gamma[k] == 0.0 || sg->sigma2_mix[k] == 0.0) continue;
+                double v_post = 1.0 / (v_jj + 1.0 / sg->sigma2_mix[k]);
+                beta_new += gamma[k] * t_j * v_post;
+            }
+            sg->beta[j] = beta_new;
+            for (int k = 0; k < K; k++) gamma_sum[k] += gamma[k];
+
+            double delta = beta_new - beta_old;
+            if (fabs(delta) > max_dbeta) max_dbeta = fabs(delta);
+
+            /* Update r so subsequent β_j sweeps see the change.
+             * r̃ is NOT updated within the sweep — refreshed at start of next iter. */
+            for (int i = 0; i < n; i++) r[i] -= delta * g[i];
+        }
+
+        /* --- 5. Update mixture proportions --- */
+        if (n_read > 0)
+            for (int k = 0; k < K; k++)
+                sg->pi_mix[k] = gamma_sum[k] / n_read;
+
+        /* --- 6. ws²[s] update (per-tree REML EM or uniform mode) --- */
+        double ws2_mean = 0.0;
+        if (uniform) {
+            double A_sum = 0.0, B_sum = 0.0;
+            for (int s = 0; s < S; s++) { A_sum += A[s]; B_sum += B[s]; }
+            double ws2_old = sg->ws2[0];
+            double ws2_new = ws2_old;
+            if (B_sum > 1e-30) ws2_new = ws2_old * A_sum / B_sum;
+            ws2_new = fmax(ws2_floor, fmin(ws2_max, ws2_new));
+            for (int s = 0; s < S; s++) sg->ws2[s] = ws2_new;
+            ws2_mean = ws2_new;
+        } else {
+            for (int s = 0; s < S; s++) {
+                if (B[s] > 1e-30) sg->ws2[s] *= A[s] / B[s];
+                sg->ws2[s] = fmax(ws2_floor, fmin(ws2_max, sg->ws2[s]));
+                ws2_mean += sg->ws2[s];
+            }
+            ws2_mean /= S;
+        }
+
+        /* --- 7. σ² update --- */
+        if (B_0 > 0.0) {
+            sg->sigma2 *= A_0 / B_0;
+            sg->sigma2 = fmax(1e-10 * var_y, fmin(var_y, sg->sigma2));
+        }
+
+        /* Report h2_fixed from current X β̂, and h2_random from σ² + Xβ. */
+        double var_r = vec_var(r, n);
+        sg->h2_fixed  = (var_y > 0.0) ? fmax(0.0, 1.0 - var_r / var_y) : 0.0;
+        sg->h2_random = (var_y > 0.0) ? fmax(0.0, var_r / var_y - sg->sigma2 / var_y) : 0.0;
+        sg->h2        = sg->h2_fixed + sg->h2_random;
+
+        double rel_dsig = fabs(sg->sigma2 - old_sigma2) / (old_sigma2 + 1e-15);
+
+        if (outer >= burn_in) {
+            sigma2_accum += sg->sigma2;
+            for (int s = 0; s < S; s++) ws2_accum[s] += sg->ws2[s];
+            n_accum++;
+        }
+
+        if (!silent)
+            fprintf(stderr,
+                    "var_joint iter %3d: max_dβ=%.2e  sigma2=%.4f  h2_f=%.4f  h2_r=%.4f"
+                    "  ws2_mean=%.3e  v_jj=%.2e  rel_dsig=%.2e%s\n",
+                    outer + 1, max_dbeta, sg->sigma2, sg->h2_fixed, sg->h2_random,
+                    ws2_mean, v_jj, rel_dsig,
+                    outer >= burn_in ? " [avg]" : "");
+
+        old_sigma2 = sg->sigma2;
+    }
+
+    /* Polyak-Ruppert averaging */
+    if (n_accum > 0) {
+        sg->sigma2 = sigma2_accum / n_accum;
+        for (int s = 0; s < S; s++) sg->ws2[s] = ws2_accum[s] / n_accum;
+    }
+
+    /* Recompute final h2 from averaged values: h2_fixed = 1 - var(r)/var_y
+     * where r is the residual after the FINAL β sweep (already current). */
+    double var_r_final = vec_var(r, n);
+    sg->h2_fixed  = (var_y > 0.0) ? fmax(0.0, 1.0 - var_r_final / var_y) : 0.0;
+    sg->h2_random = (var_y > 0.0) ?
+        fmax(0.0, var_r_final / var_y - sg->sigma2 / var_y) : 0.0;
+    sg->h2        = sg->h2_fixed + sg->h2_random;
+
+    /* --- Post-hoc rho (identical to var_random) --- */
+    {
+        double ws2_thresh = sqrt(ws2_floor * ws2_max);
+        double phi_ref    = horseshoe ? 0.5
+                            : sg->phi_alpha / (sg->phi_alpha + sg->phi_beta + 1e-15);
+        double logit_phi  = log(phi_ref / (1.0 - phi_ref + 1e-15));
+        double rho_sum    = 0.0;
+        for (int s = 0; s < S; s++) {
+            double lw    = log(fmax(sg->ws2[s], ws2_floor) / ws2_thresh);
+            double score = logit_phi + lw;
+            score        = fmax(-SCORE_CAP, fmin(SCORE_CAP, score));
+            double rho_s = 1.0 / (1.0 + exp(-score));
+            sg->rho[s * 2 + 0] = 1.0 - rho_s;
+            sg->rho[s * 2 + 1] = rho_s;
+            rho_sum += rho_s;
+        }
+        sg->phi_mix[sg->M - 1] = rho_sum / fmax(S, 1);
+        sg->tau2_mix[sg->M - 1] = ws2_thresh;
+    }
+
+cleanup:
+    cg_state_free(cg);
+    free(r); free(r_tilde); free(A); free(B); free(g);
+    free(log_g); free(gamma); free(gamma_sum);
+    free(ws2_accum); free(work); free(order_buf); free(gv);
 }
 
 /* =========================================================================

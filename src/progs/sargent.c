@@ -127,33 +127,42 @@ int main(int argc, char *argv[])
     int random_only = 0;
     int horseshoe   = 0;
     int nprobe      = 0;   /* 0 = use sargent_t default (10) */
+    int uniform_rand= 0;
+    int em_iters    = 0;   /* 0 = sequential; >0 = run var_em with this many outer iters */
+    int pca_d       = 0;   /* 0 = no PCA preprojection */
     double pi0      = -1.0; /* < 0 means unset */
     const char *outroot = "sargent";
 
     struct option long_opts[] = {
-        {"silent",      0, 0, 'z'},
-        {"ts-geno",     0, 0, 'G'},
-        {"fixed-only",  0, 0, 'F'},
-        {"random-only", 0, 0, 'R'},
-        {"horseshoe",   0, 0, 'H'},
-        {"pi0",         1, 0, 'P'},
-        {"outroot",     1, 0, 'o'},
-        {"nprobe",      1, 0, 'N'},
-        {"version",     0, 0, 'v'},
-        {"help",        0, 0, 'h'},
+        {"silent",         0, 0, 'z'},
+        {"ts-geno",        0, 0, 'G'},
+        {"fixed-only",     0, 0, 'F'},
+        {"random-only",    0, 0, 'R'},
+        {"horseshoe",      0, 0, 'H'},
+        {"pi0",            1, 0, 'P'},
+        {"outroot",        1, 0, 'o'},
+        {"nprobe",         1, 0, 'N'},
+        {"uniform-random", 0, 0, 'U'},
+        {"em",             1, 0, 'E'},
+        {"pca",            1, 0, 'Q'},
+        {"version",        0, 0, 'v'},
+        {"help",           0, 0, 'h'},
         {0, 0, 0, 0}
     };
 
-    while ((c = getopt_long(argc, argv, "zGFRHo:N:P:vh", long_opts, &opt_idx)) != -1) {
+    while ((c = getopt_long(argc, argv, "zGFRHUE:Q:o:N:P:vh", long_opts, &opt_idx)) != -1) {
         switch (c) {
-        case 'z': silent      = 1;                break;
-        case 'G': ts_geno     = 1;                break;
-        case 'F': fixed_only  = 1;                break;
-        case 'R': random_only = 1;                break;
-        case 'H': horseshoe   = 1;                break;
-        case 'P': pi0         = atof(optarg);     break;
-        case 'o': outroot     = optarg;           break;
-        case 'N': nprobe      = atoi(optarg);     break;
+        case 'z': silent       = 1;                break;
+        case 'G': ts_geno      = 1;                break;
+        case 'F': fixed_only   = 1;                break;
+        case 'R': random_only  = 1;                break;
+        case 'H': horseshoe    = 1;                break;
+        case 'U': uniform_rand = 1;                break;
+        case 'E': em_iters     = atoi(optarg);     break;
+        case 'Q': pca_d        = atoi(optarg);     break;
+        case 'P': pi0          = atof(optarg);     break;
+        case 'o': outroot      = optarg;           break;
+        case 'N': nprobe       = atoi(optarg);     break;
         case 'v': printf("sargent version %s\n", SARGENT_VERSION); exit(0);
         case 'h': printf("%s", HELP); exit(0);
         case '?':
@@ -246,6 +255,9 @@ int main(int argc, char *argv[])
     }
     if (nprobe > 0)  sg->nprobe = nprobe;
     if (horseshoe)   sg->prior_type = 1;
+    if (uniform_rand) sg->uniform_random = 1;
+    if (em_iters > 0) sg->em_iters = em_iters;
+    if (pca_d > 0)    sg->pca_d = pca_d;
     if (pi0 > 0.0 && pi0 < 1.0 && !horseshoe) {
         /* Beta(1, pi0/(1-pi0)) hyperprior: prior mean of phi = 1-pi0.
          * E.g. pi0=0.9 → Beta(1,9), prior mean phi=0.1 (10% active). */
@@ -253,28 +265,56 @@ int main(int argc, char *argv[])
         sg->phi_beta  = pi0 / (1.0 - pi0);
     }
 
-    /* ---- Stage 1: fixed effects ---- */
-    if (!random_only) {
-        if (!silent)
-            fprintf(stderr, "Stage 1: inferring fixed effects (%d SNPs, K=%d)...\n",
-                    sg->p, sg->K);
-        var_fixed(sg, silent);
-        if (!silent)
-            fprintf(stderr, "Stage 1 done: h2_fixed=%.4f  sigma2=%.4f\n",
-                    sg->h2_fixed, sg->sigma2);
-        write_beta_table(sg, outroot, silent);
+    if (pca_d > 0) {
+        fprintf(stderr, "ERROR: --pca is not yet implemented.\n");
+        sargent_free(sg);
+        exit(EXIT_FAILURE);
+    }
+    if (em_iters > 0 && (fixed_only || random_only)) {
+        fprintf(stderr, "ERROR: --em cannot be combined with --fixed-only or --random-only.\n");
+        sargent_free(sg);
+        exit(EXIT_FAILURE);
     }
 
-    /* ---- Stage 2: random effects ---- */
-    if (!fixed_only) {
+    if (em_iters > 0) {
+        /* ---- Joint variational coordinate descent ---- */
         if (!silent)
-            fprintf(stderr, "Stage 2: inferring segment weights (%d trees, prior=%s)...\n",
-                    sg->S, sg->prior_type == 1 ? "horseshoe" : "beta-bernoulli");
-        var_random(sg, silent);
+            fprintf(stderr,
+                    "Joint EM: %d outer iters (%d SNPs K=%d, %d trees prior=%s%s)...\n",
+                    em_iters, sg->p, sg->K, sg->S,
+                    sg->prior_type == 1 ? "horseshoe" : "beta-bernoulli",
+                    sg->uniform_random ? ", uniform-random" : "");
+        var_joint(sg, silent);
         if (!silent)
-            fprintf(stderr, "Stage 2 done: h2_random=%.4f  sigma2=%.4f\n",
-                    sg->h2_random, sg->sigma2);
+            fprintf(stderr, "Joint EM done: h2_fixed=%.4f  h2_random=%.4f  sigma2=%.4f\n",
+                    sg->h2_fixed, sg->h2_random, sg->sigma2);
+        write_beta_table(sg, outroot, silent);
         write_w2_table(sg, outroot, silent);
+    } else {
+        /* ---- Stage 1: fixed effects ---- */
+        if (!random_only) {
+            if (!silent)
+                fprintf(stderr, "Stage 1: inferring fixed effects (%d SNPs, K=%d)...\n",
+                        sg->p, sg->K);
+            var_fixed(sg, silent);
+            if (!silent)
+                fprintf(stderr, "Stage 1 done: h2_fixed=%.4f  sigma2=%.4f\n",
+                        sg->h2_fixed, sg->sigma2);
+            write_beta_table(sg, outroot, silent);
+        }
+
+        /* ---- Stage 2: random effects ---- */
+        if (!fixed_only) {
+            if (!silent)
+                fprintf(stderr, "Stage 2: inferring segment weights (%d trees, prior=%s%s)...\n",
+                        sg->S, sg->prior_type == 1 ? "horseshoe" : "beta-bernoulli",
+                        sg->uniform_random ? ", uniform-random" : "");
+            var_random(sg, silent);
+            if (!silent)
+                fprintf(stderr, "Stage 2 done: h2_random=%.4f  sigma2=%.4f\n",
+                        sg->h2_random, sg->sigma2);
+            write_w2_table(sg, outroot, silent);
+        }
     }
 
     /* ---- Summary statistics ---- */

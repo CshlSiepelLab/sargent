@@ -209,24 +209,16 @@ def predict_sargent(X_test, beta, K_train, K_cross,
                     y_train, X_train):
     """Full SARGENT prediction with pre-combined kinship.
 
-    y_test_hat = mean_y + X_test β + K_test_train V_train^{-1} (y_train - mean_y - X_train β)
-       where V_train = K_train + σ² I and K_train = Σ_s ws²[s] G_s.
-    σ² is set to the residual variance after fixed effects + random component contribution.
+    Fits σ², σ_u² on the residual r = y - X β̂ by REML (same machinery as
+    GBLUP / ARG-BLUP-uniform) so that prediction quality across methods is
+    comparable on equal footing — only the kinship matrix differs.
+
+    y_test_hat = X_test β̂ + mean_r + K_cross · α,  α = (K_train + λI)^{-1} (r − mean_r)
     """
-    n = len(y_train)
-    mean_y = y_train.mean()
-    r = (y_train - mean_y) - X_train.T @ beta
-    var_r = float(np.var(r))
-    sigma2 = max(var_r - np.trace(K_train) / n, 1e-6 * var_r)
-    V = K_train + sigma2 * np.eye(n)
-    try:
-        L = np.linalg.cholesky(V)
-    except np.linalg.LinAlgError:
-        V = V + 1e-6 * np.eye(n)
-        L = np.linalg.cholesky(V)
-    Vinv_r = np.linalg.solve(L.T, np.linalg.solve(L, r))
-    u_test  = K_cross @ Vinv_r
-    y_test_hat = mean_y + X_test.T @ beta + u_test
+    r = y_train - X_train.T @ beta
+    sigma2, _sigma_u2, alpha, mean_r = fit_blup(r, K_train)
+    u_test = K_cross @ alpha
+    y_test_hat = X_test.T @ beta + mean_r + u_test
     return y_test_hat, sigma2
 
 

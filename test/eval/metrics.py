@@ -33,8 +33,31 @@ def load_true_ws2(prefix):
 
 
 def load_true_beta(prefix, n_variants):
-    """Returns array of true β values (length n_variants, 0 for non-causal)."""
+    """Returns array of true β values of length n_variants (BED-panel size).
+
+    For pre-bed-coverage true_beta.tsv (3 columns), uses snp_idx directly.
+    For newer format with `in_bed` / `bed_idx` columns, uses bed_idx to map
+    causal SNPs to their position in the BED panel; hidden causals are excluded.
+    """
     beta = np.zeros(n_variants)
+    with open(prefix + ".true_beta.tsv") as f:
+        header = f.readline().strip().split("\t")
+    has_bed_idx = "bed_idx" in header
+    if has_bed_idx:
+        bed_idx_col = header.index("bed_idx")
+        beta_col    = header.index("beta")
+        rows = np.loadtxt(prefix + ".true_beta.tsv", skiprows=1,
+                          usecols=(beta_col, bed_idx_col))
+        if rows.size == 0:
+            return beta
+        if rows.ndim == 1:
+            rows = rows[np.newaxis, :]
+        vals = rows[:, 0]
+        bidx = rows[:, 1].astype(int)
+        mask = bidx >= 0
+        beta[bidx[mask]] = vals[mask]
+        return beta
+    # legacy 3-column format
     rows = np.loadtxt(prefix + ".true_beta.tsv", skiprows=1, usecols=(0, 2))
     if rows.size == 0:
         return beta
@@ -42,7 +65,8 @@ def load_true_beta(prefix, n_variants):
         rows = rows[np.newaxis, :]
     idx  = rows[:, 0].astype(int)
     vals = rows[:, 1]
-    beta[idx] = vals
+    valid = idx < n_variants
+    beta[idx[valid]] = vals[valid]
     return beta
 
 

@@ -72,6 +72,19 @@ typedef struct {
      * Defaults to 1/1 (uniform).  Set phi_beta >> 1 for a sparse prior. */
     double phi_alpha;
     double phi_beta;
+
+    /* Alternative fitting modes (for systematic comparison).
+     * uniform_random: 1 = single sigma_u^2 shared across all trees in Stage 2
+     *   (effectively ARG-BLUP with a uniformly-weighted kinship matrix);
+     *   0 = per-tree REML EM (default).
+     * em_iters: number of outer EM iterations alternating var_fixed_with_offset
+     *   and var_random; 0 = no EM (default; sequential Stage 1 then Stage 2).
+     * pca_d: number of leading principal components of X to fit as unshrunk
+     *   fixed effects before the BayesR Stage 1 (PCA pre-projection mode);
+     *   0 = disabled (default). */
+    int uniform_random;
+    int em_iters;
+    int pca_d;
 } sargent_t;
 
 sargent_t *sargent_new(geno_reader_t *gr, tsk_treeseq_t *ts, double *y);

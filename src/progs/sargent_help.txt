@@ -62,6 +62,31 @@ MAIN OPTIONS:
         Set the output file prefix (default: "sargent").  Output files
         are named <prefix>.beta.tsv and <prefix>.w2.tsv.
 
+ALGORITHMIC VARIANTS (for systematic comparison):
+    --uniform-random, -U
+        Replace Stage 2's per-tree REML with a single shared variance
+        component on the uniformly-weighted kinship K = (1/S) sum_s G_s.
+        Equivalent to fitting ARG-BLUP with a single tau^2.  Useful when
+        per-tree weights are unidentifiable.
+
+    --em <N>, -E <N>
+        Run joint variational coordinate descent for <N> outer iterations.
+        Each outer iteration does ONE V-solve, ONE sweep of BayesR beta
+        updates using V-aware precision (instead of sigma^2 I), and ONE
+        REML EM step on ws^2 and sigma^2.  All updates share a common
+        residual snapshot per iteration; refreshed at the start of the
+        next iteration (manuscript-style mean-field VB).
+        Initialised with beta=0 and warm uniform ws^2 so the first beta
+        sweep sees a non-trivial random offset and cannot cannibalise.
+        Polyak-Ruppert averaging on ws^2 and sigma^2 over the second half.
+        Cannot be combined with --fixed-only or --random-only.
+
+    --pca <d>, -Q <d>
+        (Not yet implemented.)  Project the top <d> principal components
+        of X into an unshrunk fixed-effect term before Stage 1, fitting
+        beta only on the residual X^perp.  Mitigates fixed/random
+        identifiability competition along major axes of X.
+
 OUTPUT FILES:
     <outroot>.beta.tsv
         Fixed-effect estimates.  Written after Stage 1 (or when both
