@@ -55,6 +55,21 @@ MAIN OPTIONS:
         Set the output file prefix (default: "sargent").  Output files
         are named <prefix>.beta.tsv and <prefix>.w2.tsv.
 
+    --mode <name>, -M <name>
+        Choose the operational mode (default: predict).  Modes:
+          predict   — out-of-sample prediction.  Runs sequential (default)
+                      or joint EM (with --em N).  Outputs .beta.tsv,
+                      .w2.tsv, .summary.json.  Variance components in
+                      .summary.json are biased; use --mode varcomp for
+                      accurate estimates.
+          varcomp   — method-of-moments variance components.  Unbiased
+                      h2_fixed, h2_random, sigma2 estimates without
+                      fitting beta or per-tree ws2.  Outputs
+                      .summary.json only.  Cannot be combined with --em,
+                      --uniform-random, --fixed-only, or --random-only.
+          localize  — per-window missing heritability decomposition (not
+                      yet implemented; see ROADMAP.md Phase 7).
+
 ALGORITHMIC VARIANTS (for systematic comparison):
     --uniform-random, -U
         Replace Stage 2's per-tree REML with a single shared variance

@@ -147,6 +147,115 @@ then `var_fixed` on the residualised y for polygenicity, then writes
   even at debug scale.
 - Compare polygenicity (π_k) to simulator's `pi_mix`. Should be close.
 
+### Known issue — K_X / K_g identifiability collapse (2026-05-19)
+
+Smoke tests of the two-GRM MoM as currently implemented all fail to
+attribute variance correctly:
+
+| Case | True h²f / h²r | MoM h²f / h²r |
+|---|---|---|
+| f=1.0 (mixed h²=0.35/0.35) | 0.35 / 0.35 | **0.978 / 0.022** |
+| rand_only sparse | 0.00 / 0.78 | **0.512 / 0.005** |
+| fixed_only | 0.80 / 0.00 | 0.139 / 0.000 |
+| rand_only diffuse | 0.00 / 0.75 | **0.612 / 0.012** |
+
+In `rand_only` (truth h²f = 0), MoM assigns ~50–60% of variance to
+fixed effects. This holds in BOTH sparse and diffuse simulator regimes,
+so it isn't just sparse-vs-diffuse model misspecification.
+
+**Root cause: K_X and K_g share structure by construction.** The BED
+SNPs live on the same ARG that generates K_g, so they LD-tag the same
+genealogical patterns. In `rand_only`:
+- truth: y has no fixed-effect component
+- empirical `y'K_X y` = 1231 vs expected `σ² tr(K_X)` ≈ 40 for random y
+- → y has substantial K_X-aligned structure even with β=0
+- → MoM linear system can't tell K_X-explained from K_g-explained
+  variance and arbitrarily picks K_X (higher effective rank → more
+  flexibility to fit the data).
+
+This is the same fixed/random identifiability problem that bites
+sequential SARGENT and joint EM — at the moment-equation level instead
+of the variational level.
+
+### Options forward
+
+Need to choose direction with the user before committing more work:
+
+**(a) Drop two-GRM MoM, use single-GRM MoM.** Single GRM ($K_g$ only)
+gives total h² without partition. Use as a sanity check on total h²,
+accept that fixed/random split is hard.
+
+**(b) Use chromosome / region partitioning (LDSC-style).** Define K_g
+on TRANS effects only (cross-chromosome contributions) and K_X on the
+focal region. Cross-chromosome structure should be K_X-free.
+
+**(c) Project K_g into K_X-complement.** Use K_g_residual = K_g − P_X
+K_g P_X where P_X is projection onto X. Fit a single random
+component on K_g_residual.
+
+**(d) Use REML with a strong prior that puts mass on h²f > 0 only
+when X provides clear evidence.** Bayesian regularisation.
+
+**(e) Run the BayesR / Stage 1 fit first** (which has its own bias toward
+fixed) and then do single-GRM MoM on the residual. This is essentially
+what sequential SARGENT already does — just acknowledge the bias and
+report it transparently.
+
+**Currently leaning**: (a) + transparent documentation as the
+manuscript story. The "missing heritability" framing from Phase 7 can
+work with just single-GRM h²_total (the difference between BayesR-only
+h² and full SARGENT h² captures the ARG contribution).
+
+### Original diagnostic notes (kept for record)
+
+Initial smoke test of `var_mom` on `seed=42 f=0.1` (truth: h²f≈0.35,
+h²r≈0.35) gave MoM estimates h²f=0.16, h²r=0.007, σ²=1.06 — strongly
+under-attributing to random. Root cause was thought to be *model misspecification* (sparse
+truth vs uniform-kinship assumption); subsequent tests in the diffuse
+regime showed the bias persists, pointing instead to the K_X/K_g
+structural confounding documented above.
+
+- MoM's assumed kinship is $K_g = \frac{1}{S}\sum_s G_s$, uniform per
+  tree.
+- The simulator's truth has *sparse* per-tree $w_s^2$ (only ~5% trees
+  active in `sparse` regime). True $\mathrm{Cov}(u) = \sum_s w_s^2 G_s
+  \neq \sigma^2_g \cdot K_g$.
+- Net effect: $y^T K_g y$ is much smaller than the MoM model predicts
+  under the assumed uniform-kinship structure, because the active
+  trees' kinship signal gets diluted by the inactive trees.
+- Computed: empirical $y^T K_{g,\text{norm}} y$ = 471 vs predicted (under
+  h²r=0.35) ≈ 10,000. MoM resolves this by setting $\sigma^2_{g,\text{norm}}
+  \approx 0.008$ to match the data — but this is an artefact of model
+  vs truth mismatch, not a bug.
+- Diagnostic clue: $K_g$ effective rank is ≈1.7 (tr$^2$/tr$^2$),
+  meaning $K_g$ is nearly constant (dominated by the deep shared
+  branches). Most of $K_g$'s "structure" is in $\mathbf{1}_n \mathbf{1}_n^T$,
+  which is orthogonal to centred $y$.
+
+This is a real limitation of the uniform-kinship MoM. Options to
+address:
+
+(a) **Use a sparser kinship**: define $K_g$ from a *subset* of trees
+that we expect to be active (e.g., trees in the upper quartile of
+$y^T G_s y$). But this is post-hoc and risks circular reasoning.
+
+(b) **Test with diffuse-regime simulator**: re-run with
+`--regime diffuse` (75% active trees). The uniform-kinship MoM
+assumption should hold approximately.
+
+(c) **Multi-component MoM**: partition $\sum_s G_s$ into $W$ blocks (by
+genomic position) and fit $W$ separate $\sigma^2_w$. With $W \sim 10$
+this should recover sparse structure without giving up identifiability.
+This is essentially Phase 7 (localize) imported here.
+
+(d) **Accept the bias**: document that uniform-kinship MoM is a lower
+bound on h²_random when the truth is sparse. Useful as a conservative
+estimate.
+
+**Decision deferred** until we've validated MoM in the diffuse regime
+to confirm the diagnosis. If MoM works in diffuse but fails in sparse,
+it's confirmed model misspecification and option (b) or (c) is needed.
+
 ### Estimated effort
 
 3–5 days for global MoM + polygenicity, including a parallel
@@ -161,6 +270,50 @@ implementation in Python for validation against the C version.
 - [ ] Validation: MoM h² matches realised h² ± 10% across seeds in
   multiseed bed-coverage sweep
 - [ ] Update `ROADMAP.md` to reflect completion
+
+### Extension — MoM as preprocessing for predict and localize modes
+
+Once Phase 1's global MoM is working, the same machinery becomes a
+preprocessing step that benefits both other modes by *removing* the
+cannibalisation bias from β / ws² estimation.
+
+**For predict mode:**
+1. Run MoM globally to get $\hat\sigma^2_g$, $\hat\sigma^2$.
+2. Compute $\hat u_{\text{global}} = \hat\sigma^2_g K_g V_{\text{mom}}^{-1} y$ where
+   $V_{\text{mom}} = \hat\sigma^2_g K_g + \hat\sigma^2 I$.
+3. Form residualised response $\tilde y = y - \hat u_{\text{global}}$.
+4. Run Stage 1 BayesR (or joint EM) on $\tilde y$ instead of $y$. Stage 1
+   no longer competes with the random component for variance — it sees
+   only the residual signal that's NOT explained by the ARG-uniform
+   kinship.
+5. Final prediction: $\hat y_{\text{test}} = X_{\text{test}}\hat\beta + \text{BLUP}$.
+
+Expected benefit: β estimates closer to the true causal effects when
+the BED panel has high coverage; faster convergence of Stage 1 since
+the residual has less structure.
+
+**For localize mode:**
+- Global MoM gives the total partition $(\sigma^2_\beta, \sigma^2_g, \sigma^2)$.
+- Per-window MoM then partitions the random component into per-window
+  contributions, conditional on the global σ² being known.
+- This sidesteps the per-tree identifiability problem by working at
+  Mb-scale window resolution.
+
+**CLI option**: `--mom-preprocess` flag that, when combined with
+`--mode predict` (or default), runs global MoM first then proceeds with
+the prediction pipeline using the residualised y. For `--mode localize`
+this is the default behaviour (global MoM is part of the pipeline).
+
+### Deliverables (extension)
+
+- [ ] `--mom-preprocess` flag on the CLI
+- [ ] Internal: var_fixed / var_joint / var_random accept an offset
+  argument (the MoM BLUP global random prediction) — this was the
+  removed `var_fixed_with_offset`; reintroduce in a more general form.
+- [ ] Validation: compare `--mode predict` with and without
+  `--mom-preprocess`. Test the hypothesis that β estimates become
+  cleaner (closer to truth) when the global random component is removed
+  first. Use the existing `predict.py` framework.
 
 ---
 

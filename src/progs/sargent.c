@@ -123,7 +123,7 @@ static void write_w2_table(sargent_t *sg, const char *outroot, int silent)
  * h²_fixed and h²_random fields as informative but not definitive.
  */
 static void write_summary_json(sargent_t *sg, const char *outroot,
-                               int em_iters, int silent)
+                               const char *mode, int em_iters, int silent)
 {
     char fname[4096];
     snprintf(fname, sizeof(fname), "%s.summary.json", outroot);
@@ -133,7 +133,6 @@ static void write_summary_json(sargent_t *sg, const char *outroot,
         return;
     }
 
-    const char *mode = (em_iters > 0) ? "joint_em" : "sequential";
     fprintf(f, "{\n");
     fprintf(f, "  \"mode\":            \"%s\",\n", mode);
     fprintf(f, "  \"em_iters\":        %d,\n",     em_iters);
@@ -177,6 +176,7 @@ int main(int argc, char *argv[])
     int em_iters    = 0;   /* 0 = sequential; >0 = joint EM outer iters */
     double pi0      = -1.0; /* < 0 means unset */
     const char *outroot = "sargent";
+    const char *mode_str = "predict";   /* predict | varcomp | localize */
 
     struct option long_opts[] = {
         {"silent",         0, 0, 'z'},
@@ -188,12 +188,13 @@ int main(int argc, char *argv[])
         {"nprobe",         1, 0, 'N'},
         {"uniform-random", 0, 0, 'U'},
         {"em",             1, 0, 'E'},
+        {"mode",           1, 0, 'M'},
         {"version",        0, 0, 'v'},
         {"help",           0, 0, 'h'},
         {0, 0, 0, 0}
     };
 
-    while ((c = getopt_long(argc, argv, "zGFRUE:o:N:P:vh", long_opts, &opt_idx)) != -1) {
+    while ((c = getopt_long(argc, argv, "zGFRUE:M:o:N:P:vh", long_opts, &opt_idx)) != -1) {
         switch (c) {
         case 'z': silent       = 1;                break;
         case 'G': ts_geno      = 1;                break;
@@ -201,6 +202,7 @@ int main(int argc, char *argv[])
         case 'R': random_only  = 1;                break;
         case 'U': uniform_rand = 1;                break;
         case 'E': em_iters     = atoi(optarg);     break;
+        case 'M': mode_str     = optarg;           break;
         case 'P': pi0          = atof(optarg);     break;
         case 'o': outroot      = optarg;           break;
         case 'N': nprobe       = atoi(optarg);     break;
@@ -210,6 +212,26 @@ int main(int argc, char *argv[])
             fprintf(stderr, "Bad argument.  Try 'sargent -h'.\n");
             exit(EXIT_FAILURE);
         }
+    }
+
+    /* Resolve mode */
+    int mode_predict = (strcmp(mode_str, "predict") == 0);
+    int mode_varcomp = (strcmp(mode_str, "varcomp") == 0);
+    int mode_localize= (strcmp(mode_str, "localize") == 0);
+    if (!mode_predict && !mode_varcomp && !mode_localize) {
+        fprintf(stderr, "ERROR: unrecognized --mode '%s'.  Choose from "
+                "predict, varcomp, localize.\n", mode_str);
+        exit(EXIT_FAILURE);
+    }
+    if (mode_localize) {
+        fprintf(stderr, "ERROR: --mode localize not yet implemented "
+                "(see ROADMAP.md, Phase 7).\n");
+        exit(EXIT_FAILURE);
+    }
+    if (mode_varcomp && (fixed_only || random_only || em_iters > 0 || uniform_rand)) {
+        fprintf(stderr, "ERROR: --mode varcomp cannot be combined with "
+                "--fixed-only, --random-only, --em, or --uniform-random.\n");
+        exit(EXIT_FAILURE);
     }
 
     if (fixed_only && random_only) {
@@ -310,8 +332,16 @@ int main(int argc, char *argv[])
         exit(EXIT_FAILURE);
     }
 
-    if (em_iters > 0) {
-        /* ---- Joint variational coordinate descent ---- */
+    if (mode_varcomp) {
+        /* ---- Mode: varcomp.  Method-of-moments variance components.
+         * No beta or per-tree ws2 estimated; just the three VCs. ---- */
+        if (!silent)
+            fprintf(stderr,
+                    "MoM varcomp: n=%d, p=%d, S=%d, nprobe=%d\n",
+                    sg->n, sg->p, sg->S, sg->nprobe);
+        var_mom(sg, silent);
+    } else if (em_iters > 0) {
+        /* ---- Joint variational coordinate descent (mode: predict) ---- */
         if (!silent)
             fprintf(stderr,
                     "Joint EM: %d outer iters (%d SNPs K=%d, %d trees%s)...\n",
@@ -324,7 +354,7 @@ int main(int argc, char *argv[])
         write_beta_table(sg, outroot, silent);
         write_w2_table(sg, outroot, silent);
     } else {
-        /* ---- Stage 1: fixed effects ---- */
+        /* ---- Sequential mode: Stage 1 then Stage 2 (mode: predict) ---- */
         if (!random_only) {
             if (!silent)
                 fprintf(stderr, "Stage 1: inferring fixed effects (%d SNPs, K=%d)...\n",
@@ -336,7 +366,6 @@ int main(int argc, char *argv[])
             write_beta_table(sg, outroot, silent);
         }
 
-        /* ---- Stage 2: random effects ---- */
         if (!fixed_only) {
             if (!silent)
                 fprintf(stderr, "Stage 2: inferring segment weights (%d trees%s)...\n",
@@ -350,7 +379,11 @@ int main(int argc, char *argv[])
     }
 
     /* Write coherent summary of the final fit. */
-    write_summary_json(sg, outroot, em_iters, silent);
+    {
+        const char *m = mode_varcomp ? "varcomp"
+                       : (em_iters > 0 ? "joint_em" : "sequential");
+        write_summary_json(sg, outroot, m, em_iters, silent);
+    }
 
     /* ---- Summary statistics ---- */
     if (!silent) {

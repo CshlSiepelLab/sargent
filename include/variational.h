@@ -24,6 +24,27 @@ void var_fixed(sargent_t *sg, int silent);
    Iterates sg->em_iters times; post-hoc rho computed at end. */
 void var_joint(sargent_t *sg, int silent);
 
+/* Method of moments variance-component estimation.
+ *
+ * Fits the three-VC model
+ *    y = X beta + u + epsilon,   beta ~ N(0, sigma2_beta_tilde / p · I_p),
+ *    u ~ N(0, sigma2_g K_g),     epsilon ~ N(0, sigma2 I),
+ * where K_X = X X^T / p and K_g = (1/S) sum_s G_s.
+ *
+ * Solves the 3-equation linear system from E[y^T M y] = tr(M V) for
+ * M in {I, K_X, K_g} via Hutchinson stochastic trace estimates.
+ * Negative variance estimates are clipped to zero.
+ *
+ * Stores results in sg->h2_fixed, sg->h2_random, sg->h2, sg->sigma2.
+ * Unlike var_fixed + var_random or var_joint, the MoM estimator does not
+ * suffer from the fixed/random identifiability bias: it estimates
+ * variance components without first identifying beta or per-tree ws2,
+ * so cannibalisation does not affect it.
+ *
+ * Does not populate sg->beta or sg->ws2 — those remain whatever the
+ * caller initialised them to (typically NULL on first invocation). */
+void var_mom(sargent_t *sg, int silent);
+
 /* Stage 2: infer segment weights (ws2) and sigma^2 via REML-style score
    updates, using CG for whitened residuals and Hutchinson trace estimates.
    Fixed effects are held at their Stage 1 values.
