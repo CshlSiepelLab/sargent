@@ -109,6 +109,53 @@ static void write_w2_table(sargent_t *sg, const char *outroot, int silent)
     if (!silent) fprintf(stderr, "Wrote %s\n", fname);
 }
 
+/* write_summary_json: write a coherent record of the fit to <outroot>.summary.json.
+ *
+ * All h² values come from sargent's own internally consistent residual-based
+ * calculation (h2_fixed = 1 - var(r)/var(y), h2_random = var(r)/var(y) - σ²/var(y))
+ * from the final iteration's state.  PR averaging is no longer applied in
+ * var_joint, so (β, ws², σ², h²) are from a single coherent iteration.
+ *
+ * KNOWN LIMITATION: the variance partition (h²_fixed vs h²_random) is biased
+ * because of fixed/random identifiability competition.  Sequential mode
+ * over-attributes to h²_fixed; joint EM mode over-attributes to h²_random.
+ * For prediction this is benign; for variance-component reporting, treat the
+ * h²_fixed and h²_random fields as informative but not definitive.
+ */
+static void write_summary_json(sargent_t *sg, const char *outroot,
+                               int em_iters, int silent)
+{
+    char fname[4096];
+    snprintf(fname, sizeof(fname), "%s.summary.json", outroot);
+    FILE *f = fopen(fname, "w");
+    if (!f) {
+        fprintf(stderr, "ERROR: cannot open %s for writing\n", fname);
+        return;
+    }
+
+    const char *mode = (em_iters > 0) ? "joint_em" : "sequential";
+    fprintf(f, "{\n");
+    fprintf(f, "  \"mode\":            \"%s\",\n", mode);
+    fprintf(f, "  \"em_iters\":        %d,\n",     em_iters);
+    fprintf(f, "  \"uniform_random\":  %s,\n",     sg->uniform_random ? "true" : "false");
+    fprintf(f, "  \"n_indiv\":         %d,\n",     sg->n);
+    fprintf(f, "  \"n_variants\":      %d,\n",     sg->p);
+    fprintf(f, "  \"n_trees\":         %d,\n",     sg->S);
+    fprintf(f, "  \"K_mix\":           %d,\n",     sg->K);
+    fprintf(f, "  \"M_mix\":           %d,\n",     sg->M);
+    fprintf(f, "  \"nprobe\":          %d,\n",     sg->nprobe);
+    fprintf(f, "  \"phi_alpha\":       %.6g,\n",   sg->phi_alpha);
+    fprintf(f, "  \"phi_beta\":        %.6g,\n",   sg->phi_beta);
+    fprintf(f, "  \"h2\":              %.6g,\n",   sg->h2);
+    fprintf(f, "  \"h2_fixed\":        %.6g,\n",   sg->h2_fixed);
+    fprintf(f, "  \"h2_random\":       %.6g,\n",   sg->h2_random);
+    fprintf(f, "  \"sigma2\":          %.6g\n",    sg->sigma2);
+    fprintf(f, "}\n");
+    fclose(f);
+
+    if (!silent) fprintf(stderr, "Wrote %s\n", fname);
+}
+
 #define CHECK(ret) do {                                                 \
     if ((ret) < 0) {                                                    \
         fprintf(stderr, "tskit error at %s:%d: %s\n",                  \
@@ -127,8 +174,7 @@ int main(int argc, char *argv[])
     int random_only = 0;
     int nprobe      = 0;   /* 0 = use sargent_t default (10) */
     int uniform_rand= 0;
-    int em_iters    = 0;   /* 0 = sequential; >0 = run var_em with this many outer iters */
-    int pca_d       = 0;   /* 0 = no PCA preprojection */
+    int em_iters    = 0;   /* 0 = sequential; >0 = joint EM outer iters */
     double pi0      = -1.0; /* < 0 means unset */
     const char *outroot = "sargent";
 
@@ -142,13 +188,12 @@ int main(int argc, char *argv[])
         {"nprobe",         1, 0, 'N'},
         {"uniform-random", 0, 0, 'U'},
         {"em",             1, 0, 'E'},
-        {"pca",            1, 0, 'Q'},
         {"version",        0, 0, 'v'},
         {"help",           0, 0, 'h'},
         {0, 0, 0, 0}
     };
 
-    while ((c = getopt_long(argc, argv, "zGFRUE:Q:o:N:P:vh", long_opts, &opt_idx)) != -1) {
+    while ((c = getopt_long(argc, argv, "zGFRUE:o:N:P:vh", long_opts, &opt_idx)) != -1) {
         switch (c) {
         case 'z': silent       = 1;                break;
         case 'G': ts_geno      = 1;                break;
@@ -156,7 +201,6 @@ int main(int argc, char *argv[])
         case 'R': random_only  = 1;                break;
         case 'U': uniform_rand = 1;                break;
         case 'E': em_iters     = atoi(optarg);     break;
-        case 'Q': pca_d        = atoi(optarg);     break;
         case 'P': pi0          = atof(optarg);     break;
         case 'o': outroot      = optarg;           break;
         case 'N': nprobe       = atoi(optarg);     break;
@@ -253,7 +297,6 @@ int main(int argc, char *argv[])
     if (nprobe > 0)  sg->nprobe = nprobe;
     if (uniform_rand) sg->uniform_random = 1;
     if (em_iters > 0) sg->em_iters = em_iters;
-    if (pca_d > 0)    sg->pca_d = pca_d;
     if (pi0 > 0.0 && pi0 < 1.0) {
         /* Beta(1, pi0/(1-pi0)) hyperprior: prior mean of phi = 1-pi0.
          * E.g. pi0=0.9 → Beta(1,9), prior mean phi=0.1 (10% active). */
@@ -261,11 +304,6 @@ int main(int argc, char *argv[])
         sg->phi_beta  = pi0 / (1.0 - pi0);
     }
 
-    if (pca_d > 0) {
-        fprintf(stderr, "ERROR: --pca is not yet implemented.\n");
-        sargent_free(sg);
-        exit(EXIT_FAILURE);
-    }
     if (em_iters > 0 && (fixed_only || random_only)) {
         fprintf(stderr, "ERROR: --em cannot be combined with --fixed-only or --random-only.\n");
         sargent_free(sg);
@@ -310,6 +348,9 @@ int main(int argc, char *argv[])
             write_w2_table(sg, outroot, silent);
         }
     }
+
+    /* Write coherent summary of the final fit. */
+    write_summary_json(sg, outroot, em_iters, silent);
 
     /* ---- Summary statistics ---- */
     if (!silent) {

@@ -163,7 +163,6 @@ sargent_t *sargent_new(geno_reader_t *gr, tsk_treeseq_t *ts, double *y)
     /* Alternative-mode flags; off by default */
     sg->uniform_random = 0;
     sg->em_iters       = 0;
-    sg->pca_d          = 0;
 
     return sg;
 }
@@ -204,11 +203,6 @@ void sargent_free(sargent_t *sg)
  * ---------------------------------------------------------------------- */
 void var_fixed(sargent_t *sg, int silent)
 {
-    var_fixed_with_offset(sg, NULL, silent);
-}
-
-void var_fixed_with_offset(sargent_t *sg, const double *offset, int silent)
-{
     int n = sg->n;
     int p = sg->p;
     int K = sg->K;
@@ -229,14 +223,9 @@ void var_fixed_with_offset(sargent_t *sg, const double *offset, int silent)
         return;
     }
 
-    /* Initialise residuals r = (y - offset) - X β.
-     * On first call β = 0 so r = y - offset; on re-entry the current β is used.
-     * The offset (typically u_hat from a joint-EM step) is subtracted once
-     * here; var_fixed itself does not modify sg->y. */
+    /* Initialise residuals r = y - X β.
+     * On first call β = 0 so r = y; on re-entry the current β is used. */
     memcpy(r, sg->y, (size_t)n * sizeof(double));
-    if (offset) {
-        for (int i = 0; i < n; i++) r[i] -= offset[i];
-    }
     for (int j = 0; j < p; j++) {
         if (sg->beta[j] == 0.0) continue;
         geno_seek(sg->gr, j);
@@ -245,8 +234,6 @@ void var_fixed_with_offset(sargent_t *sg, const double *offset, int silent)
         for (int i = 0; i < n; i++) r[i] -= b * g[i];
     }
 
-    /* var_y uses the original y (so h2_fixed is reported on the original scale,
-     * not on the offset-corrected response). */
     double var_y = vec_var(sg->y, n);
     double old_sigma2 = sg->sigma2;
 
@@ -682,9 +669,6 @@ void var_joint(sargent_t *sg, int silent)
     int S      = sg->S;
     int K      = sg->K;
     int max_outer = sg->em_iters > 0 ? sg->em_iters : 100;
-    int burn_in   = max_outer / 2;
-    if (burn_in < 1)  burn_in = 1;
-    if (burn_in > 40) burn_in = 40;
 
     /* Allocate β (zero) if not already done */
     if (!sg->beta) {
@@ -709,7 +693,6 @@ void var_joint(sargent_t *sg, int silent)
     double   *log_g      = malloc((size_t)K * sizeof(double));
     double   *gamma      = malloc((size_t)K * sizeof(double));
     double   *gamma_sum  = malloc((size_t)K * sizeof(double));
-    double   *ws2_accum  = calloc((size_t)S,  sizeof(double));
 
     tsk_size_t n_nodes   = tsk_treeseq_get_num_nodes(sg->ts);
     double    *work      = malloc(2 * n_nodes * sizeof(double));
@@ -718,8 +701,8 @@ void var_joint(sargent_t *sg, int silent)
 
     cg_state_t *cg = cg_state_new(n, NULL);
 
-    if (!r || !r_tilde || !A || !B || !g || !log_g || !gamma || !gamma_sum ||
-        !ws2_accum || !work || !order_buf || !gv || !cg) {
+    if (!r || !r_tilde || !A || !B || !g || !log_g || !gamma ||
+        !gamma_sum || !work || !order_buf || !gv || !cg) {
         fprintf(stderr, "var_joint: out of memory\n");
         goto cleanup;
     }
@@ -747,8 +730,6 @@ void var_joint(sargent_t *sg, int silent)
                 uniform ? "uniform-random" : "per-tree",
                 max_outer);
 
-    double sigma2_accum = 0.0;
-    int    n_accum      = 0;
     double old_sigma2   = sg->sigma2;
 
     for (int outer = 0; outer < max_outer; outer++) {
@@ -780,7 +761,19 @@ void var_joint(sargent_t *sg, int silent)
         hutch_trace_all(cg, v_matvec, &vd, sg->ts, sg->hap_to_indiv,
                         n, S, sg->S_orig, sg->prune_map, B, &B_0, &hopts);
 
-        /* --- 4. One β sweep with V-aware precision v_jj ≈ tr(V^{-1}) = B_0 --- */
+        /* --- 4. One β sweep with constant V-aware precision v_jj ≈ tr(V^{-1}) ---
+         *
+         * The exact variational update would use v_jj = x_j^T V^{-1} x_j, but
+         * computing that per SNP requires p CG solves per outer iter — not
+         * feasible at biobank scale (p ~ 1M).  We use the constant average
+         * v_jj = tr(V^{-1}) ≈ B_0 for all SNPs.  This matches BOLT-LMM's
+         * approximation (see Loh et al. 2015): rely on iteration with the
+         * V-aware residual r̃ to capture the V-correction globally, not
+         * per-SNP.  Known trade-off in our setting: when X and K share
+         * substantial signal (as for ARG-based kinship), this approximation
+         * over-shrinks β and pushes variance into the random component.
+         * Joint EM is therefore a good predictor but a poor variance-component
+         * estimator — use sequential SARGENT for the latter. */
         double v_jj = (B_0 > 0.0) ? B_0 : (double)n / sg->sigma2;
         memset(gamma_sum, 0, (size_t)K * sizeof(double));
         double max_dbeta = 0.0;
@@ -797,8 +790,7 @@ void var_joint(sargent_t *sg, int silent)
             for (int i = 0; i < n; i++) xrt += g[i] * r_tilde[i];
             double t_j = xrt + beta_old * v_jj;
 
-            /* BayesR mixture posterior, identical form to var_fixed but with the
-             * V-aware precision v_jj in place of n/σ². */
+            /* BayesR mixture posterior with V-aware precision v_jj */
             double z_sq = t_j * t_j / v_jj;
             double lmax = -1e300;
             for (int k = 0; k < K; k++) {
@@ -875,36 +867,21 @@ void var_joint(sargent_t *sg, int silent)
 
         double rel_dsig = fabs(sg->sigma2 - old_sigma2) / (old_sigma2 + 1e-15);
 
-        if (outer >= burn_in) {
-            sigma2_accum += sg->sigma2;
-            for (int s = 0; s < S; s++) ws2_accum[s] += sg->ws2[s];
-            n_accum++;
-        }
-
         if (!silent)
             fprintf(stderr,
                     "var_joint iter %3d: max_dβ=%.2e  sigma2=%.4f  h2_f=%.4f  h2_r=%.4f"
-                    "  ws2_mean=%.3e  v_jj=%.2e  rel_dsig=%.2e%s\n",
+                    "  ws2_mean=%.3e  v_jj=%.2e  rel_dsig=%.2e\n",
                     outer + 1, max_dbeta, sg->sigma2, sg->h2_fixed, sg->h2_random,
-                    ws2_mean, v_jj, rel_dsig,
-                    outer >= burn_in ? " [avg]" : "");
+                    ws2_mean, v_jj, rel_dsig);
 
         old_sigma2 = sg->sigma2;
     }
 
-    /* Polyak-Ruppert averaging */
-    if (n_accum > 0) {
-        sg->sigma2 = sigma2_accum / n_accum;
-        for (int s = 0; s < S; s++) sg->ws2[s] = ws2_accum[s] / n_accum;
-    }
-
-    /* Recompute final h2 from averaged values: h2_fixed = 1 - var(r)/var_y
-     * where r is the residual after the FINAL β sweep (already current). */
-    double var_r_final = vec_var(r, n);
-    sg->h2_fixed  = (var_y > 0.0) ? fmax(0.0, 1.0 - var_r_final / var_y) : 0.0;
-    sg->h2_random = (var_y > 0.0) ?
-        fmax(0.0, var_r_final / var_y - sg->sigma2 / var_y) : 0.0;
-    sg->h2        = sg->h2_fixed + sg->h2_random;
+    /* Final h2 values reflect the last iteration's coherent (β, ws², σ²)
+     * triple; var_r came from the very last β sweep.  All quantities written
+     * to .beta.tsv and .w2.tsv (and these h² fields) are from the same
+     * iteration — no PR averaging — so downstream consumers can trust
+     * h²_fixed + h²_random + σ²/var_y ≈ 1 without reconstruction. */
 
     /* --- Post-hoc rho (identical to var_random) --- */
     {
@@ -929,7 +906,7 @@ cleanup:
     cg_state_free(cg);
     free(r); free(r_tilde); free(A); free(B); free(g);
     free(log_g); free(gamma); free(gamma_sum);
-    free(ws2_accum); free(work); free(order_buf); free(gv);
+    free(work); free(order_buf); free(gv);
 }
 
 /* =========================================================================

@@ -10,14 +10,13 @@ For each case in <suitedir>/<scale>/<case_name>/ it:
 
 Usage:
     python run_suite.py [--suitedir DIR] [--sargent PATH] [--scales small medium]
-                        [--cases ...] [--nprobe N] [--prior {bb,horseshoe}]
-                        [--pi0 VAL] [--ts-geno] [--outdir DIR]
+                        [--cases ...] [--nprobe N] [--pi0 VAL]
+                        [--ts-geno] [--outdir DIR]
 """
 
 import argparse
 import json
 import os
-import re
 import subprocess
 import sys
 import time
@@ -50,29 +49,21 @@ def find_sargent(given):
     return None
 
 
-def parse_stderr(stderr_text):
-    """Extract sigma2, h2_fixed, h2_random from sargent stderr.
+def load_summary_json(out_prefix):
+    """Read sargent's .summary.json file.
 
-    Matches both per-iteration format (sigma2=X.Y, h2_fixed=X.Y) and the
-    final summary block format (sigma2 : X.Y, h2.fixed : X.Y, h2.random : X.Y).
-    Latest match wins (so summary-block values override per-iteration ones).
+    Sargent now writes a coherent record of the fit (h2, h2_fixed, h2_random,
+    sigma2, plus mode metadata).  This avoids fragile stderr regex parsing
+    that previously dropped or mis-extracted values.
     """
-    result = {}
-    for line in stderr_text.splitlines():
-        m = re.search(r'h2[\._]fixed\s*[=:]\s*([0-9.eE+-]+)', line)
-        if m:
-            result["h2_fixed"] = float(m.group(1))
-        m = re.search(r'h2[\._]random\s*[=:]\s*([0-9.eE+-]+)', line)
-        if m:
-            result["h2_random"] = float(m.group(1))
-        m = re.search(r'sigma2\s*[=:]\s*([0-9.eE+-]+)', line)
-        if m:
-            result["sigma2"] = float(m.group(1))
-        # Plain "h2 : X.Y" (must not match h2_fixed/h2_random/h2.fixed/h2.random)
-        m = re.search(r'(?<![._a-zA-Z])h2\s*:\s*([0-9.eE+-]+)', line)
-        if m and "fixed" not in line and "random" not in line:
-            result["h2"] = float(m.group(1))
-    return result
+    path = out_prefix + ".summary.json"
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except Exception:
+        return {}
 
 
 def run_one(case_dir, case_name, sargent_bin, args, outdir):
@@ -87,15 +78,13 @@ def run_one(case_dir, case_name, sargent_bin, args, outdir):
     has_fixed  = params["h2_fixed_target"]  > 0
     has_random = params["h2_random_target"] > 0
 
-    # Note: do NOT pass --silent — we need the summary block in stderr.
-    cmd = [sargent_bin]
+    # Run sargent in --silent mode; we read the coherent summary from JSON.
+    cmd = [sargent_bin, "--silent"]
     if args.ts_geno:
         cmd += ["--ts-geno"]
     if args.nprobe > 0:
         cmd += ["--nprobe", str(args.nprobe)]
-    if args.prior == "horseshoe":
-        cmd += ["--horseshoe"]
-    elif args.pi0 is not None:
+    if args.pi0 is not None:
         cmd += ["--pi0", str(args.pi0)]
     if not has_random:
         cmd += ["--fixed-only"]
@@ -116,13 +105,12 @@ def run_one(case_dir, case_name, sargent_bin, args, outdir):
         print(result.stderr[-2000:], file=sys.stderr)
         return {"case": case_name, "error": result.stderr[-500:], "elapsed_s": elapsed}
 
-    parsed = parse_stderr(result.stderr + result.stdout)
+    summary = load_summary_json(out_prefix)
 
     record = {
         "case":        case_name,
         "scale":       args._scale,
         "regime":      params.get("regime", "unknown"),
-        "prior":       args.prior,
         "elapsed_s":   round(elapsed, 2),
         "n_indiv":     params["n_indiv"],
         "length_bp":   int(params["length"]),
@@ -134,10 +122,11 @@ def run_one(case_dir, case_name, sargent_bin, args, outdir):
         "sigma2_true":       params["sigma2"],
     }
 
-    # Variance metrics (from sargent summary output)
-    record["sigma2_inferred"]   = parsed.get("sigma2", float("nan"))
-    record["h2_fixed_inferred"] = parsed.get("h2_fixed", float("nan"))
-    record["h2_rand_inferred"]  = parsed.get("h2_random", float("nan"))
+    # Variance metrics from sargent's .summary.json (internally consistent)
+    record["sigma2_inferred"]   = summary.get("sigma2", float("nan"))
+    record["h2_fixed_inferred"] = summary.get("h2_fixed", float("nan"))
+    record["h2_rand_inferred"]  = summary.get("h2_random", float("nan"))
+    record["sargent_mode"]      = summary.get("mode", "unknown")
 
     vm = variance_metrics(
         sigma2_inferred=record["sigma2_inferred"],
@@ -226,7 +215,6 @@ def write_markdown(records, path, args):
         return
     with open(path, "w") as f:
         f.write(f"# SARGENT test-suite report\n\n")
-        f.write(f"- Prior: **{args.prior}**\n")
         if args.pi0 is not None:
             f.write(f"- pi0: **{args.pi0}**\n")
         f.write(f"- nprobe: **{args.nprobe}**\n")
@@ -368,8 +356,6 @@ def main():
                     choices=CASE_NAMES, help="which cases to run")
     ap.add_argument("--nprobe",   type=int, default=10,
                     help="Hutchinson probe count (default 10)")
-    ap.add_argument("--prior",    default="bb", choices=["bb", "horseshoe"],
-                    help="Stage 2 prior (default: bb)")
     ap.add_argument("--pi0",      type=float, default=None,
                     help="pi0 value for BB prior (default: none)")
     ap.add_argument("--ts-geno",  action="store_true",

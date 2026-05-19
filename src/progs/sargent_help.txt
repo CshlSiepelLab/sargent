@@ -74,11 +74,6 @@ ALGORITHMIC VARIANTS (for systematic comparison):
         Polyak-Ruppert averaging on ws^2 and sigma^2 over the second half.
         Cannot be combined with --fixed-only or --random-only.
 
-    --pca <d>, -Q <d>
-        (Not yet implemented.)  Project the top <d> principal components
-        of X into an unshrunk fixed-effect term before Stage 1, fitting
-        beta only on the residual X^perp.  Mitigates fixed/random
-        identifiability competition along major axes of X.
 
 OUTPUT FILES:
     <outroot>.beta.tsv
