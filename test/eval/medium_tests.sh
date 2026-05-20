@@ -47,7 +47,7 @@ for f in 1.0 0.3 0.1; do
         --bed-coverage "$f" --seed 42 \
         --out "$dir/case" > "$dir/sim.log" 2>&1
     log "  medium f=$f: sequential SARGENT"
-    $SARGENT --silent --nprobe 10 --outroot "$dir/seq" \
+    $SARGENT --silent --nprobe 10 --sequential --outroot "$dir/seq" \
         "$dir/case.phen" "$dir/case.trees" "$dir/case" \
         > "$dir/seq_sargent.log" 2>&1
     mamba run -n sargent python "$PRED" \

@@ -24,19 +24,6 @@ void var_fixed(sargent_t *sg, int silent);
    Iterates sg->em_iters times; post-hoc rho computed at end. */
 void var_joint(sargent_t *sg, int silent);
 
-/* Single-GRM method of moments estimator for total heritability.
- *
- * Fits y = u + epsilon with u ~ N(0, sigma2_g K_g) and K_g = (1/S) sum_s G_s.
- * Two moment equations from E[y^T M y] = tr(M V) for M in {I, K_g}
- * give a closed-form estimate of h2_total (= h2_snp + h2_arg in the
- * sequential-SARGENT framing).  Does NOT attempt to decompose SNP-driven
- * from ARG-driven variance (non-identifiable; see ROADMAP Phase 1).
- *
- * Output: sg->h2 = h2_total, sg->h2_arg = h2_total, sg->h2_snp = 0,
- * sg->sigma2 = noise variance.  Use this as a cross-check on sequential
- * SARGENT's total h2. */
-void var_mom(sargent_t *sg, int silent);
-
 /* Stage 2: infer segment weights (ws2) and sigma^2 via REML-style score
    updates, using CG for whitened residuals and Hutchinson trace estimates.
    Fixed effects are held at their Stage 1 values.

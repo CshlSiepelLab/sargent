@@ -178,7 +178,9 @@ int main(int argc, char *argv[])
     int arg_only    = 0;
     int nprobe      = 0;   /* 0 = use sargent_t default (10) */
     int uniform_arg = 0;
-    int em_iters    = 0;   /* 0 = sequential; >0 = joint EM outer iters */
+    int em_iters    = 50;  /* default 50 (joint EM); --sequential sets to 0 */
+    int sequential_flag = 0; /* --sequential: force em_iters = 0 */
+    int em_flag_set = 0;     /* tracks whether --em was explicitly passed */
     double pi0      = -1.0; /* < 0 means unset */
     const char *outroot = "sargent";
     const char *mode_str = "predict";   /* predict | localize (stub) */
@@ -193,20 +195,23 @@ int main(int argc, char *argv[])
         {"nprobe",         1, 0, 'N'},
         {"uniform-arg",    0, 0, 'U'},
         {"em",             1, 0, 'E'},
+        {"sequential",     0, 0, 'Q'},
         {"mode",           1, 0, 'M'},
         {"version",        0, 0, 'v'},
         {"help",           0, 0, 'h'},
         {0, 0, 0, 0}
     };
 
-    while ((c = getopt_long(argc, argv, "zGSAUE:M:o:N:P:vh", long_opts, &opt_idx)) != -1) {
+    while ((c = getopt_long(argc, argv, "zGSAUQE:M:o:N:P:vh", long_opts, &opt_idx)) != -1) {
         switch (c) {
         case 'z': silent      = 1;                break;
         case 'G': ts_geno     = 1;                break;
         case 'S': snp_only    = 1;                break;
         case 'A': arg_only    = 1;                break;
         case 'U': uniform_arg = 1;                break;
-        case 'E': em_iters    = atoi(optarg);     break;
+        case 'E': em_iters    = atoi(optarg);
+                  em_flag_set = 1;                break;
+        case 'Q': sequential_flag = 1;            break;
         case 'M': mode_str    = optarg;           break;
         case 'P': pi0         = atof(optarg);     break;
         case 'o': outroot     = optarg;           break;
@@ -236,6 +241,28 @@ int main(int argc, char *argv[])
     if (snp_only && arg_only) {
         fprintf(stderr, "ERROR: --snp-only and --arg-only are mutually exclusive.\n");
         exit(EXIT_FAILURE);
+    }
+
+    /* Resolve em / sequential flags.
+     *
+     * Default: em_iters = 50 (joint EM).
+     * --sequential       => em_iters = 0 (Stage 1 then Stage 2).
+     * --em N             => override iteration count (N >= 0).
+     * --snp-only / --arg-only silently imply --sequential (joint EM needs
+     * both stages).
+     * --sequential together with an explicit --em N>0 is an error.
+     */
+    if (sequential_flag && em_flag_set && em_iters > 0) {
+        fprintf(stderr, "ERROR: --sequential conflicts with --em N (N>0).\n");
+        exit(EXIT_FAILURE);
+    }
+    if (sequential_flag) em_iters = 0;
+    if (snp_only || arg_only) {
+        if (em_flag_set && em_iters > 0) {
+            fprintf(stderr, "ERROR: --em cannot be combined with --snp-only or --arg-only.\n");
+            exit(EXIT_FAILURE);
+        }
+        em_iters = 0;
     }
 
     int n_pos   = argc - optind;
@@ -323,12 +350,6 @@ int main(int argc, char *argv[])
          * E.g. pi0=0.9 → Beta(1,9), prior mean phi=0.1 (10% active). */
         sg->phi_alpha = 1.0;
         sg->phi_beta  = pi0 / (1.0 - pi0);
-    }
-
-    if (em_iters > 0 && (snp_only || arg_only)) {
-        fprintf(stderr, "ERROR: --em cannot be combined with --snp-only or --arg-only.\n");
-        sargent_free(sg);
-        exit(EXIT_FAILURE);
     }
     (void)mode_predict;  /* currently the only operational mode */
 

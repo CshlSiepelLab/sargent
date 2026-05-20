@@ -137,9 +137,15 @@ sargent --mode localize  ...       # window-based per-region h² (Phase 7; stub)
 ### Default behaviour
 
 `--mode predict` (default):
-- Runs sequential SARGENT (Stage 1 + Stage 2) by default.
-- Or joint variational coordinate descent if `--em N` is given.
-- `--snp-only` / `--arg-only` restrict to one stage.
+- Runs joint variational coordinate descent (50 outer iterations) by default
+  (flipped 2026-05-20 after Phase 3 validation: joint EM > sequential
+  by 3–7% R² across the parameter sweep and is robust to single-seed
+  blow-ups that hurt sequential).
+- `--sequential` opts back into the two-stage Stage1→Stage2 pipeline
+  (the manuscript's SNP-prioritised decomposition).
+- `--em N` overrides the joint-EM iteration count.
+- `--snp-only` / `--arg-only` restrict to one stage and silently
+  imply `--sequential`.
 - Outputs `.beta.tsv`, `.w2.tsv`, `.summary.json` with `h2_snp`,
   `h2_arg`, `h2`, `sigma2`.
 
@@ -161,41 +167,46 @@ sargent --mode localize  ...       # window-based per-region h² (Phase 7; stub)
 
 ---
 
-## Phase 3 — Smaller-scale validation
+## Phase 3 — Smaller-scale validation — DONE 2026-05-20
 
-**Goal**: confirm that all three modes give expected results before
-scaling up.
+**Goal**: confirm sequential and joint-EM modes give expected results
+before scaling up.  MoM dropped from this phase (module deleted after
+empirical failure; see "MoM comparison result" above).
 
 ### Test sets
 
 - **Debug scale**: n=300, L=100 kb, regime=sparse, 5 h² splits × 5 seeds.
-  Already generated for prior work; regenerate after `simulate.py` RNG fix.
-- **Small scale**: n=200, L=500 kb, 5 h² splits × 5 seeds.
-- **h² total sweep**: at one BED coverage (f=0.5) and one h² split
-  (balanced), vary total h² ∈ {0.3, 0.5, 0.8}. Confirms the picture
-  doesn't shift at lower heritability.
+  Regenerated post-RNG-fix.
+- **h² total sweep**: at one BED coverage (f=0.5), vary h² split across
+  snp_only … arg_only at total h²=0.8.
 
-### Metrics per mode
+### Metrics
 
 `predict`:
-- OOS R² across {BayesR, GBLUP, ARG-BLUP-uniform, SARGENT} (existing
-  `predict.py`).
+- OOS R² across {BayesR, GBLUP, ARG-BLUP-uniform, sequential SARGENT,
+  joint-EM SARGENT}.
 - Mean ± SD across seeds.
-
-`varcomp`:
-- MoM h²_fixed, h²_random vs simulator realised, mean ± SD across seeds.
-- Polygenicity: estimated π_k vs simulator pi_mix.
-- Comparison row: MoM vs sequential vs joint EM, all three reported.
 
 `localize` — deferred to Phase 7.
 
 ### Deliverables
 
-- [ ] Re-run overnight suite with new code post-Phase 1, regenerate
-  `summary.md` with MoM rows added
-- [ ] One-page comparison: sequential vs joint EM vs MoM
-- [ ] If MoM is competitive (≤10% bias across all simulated cases),
-  declare Phase 3 done
+- [x] Re-run overnight suite with cleaned-up code, regenerate `summary.md`
+- [x] One-page comparison: sequential vs joint EM (`phase3_summary.md`)
+- [x] Diagnostic figures (bed-coverage R² curve; h² decomposition with
+  total bar) under `test-sargent/overnight/figs/`
+
+### Findings (2026-05-20)
+
+- Low-coverage regression is **gone**.  At f=0.03 both SARGENT variants
+  recover R²≈0.58, matching ARG-BLUP-uniform; BayesR/GBLUP collapse to ~0.07.
+- Joint EM > sequential by 3–7% R² across all sweep cells, and is robust
+  to single-seed blow-ups that hurt sequential (e.g. seed 43 f=0.6).
+- → **Joint EM is now the default for `--mode predict`**; sequential is
+  available via `--sequential`.
+- Decompositions are unidentifiable in opposite directions (sequential
+  over-attributes to h²_snp, joint EM over-attributes to h²_arg), but
+  inferred h²_total agrees with realised truth within 5–15% for both.
 
 ---
 

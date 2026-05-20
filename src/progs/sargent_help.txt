@@ -61,12 +61,16 @@ MAIN OPTIONS:
 
     --mode <name>, -M <name>
         Choose the operational mode (default: predict).  Modes:
-          predict   - the main pipeline.  Runs sequential (Stage 1
-                      BayesR on typed SNPs, then Stage 2 ARG random
-                      effect) or joint EM (with --em N).  Outputs
-                      .beta.tsv, .w2.tsv, .summary.json with h2_snp
-                      (variance explained by SNP fit) and h2_arg
-                      (additional variance captured by the ARG).
+          predict   - the main pipeline.  Default fit is joint EM
+                      (50 outer iterations of variational coordinate
+                      descent on beta, ws^2, sigma^2 sharing a single
+                      residual snapshot per iteration).  Use
+                      --sequential for the two-stage Stage1->Stage2
+                      pipeline, or --em N to override the iteration
+                      count.  Outputs .beta.tsv, .w2.tsv,
+                      .summary.json with h2_snp (variance explained
+                      by SNP fit) and h2_arg (additional variance
+                      captured by the ARG).
           localize  - per-window decomposition of h2_arg across the
                       genome (not yet implemented; see ROADMAP.md Phase 7).
 
@@ -78,7 +82,7 @@ ALGORITHMIC VARIANTS (for systematic comparison):
         per-tree weights are unidentifiable.
 
     --em <N>, -E <N>
-        Run joint variational coordinate descent for <N> outer iterations.
+        Override the joint-EM outer iteration count (default: 50).
         Each outer iteration does ONE V-solve, ONE sweep of BayesR beta
         updates using V-aware precision (instead of sigma^2 I), and ONE
         REML EM step on ws^2 and sigma^2.  All updates share a common
@@ -86,7 +90,23 @@ ALGORITHMIC VARIANTS (for systematic comparison):
         next iteration (manuscript-style mean-field VB).
         Initialised with beta=0 and warm uniform ws^2 so the first beta
         sweep sees a non-trivial random offset and cannot cannibalise.
-        Cannot be combined with --snp-only or --arg-only.
+        Cannot be combined with --sequential, --snp-only or --arg-only.
+
+    --sequential, -Q
+        Use the two-stage Stage1->Stage2 pipeline (Stage 1 BayesR on typed
+        SNPs, then Stage 2 per-tree REML EM for the ARG random effect)
+        instead of the default joint EM.  Sequential is the SNP-prioritised
+        fit: h2_snp = variance the BayesR step claims; h2_arg = additional
+        variance the ARG explains on the residue.  Joint EM is symmetric
+        between the two and usually predicts better (Phase 3 validation:
+        joint EM > sequential by 3-7% R^2 across the parameter sweep),
+        but its decomposition over-attributes to the ARG component when
+        the truth is SNP-driven.  Use --sequential when you want the
+        manuscript-style decomposition; the default --em 50 when you
+        primarily care about prediction.
+
+        --snp-only and --arg-only silently imply --sequential, since joint
+        EM requires both stages.
 
 
 OUTPUT FILES:

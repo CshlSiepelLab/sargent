@@ -30,7 +30,7 @@ log() {
 # Run sequential + predict
 run_seq() {
     local dir=$1
-    $SARGENT --silent --nprobe 10 --outroot "$dir/seq" \
+    $SARGENT --silent --nprobe 10 --sequential --outroot "$dir/seq" \
         "$dir/case.phen" "$dir/case.trees" "$dir/case" \
         > "$dir/seq_sargent.log" 2>&1
     mamba run -n sargent python "$PRED" \
