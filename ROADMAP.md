@@ -24,7 +24,7 @@ If this session is interrupted, restart from the next un-checked item.
   Constant V-aware precision `v_jj ≈ tr(V⁻¹)` (BOLT-LMM-style). No PR
   averaging (so the iter-final β, ws², σ², and var(r) are internally
   consistent). Used for prediction; biased for variance components.
-- **Uniform-random** (`--uniform-random`): orthogonal toggle on Stage 2 (in
+- **Uniform-random** (`--uniform-arg`): orthogonal toggle on Stage 2 (in
   both sequential and joint modes) — replaces per-tree ws² with a single
   shared σ_u² on the uniformly-weighted kinship. ARG-BLUP equivalent.
 
@@ -59,310 +59,105 @@ BayesR / GBLUP / ARG-BLUP-uniform / SARGENT), `run_suite.py` (reads
 
 ---
 
-## Phase 1 — MoM variance component estimation
+## Phase 1 — Heritability reporting via sequential SARGENT (rename + reframe)
 
-**Goal**: unbiased global h²_fixed, h²_random, σ² estimates that don't
-suffer from the fixed/random cannibalisation. Also unbiased polygenicity
-(BayesR π_k) by residualising y against the MoM random component before
-the BayesR fit.
+**Decision (2026-05-20)**: We accept that fixed-vs-random variance
+decomposition is fundamentally not identifiable in this model (the K_X
+and K_g matrices share structure by construction). Instead of trying to
+estimate an inaccessible truth, we **reframe** the algorithm's outputs:
 
-### Algorithm
+- $h^2_{\text{snp}}$ = variance explained by the BayesR fit on the typed
+  SNP panel. Operationally defined as $1 - \mathrm{var}(r)/\mathrm{var}(y)$
+  after the Stage 1 BayesR fit.
+- $h^2_{\text{arg}}$ = **additional** variance captured by the ARG-based
+  random effect after the SNP fit. "Missing heritability recovered."
+- $h^2 = h^2_{\text{snp}} + h^2_{\text{arg}}$.
 
-Two random-effect model: $y = X\beta + u + \varepsilon$ with $u \sim
-N(0, \sigma^2_g K_g)$, $\varepsilon \sim N(0, \sigma^2 I)$, and
-$\beta \sim N(0, \sigma^2_\beta I)$ in the moment-equation approximation
-($K_X = XX^T/p$).
+Under this framing, sequential SARGENT (Stage 1 then Stage 2) is the
+*right* algorithm, not a buggy decomposer. The output of
+`.summary.json` is exactly the answer the algorithm gives for this
+sequential-prioritisation question.
 
-Three moment equations from $E[y^T M y] = \mathrm{tr}(MV)$ for
-$M \in \{I, K_X, K_g\}$:
+**Naming convention applied across the codebase (2026-05-20)**:
+- `sg->h2_fixed` → `sg->h2_snp`
+- `sg->h2_random` → `sg->h2_arg`
+- `sg->uniform_random` → `sg->uniform_arg`
+- `--fixed-only` (`-F`) → `--snp-only` (`-S`)
+- `--random-only` (`-R`) → `--arg-only` (`-A`)
+- `--uniform-random` (`-U`) → `--uniform-arg` (`-U`)
+- `simulate.py --h2-fixed` / `--h2-random` → `--h2-snp` / `--h2-arg`
+- params.json fields `h2_fixed_target/realised` → `h2_snp_target/realised` etc.
+- Test case labels: `fixed_only` → `snp_only`, `rand_only` → `arg_only`, etc.
 
-$$
-\begin{pmatrix}
-\mathrm{tr}(K_X) & \mathrm{tr}(K_g) & n \\
-\mathrm{tr}(K_X^2) & \mathrm{tr}(K_X K_g) & \mathrm{tr}(K_X) \\
-\mathrm{tr}(K_X K_g) & \mathrm{tr}(K_g^2) & \mathrm{tr}(K_g)
-\end{pmatrix}
-\begin{pmatrix} \sigma^2_\beta \\ \sigma^2_g \\ \sigma^2 \end{pmatrix}
-=
-\begin{pmatrix} y^T y \\ y^T K_X y \\ y^T K_g y \end{pmatrix}
-$$
+### MoM comparison result (2026-05-20): DISCARDED
 
-Solve by least squares with non-negativity constraint on the variance
-components (NNLS).
+Built single-GRM MoM (closed-form 2-VC system on $K_g + \sigma^2 I$),
+compared against sequential SARGENT on 3 seeds at full BED coverage
+(f=1.0):
 
-### Trace estimates
+| Seed | Realised h²_snp + h²_arg | Sequential h² | Single-GRM MoM h² |
+|---|---|---|---|
+| s42 | 0.31 + 0.31 (≈0.6) | 0.87 | **0.05** |
+| s43 | 0.36 + 0.36 (≈0.7) | 0.85 | **0.01** |
+| s44 | 0.53 + 0.53 (≈1.0) | 0.72 | **0.04** |
 
-- `tr(K_X) = sum_j ||x_j||² / p ≈ n` (exact; no estimation needed).
-- `tr(K_g) ≈ S · E[tr(G_s)/n] · n / S = E[tr(G_s)/n] · n` — actually we want
-  the average per-tree trace, which the existing `estimate_g_scale` already
-  computes during `sargent_new`.
-- `tr(K_X^2)`, `tr(K_g^2)`, `tr(K_X K_g)`: stochastic Hutchinson estimates
-  via z ~ Rademacher, computing z^T M z for the relevant M's.
+MoM is consistently 10–20× too low. Root cause: $K_g$ is effectively
+rank ≈ 2 (the deep coalescent branches dominate, so $K_g \approx
+c\cdot\mathbf{1}_n\mathbf{1}_n^T$ with small structured residual). On
+centred $y$, $K_g y \approx 0$, so $y^T K_g y$ provides almost no
+signal. Single-GRM MoM with raw ARG kinship is not useful.
 
-Reuse existing CG + matvec infrastructure. Need `K_X v` matvec via the
-geno reader, which we already have. Need `K_g v` matvec, which is
-`v_matvec` with uniform ws²[s] = 1/S and σ² = 0.
+**Decision**: discard MoM. The `var_mom` C function, the `--mode
+varcomp` CLI option, and all related test infrastructure have been
+removed (commit pending). `--mode` now accepts only `predict` (default)
+and `localize` (stub for Phase 7). The reframed sequential SARGENT
+output via `.summary.json` is the canonical answer for heritability
+reporting.
 
-### Polygenicity (the post-MoM BayesR refit)
-
-After MoM gives $\hat\sigma^2_g$ and $\hat\sigma^2$:
-
-1. Construct $V_{\text{mom}} = \hat\sigma^2_g K_g + \hat\sigma^2 I$.
-2. Compute $\hat u = \hat\sigma^2_g K_g V_{\text{mom}}^{-1} y$ (one CG solve).
-3. Form residualised response $\tilde y = y - \hat u$.
-4. Run var_fixed on $\tilde y$ with $\sigma^2 = \hat\sigma^2$ held fixed.
-5. Read off π_k from the converged Stage 1 state.
-
-Output goes to `.pi.tsv` (per-component mixture proportions) and the
-post-MoM γ_jk and β̂ to `.beta.tsv`. Total work: 1 CG solve + 1 var_fixed
-run beyond MoM itself.
-
-### Code structure
-
-New file `src/lib/mom.c`:
-
-```c
-typedef struct {
-    double h2_fixed, h2_random, sigma2;
-    double sigma2_beta, sigma2_g;        // raw variance components
-    int n_active_pi;                     // polygenicity
-    double pi[MAX_K];                    // mixture proportions
-} mom_result_t;
-
-mom_result_t *var_mom(sargent_t *sg, int silent);
-void mom_result_free(mom_result_t *r);
-```
-
-Driver in sargent.c reads `--mode varcomp` and dispatches to `var_mom`,
-then `var_fixed` on the residualised y for polygenicity, then writes
-`.summary.json` + `.pi.tsv` + `.beta.tsv`.
-
-### Testing strategy
-
-- Validate on the `overnight/multiseed` suite (5 seeds × 5 BED levels).
-  MoM h² should be approximately constant across BED coverage levels (since
-  it doesn't use β to estimate variance) — unlike sequential SARGENT's
-  cannibalisation pattern.
-- Compare MoM h² to simulator realised h². Expect within ~10% accuracy
-  even at debug scale.
-- Compare polygenicity (π_k) to simulator's `pi_mix`. Should be close.
-
-### Known issue — K_X / K_g identifiability collapse (2026-05-19)
-
-Smoke tests of the two-GRM MoM as currently implemented all fail to
-attribute variance correctly:
-
-| Case | True h²f / h²r | MoM h²f / h²r |
-|---|---|---|
-| f=1.0 (mixed h²=0.35/0.35) | 0.35 / 0.35 | **0.978 / 0.022** |
-| rand_only sparse | 0.00 / 0.78 | **0.512 / 0.005** |
-| fixed_only | 0.80 / 0.00 | 0.139 / 0.000 |
-| rand_only diffuse | 0.00 / 0.75 | **0.612 / 0.012** |
-
-In `rand_only` (truth h²f = 0), MoM assigns ~50–60% of variance to
-fixed effects. This holds in BOTH sparse and diffuse simulator regimes,
-so it isn't just sparse-vs-diffuse model misspecification.
-
-**Root cause: K_X and K_g share structure by construction.** The BED
-SNPs live on the same ARG that generates K_g, so they LD-tag the same
-genealogical patterns. In `rand_only`:
-- truth: y has no fixed-effect component
-- empirical `y'K_X y` = 1231 vs expected `σ² tr(K_X)` ≈ 40 for random y
-- → y has substantial K_X-aligned structure even with β=0
-- → MoM linear system can't tell K_X-explained from K_g-explained
-  variance and arbitrarily picks K_X (higher effective rank → more
-  flexibility to fit the data).
-
-This is the same fixed/random identifiability problem that bites
-sequential SARGENT and joint EM — at the moment-equation level instead
-of the variational level.
-
-### Options forward
-
-Need to choose direction with the user before committing more work:
-
-**(a) Drop two-GRM MoM, use single-GRM MoM.** Single GRM ($K_g$ only)
-gives total h² without partition. Use as a sanity check on total h²,
-accept that fixed/random split is hard.
-
-**(b) Use chromosome / region partitioning (LDSC-style).** Define K_g
-on TRANS effects only (cross-chromosome contributions) and K_X on the
-focal region. Cross-chromosome structure should be K_X-free.
-
-**(c) Project K_g into K_X-complement.** Use K_g_residual = K_g − P_X
-K_g P_X where P_X is projection onto X. Fit a single random
-component on K_g_residual.
-
-**(d) Use REML with a strong prior that puts mass on h²f > 0 only
-when X provides clear evidence.** Bayesian regularisation.
-
-**(e) Run the BayesR / Stage 1 fit first** (which has its own bias toward
-fixed) and then do single-GRM MoM on the residual. This is essentially
-what sequential SARGENT already does — just acknowledge the bias and
-report it transparently.
-
-**Currently leaning**: (a) + transparent documentation as the
-manuscript story. The "missing heritability" framing from Phase 7 can
-work with just single-GRM h²_total (the difference between BayesR-only
-h² and full SARGENT h² captures the ARG contribution).
-
-### Original diagnostic notes (kept for record)
-
-Initial smoke test of `var_mom` on `seed=42 f=0.1` (truth: h²f≈0.35,
-h²r≈0.35) gave MoM estimates h²f=0.16, h²r=0.007, σ²=1.06 — strongly
-under-attributing to random. Root cause was thought to be *model misspecification* (sparse
-truth vs uniform-kinship assumption); subsequent tests in the diffuse
-regime showed the bias persists, pointing instead to the K_X/K_g
-structural confounding documented above.
-
-- MoM's assumed kinship is $K_g = \frac{1}{S}\sum_s G_s$, uniform per
-  tree.
-- The simulator's truth has *sparse* per-tree $w_s^2$ (only ~5% trees
-  active in `sparse` regime). True $\mathrm{Cov}(u) = \sum_s w_s^2 G_s
-  \neq \sigma^2_g \cdot K_g$.
-- Net effect: $y^T K_g y$ is much smaller than the MoM model predicts
-  under the assumed uniform-kinship structure, because the active
-  trees' kinship signal gets diluted by the inactive trees.
-- Computed: empirical $y^T K_{g,\text{norm}} y$ = 471 vs predicted (under
-  h²r=0.35) ≈ 10,000. MoM resolves this by setting $\sigma^2_{g,\text{norm}}
-  \approx 0.008$ to match the data — but this is an artefact of model
-  vs truth mismatch, not a bug.
-- Diagnostic clue: $K_g$ effective rank is ≈1.7 (tr$^2$/tr$^2$),
-  meaning $K_g$ is nearly constant (dominated by the deep shared
-  branches). Most of $K_g$'s "structure" is in $\mathbf{1}_n \mathbf{1}_n^T$,
-  which is orthogonal to centred $y$.
-
-This is a real limitation of the uniform-kinship MoM. Options to
-address:
-
-(a) **Use a sparser kinship**: define $K_g$ from a *subset* of trees
-that we expect to be active (e.g., trees in the upper quartile of
-$y^T G_s y$). But this is post-hoc and risks circular reasoning.
-
-(b) **Test with diffuse-regime simulator**: re-run with
-`--regime diffuse` (75% active trees). The uniform-kinship MoM
-assumption should hold approximately.
-
-(c) **Multi-component MoM**: partition $\sum_s G_s$ into $W$ blocks (by
-genomic position) and fit $W$ separate $\sigma^2_w$. With $W \sim 10$
-this should recover sparse structure without giving up identifiability.
-This is essentially Phase 7 (localize) imported here.
-
-(d) **Accept the bias**: document that uniform-kinship MoM is a lower
-bound on h²_random when the truth is sparse. Useful as a conservative
-estimate.
-
-**Decision deferred** until we've validated MoM in the diffuse regime
-to confirm the diagnosis. If MoM works in diffuse but fails in sparse,
-it's confirmed model misspecification and option (b) or (c) is needed.
-
-### Estimated effort
-
-3–5 days for global MoM + polygenicity, including a parallel
-implementation in Python for validation against the C version.
-
-### Deliverables
-
-- [ ] `src/lib/mom.c` and matching header
-- [ ] CLI: `--mode varcomp` dispatches to MoM + polygenicity
-- [ ] Output: `.summary.json` augmented with MoM h² fields and
-  `mode: varcomp`; new `.pi.tsv`
-- [ ] Validation: MoM h² matches realised h² ± 10% across seeds in
-  multiseed bed-coverage sweep
-- [ ] Update `ROADMAP.md` to reflect completion
-
-### Extension — MoM as preprocessing for predict and localize modes
-
-Once Phase 1's global MoM is working, the same machinery becomes a
-preprocessing step that benefits both other modes by *removing* the
-cannibalisation bias from β / ws² estimation.
-
-**For predict mode:**
-1. Run MoM globally to get $\hat\sigma^2_g$, $\hat\sigma^2$.
-2. Compute $\hat u_{\text{global}} = \hat\sigma^2_g K_g V_{\text{mom}}^{-1} y$ where
-   $V_{\text{mom}} = \hat\sigma^2_g K_g + \hat\sigma^2 I$.
-3. Form residualised response $\tilde y = y - \hat u_{\text{global}}$.
-4. Run Stage 1 BayesR (or joint EM) on $\tilde y$ instead of $y$. Stage 1
-   no longer competes with the random component for variance — it sees
-   only the residual signal that's NOT explained by the ARG-uniform
-   kinship.
-5. Final prediction: $\hat y_{\text{test}} = X_{\text{test}}\hat\beta + \text{BLUP}$.
-
-Expected benefit: β estimates closer to the true causal effects when
-the BED panel has high coverage; faster convergence of Stage 1 since
-the residual has less structure.
-
-**For localize mode:**
-- Global MoM gives the total partition $(\sigma^2_\beta, \sigma^2_g, \sigma^2)$.
-- Per-window MoM then partitions the random component into per-window
-  contributions, conditional on the global σ² being known.
-- This sidesteps the per-tree identifiability problem by working at
-  Mb-scale window resolution.
-
-**CLI option**: `--mom-preprocess` flag that, when combined with
-`--mode predict` (or default), runs global MoM first then proceeds with
-the prediction pipeline using the residualised y. For `--mode localize`
-this is the default behaviour (global MoM is part of the pipeline).
-
-### Deliverables (extension)
-
-- [ ] `--mom-preprocess` flag on the CLI
-- [ ] Internal: var_fixed / var_joint / var_random accept an offset
-  argument (the MoM BLUP global random prediction) — this was the
-  removed `var_fixed_with_offset`; reintroduce in a more general form.
-- [ ] Validation: compare `--mode predict` with and without
-  `--mom-preprocess`. Test the hypothesis that β estimates become
-  cleaner (closer to truth) when the global random component is removed
-  first. Use the existing `predict.py` framework.
+**If we ever need a real total-h² estimator**, the K_g matrix needs to
+be **de-meaned** first (project out the constant component) so it
+captures only the structured kinship deviations. Standard GREML
+implementations do this. Worth considering for a future revisit.
 
 ---
 
-## Phase 2 — `--mode` CLI structure
+## Phase 2 — `--mode` CLI structure (status: implemented in skeletal form)
 
-**Goal**: separate three operational use cases with one binary and one
-flag. Default is `predict` (most common).
+**Goal**: future-proof the CLI for the localize extension while keeping
+the current behaviour simple.
 
 ### CLI
 
 ```
-sargent --mode predict   ...   # joint EM, prediction-optimised  (default)
-sargent --mode varcomp   ...   # MoM + polygenicity refit, unbiased h²
-sargent --mode localize  ...   # window-based MoM (Phase 7)
+sargent ...                       # default: --mode predict
+sargent --mode predict   ...       # current main pipeline
+sargent --mode localize  ...       # window-based per-region h² (Phase 7; stub)
 ```
 
 ### Default behaviour
 
 `--mode predict` (default):
-- Runs joint EM by default, unless `--fixed-only` or `--random-only` are
-  specified (then sequential).
-- Outputs `.beta.tsv`, `.w2.tsv`, `.summary.json` (h² values from joint
-  EM, with caveat noted).
+- Runs sequential SARGENT (Stage 1 + Stage 2) by default.
+- Or joint variational coordinate descent if `--em N` is given.
+- `--snp-only` / `--arg-only` restrict to one stage.
+- Outputs `.beta.tsv`, `.w2.tsv`, `.summary.json` with `h2_snp`,
+  `h2_arg`, `h2`, `sigma2`.
 
-`--mode varcomp`:
-- Runs `var_mom` for variance components.
-- Then runs `var_fixed` on MoM-residualised y for polygenicity.
-- Outputs `.summary.json` (MoM-based h²) and `.pi.tsv`.
-- `.beta.tsv` is from the post-MoM BayesR (interpretable as fixed-effect
-  posterior conditional on the MoM random component).
+`--mode localize` (Phase 7, not yet implemented):
+- Per-window decomposition of $h^2_{\text{arg}}$ across the genome.
+- Outputs `.local_h2.tsv` per-window summaries.
 
-`--mode localize` (Phase 7):
-- Runs window-based MoM.
-- Outputs `.local_h2.tsv` per-window decomposition.
+### Status
 
-### Implementation notes
-
-- The `--em` and `--fixed-only` / `--random-only` flags become invalid
-  outside `--mode predict`. Sargent should error early with a clear message
-  if a user combines them.
-- `--mode predict --em 0` (no EM, sequential) remains available for users
-  who specifically want the original two-stage algorithm.
-
-### Deliverables
-
-- [ ] `--mode` flag in CLI, default `predict`
-- [ ] Validate that legacy invocations (no `--mode`) still work
-- [ ] Update help text and `sargent_help.txt`
-- [ ] Update test/eval/run_suite.py to pass the right `--mode`
+- [x] `--mode` flag in CLI, default `predict` (commit 2026-05-20)
+- [x] `--mode varcomp` removed after the MoM evaluation showed it didn't help
+- [x] Help text and `sargent_help.txt` updated
+- [x] `--snp-only` / `-S` and `--arg-only` / `-A` replace the older
+      `--fixed-only` / `--random-only` flags
+- [x] `--uniform-arg` / `-U` replaces `--uniform-random`
+- [ ] Update `test/eval/run_suite.py` and predict pipeline to use new
+      `h2_snp` / `h2_arg` field names throughout (mostly done by sed
+      pass on 2026-05-20; verify by running a small case)
 
 ---
 
@@ -544,7 +339,7 @@ cheaper.
 ### Outputs
 
 - `.local_h2.tsv`: tab-separated per-window report with columns
-  `window_start`, `window_end`, `n_trees`, `h2_fixed`, `h2_random`,
+  `window_start`, `window_end`, `n_trees`, `h2_snp`, `h2_arg`,
   `h2_missing` (where missing = random − fixed contribution at this window).
 
 ### Estimated effort

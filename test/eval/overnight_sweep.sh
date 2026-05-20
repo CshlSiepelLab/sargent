@@ -59,7 +59,7 @@ for seed in 42 43 44 45 46; do
         mamba run -n sargent python "$SIM" \
             --n-indiv 200 --n-test 100 --length 100000 \
             --recomb-rate 1e-8 --mut-rate 1e-8 --Ne 10000 \
-            --h2-fixed 0.40 --h2-random 0.40 --n-causal 10 \
+            --h2-snp 0.40 --h2-arg 0.40 --n-causal 10 \
             --bed-coverage "$f" --seed "$seed" \
             --out "$dir/case" > "$dir/sim.log" 2>&1
         log "  multiseed seed=$seed f=$f: sequential SARGENT"
@@ -73,11 +73,11 @@ done
 log "=== h² sweep at f=0.5 ==="
 for seed in 42 43 44; do
     for case_spec in \
-        "fixed_only:0.80:0.00" \
-        "fixed_heavy:0.60:0.20" \
+        "snp_only:0.80:0.00" \
+        "snp_heavy:0.60:0.20" \
         "balanced:0.40:0.40" \
-        "rand_heavy:0.20:0.60" \
-        "rand_only:0.00:0.80"; do
+        "arg_heavy:0.20:0.60" \
+        "arg_only:0.00:0.80"; do
         IFS=':' read -r name h2f h2r <<< "$case_spec"
         dir="$BASE/h2sweep/s${seed}_${name}"
         mkdir -p "$dir"
@@ -85,7 +85,7 @@ for seed in 42 43 44; do
         mamba run -n sargent python "$SIM" \
             --n-indiv 200 --n-test 100 --length 100000 \
             --recomb-rate 1e-8 --mut-rate 1e-8 --Ne 10000 \
-            --h2-fixed "$h2f" --h2-random "$h2r" --n-causal 10 \
+            --h2-snp "$h2f" --h2-arg "$h2r" --n-causal 10 \
             --bed-coverage 0.5 --seed "$seed" \
             --out "$dir/case" > "$dir/sim.log" 2>&1
         log "  h2sweep seed=$seed $name: sequential SARGENT"

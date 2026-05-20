@@ -124,8 +124,8 @@ def main():
     ap.add_argument("--recomb-rate", type=float, default=1e-8, help="recombination rate per bp per gen")
     ap.add_argument("--mut-rate",    type=float, default=1e-8, help="mutation rate per bp per gen")
     ap.add_argument("--Ne",          type=float, default=1e4,  help="effective population size")
-    ap.add_argument("--h2-fixed",    type=float, default=0.3,  help="target fixed-effect heritability")
-    ap.add_argument("--h2-random",   type=float, default=0.3,  help="target random-effect heritability")
+    ap.add_argument("--h2-snp",    type=float, default=0.3,  help="target fixed-effect heritability")
+    ap.add_argument("--h2-arg",   type=float, default=0.3,  help="target random-effect heritability")
     ap.add_argument("--n-causal",    type=int,   default=20,   help="number of causal SNPs (fixed effects)")
     ap.add_argument("--bed-coverage", type=float, default=1.0,
                     help="fraction of polymorphic SNPs to keep in the BED file (0 < f <= 1). "
@@ -167,9 +167,9 @@ def main():
     elif args.tau2_frac is None or args.phi_mix is None:
         sys.exit("ERROR: --tau2-frac and --phi-mix must be given together")
 
-    if args.h2_fixed + args.h2_random > 1.0:
-        sys.exit("ERROR: h2_fixed + h2_random must be ≤ 1")
-    if args.h2_fixed < 0 or args.h2_random < 0:
+    if args.h2_snp + args.h2_arg > 1.0:
+        sys.exit("ERROR: h2_snp + h2_arg must be ≤ 1")
+    if args.h2_snp < 0 or args.h2_arg < 0:
         sys.exit("ERROR: heritabilities must be non-negative")
     if not (0.0 < args.bed_coverage <= 1.0):
         sys.exit("ERROR: --bed-coverage must satisfy 0 < f <= 1")
@@ -281,11 +281,11 @@ def main():
     y_fixed = dosage_std.T @ beta           # (n_indiv,)
 
     var_fixed = float(np.var(y_fixed))
-    if var_fixed > 0 and args.h2_fixed > 0:
-        scale_f = math.sqrt(args.h2_fixed / var_fixed)
+    if var_fixed > 0 and args.h2_snp > 0:
+        scale_f = math.sqrt(args.h2_snp / var_fixed)
         beta   *= scale_f
         y_fixed = dosage_std.T @ beta
-    elif args.h2_fixed == 0:
+    elif args.h2_snp == 0:
         beta[:] = 0.0
         y_fixed[:] = 0.0
 
@@ -310,22 +310,22 @@ def main():
     y_random = sim_random_effect(ts, hap_ranks, n_indiv, ws2_vec, rng)
 
     var_random = float(np.var(y_random))
-    if var_random > 0 and args.h2_random > 0:
-        scale_r   = math.sqrt(args.h2_random / var_random)
+    if var_random > 0 and args.h2_arg > 0:
+        scale_r   = math.sqrt(args.h2_arg / var_random)
         y_random *= scale_r
         ws2_vec  *= scale_r ** 2        # scale the variance parameters accordingly
-    elif args.h2_random == 0:
+    elif args.h2_arg == 0:
         y_random[:] = 0.0
         ws2_vec[:]  = 0.0
 
     # ---- 5. Residual noise and final phenotype ----------------------------
-    sigma2 = max(0.0, 1.0 - args.h2_fixed - args.h2_random)
+    sigma2 = max(0.0, 1.0 - args.h2_snp - args.h2_arg)
     y_noise = rng.normal(0.0, math.sqrt(sigma2) if sigma2 > 0 else 0.0, size=n_indiv)
     y = y_fixed + y_random + y_noise
 
     # Realised heritabilities (from rescaled components, before noise is added)
-    h2_fixed_realised  = float(np.var(y_fixed)  / np.var(y)) if np.var(y) > 0 else 0.0
-    h2_random_realised = float(np.var(y_random) / np.var(y)) if np.var(y) > 0 else 0.0
+    h2_snp_realised  = float(np.var(y_fixed)  / np.var(y)) if np.var(y) > 0 else 0.0
+    h2_arg_realised = float(np.var(y_random) / np.var(y)) if np.var(y) > 0 else 0.0
 
     # ---- 6. Write outputs -------------------------------------------------
     print(f"Writing outputs with prefix '{args.out}' ...", flush=True)
@@ -420,10 +420,10 @@ def main():
         "mut_rate":        args.mut_rate,
         "Ne":              args.Ne,
         "seed":            args.seed,
-        "h2_fixed_target":  args.h2_fixed,
-        "h2_random_target": args.h2_random,
-        "h2_fixed_realised":  h2_fixed_realised,
-        "h2_random_realised": h2_random_realised,
+        "h2_snp_target":  args.h2_snp,
+        "h2_arg_target": args.h2_arg,
+        "h2_snp_realised":  h2_snp_realised,
+        "h2_arg_realised": h2_arg_realised,
         "sigma2":          sigma2,
         "regime":          args.regime,
         "sigma2_mix":      list(sigma2_mix),
@@ -445,8 +445,8 @@ def main():
         print(f"  n_trees          : {n_trees}")
     print(f"  n_variants       : {p}")
     print(f"  n_causal (fixed) : {n_causal}")
-    print(f"  h2_fixed  target / realised : {args.h2_fixed:.3f} / {h2_fixed_realised:.4f}")
-    print(f"  h2_random target / realised : {args.h2_random:.3f} / {h2_random_realised:.4f}")
+    print(f"  h2_snp  target / realised : {args.h2_snp:.3f} / {h2_snp_realised:.4f}")
+    print(f"  h2_arg target / realised : {args.h2_arg:.3f} / {h2_arg_realised:.4f}")
     print(f"  sigma2           : {sigma2:.4f}")
 
 

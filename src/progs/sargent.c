@@ -112,15 +112,20 @@ static void write_w2_table(sargent_t *sg, const char *outroot, int silent)
 /* write_summary_json: write a coherent record of the fit to <outroot>.summary.json.
  *
  * All h² values come from sargent's own internally consistent residual-based
- * calculation (h2_fixed = 1 - var(r)/var(y), h2_random = var(r)/var(y) - σ²/var(y))
+ * calculation (h2_snp = 1 - var(r)/var(y), h2_arg = var(r)/var(y) - σ²/var(y))
  * from the final iteration's state.  PR averaging is no longer applied in
  * var_joint, so (β, ws², σ², h²) are from a single coherent iteration.
  *
- * KNOWN LIMITATION: the variance partition (h²_fixed vs h²_random) is biased
- * because of fixed/random identifiability competition.  Sequential mode
- * over-attributes to h²_fixed; joint EM mode over-attributes to h²_random.
- * For prediction this is benign; for variance-component reporting, treat the
- * h²_fixed and h²_random fields as informative but not definitive.
+ * INTERPRETATION:
+ *   h2_snp = fraction of variance explained by the BayesR fit on typed SNPs.
+ *   h2_arg = ADDITIONAL fraction captured by the ARG-based random component
+ *            after the SNP fit ("missing heritability recovered").
+ *   h2     = h2_snp + h2_arg.
+ *
+ * A classical fixed-vs-random variance partition is not identifiable in this
+ * model — X and the ARG share structure by construction.  The
+ * sequential-prioritisation interpretation above IS well-defined: it is the
+ * answer the algorithm gives, not an estimate of an inaccessible truth.
  */
 static void write_summary_json(sargent_t *sg, const char *outroot,
                                const char *mode, int em_iters, int silent)
@@ -136,7 +141,7 @@ static void write_summary_json(sargent_t *sg, const char *outroot,
     fprintf(f, "{\n");
     fprintf(f, "  \"mode\":            \"%s\",\n", mode);
     fprintf(f, "  \"em_iters\":        %d,\n",     em_iters);
-    fprintf(f, "  \"uniform_random\":  %s,\n",     sg->uniform_random ? "true" : "false");
+    fprintf(f, "  \"uniform_arg\":  %s,\n",     sg->uniform_arg ? "true" : "false");
     fprintf(f, "  \"n_indiv\":         %d,\n",     sg->n);
     fprintf(f, "  \"n_variants\":      %d,\n",     sg->p);
     fprintf(f, "  \"n_trees\":         %d,\n",     sg->S);
@@ -146,8 +151,8 @@ static void write_summary_json(sargent_t *sg, const char *outroot,
     fprintf(f, "  \"phi_alpha\":       %.6g,\n",   sg->phi_alpha);
     fprintf(f, "  \"phi_beta\":        %.6g,\n",   sg->phi_beta);
     fprintf(f, "  \"h2\":              %.6g,\n",   sg->h2);
-    fprintf(f, "  \"h2_fixed\":        %.6g,\n",   sg->h2_fixed);
-    fprintf(f, "  \"h2_random\":       %.6g,\n",   sg->h2_random);
+    fprintf(f, "  \"h2_snp\":          %.6g,\n",   sg->h2_snp);
+    fprintf(f, "  \"h2_arg\":          %.6g,\n",   sg->h2_arg);
     fprintf(f, "  \"sigma2\":          %.6g\n",    sg->sigma2);
     fprintf(f, "}\n");
     fclose(f);
@@ -169,24 +174,24 @@ int main(int argc, char *argv[])
     int opt_idx;
     int silent      = 0;
     int ts_geno     = 0;
-    int fixed_only  = 0;
-    int random_only = 0;
+    int snp_only    = 0;
+    int arg_only    = 0;
     int nprobe      = 0;   /* 0 = use sargent_t default (10) */
-    int uniform_rand= 0;
+    int uniform_arg = 0;
     int em_iters    = 0;   /* 0 = sequential; >0 = joint EM outer iters */
     double pi0      = -1.0; /* < 0 means unset */
     const char *outroot = "sargent";
-    const char *mode_str = "predict";   /* predict | varcomp | localize */
+    const char *mode_str = "predict";   /* predict | localize (stub) */
 
     struct option long_opts[] = {
         {"silent",         0, 0, 'z'},
         {"ts-geno",        0, 0, 'G'},
-        {"fixed-only",     0, 0, 'F'},
-        {"random-only",    0, 0, 'R'},
+        {"snp-only",       0, 0, 'S'},
+        {"arg-only",       0, 0, 'A'},
         {"pi0",            1, 0, 'P'},
         {"outroot",        1, 0, 'o'},
         {"nprobe",         1, 0, 'N'},
-        {"uniform-random", 0, 0, 'U'},
+        {"uniform-arg",    0, 0, 'U'},
         {"em",             1, 0, 'E'},
         {"mode",           1, 0, 'M'},
         {"version",        0, 0, 'v'},
@@ -194,18 +199,18 @@ int main(int argc, char *argv[])
         {0, 0, 0, 0}
     };
 
-    while ((c = getopt_long(argc, argv, "zGFRUE:M:o:N:P:vh", long_opts, &opt_idx)) != -1) {
+    while ((c = getopt_long(argc, argv, "zGSAUE:M:o:N:P:vh", long_opts, &opt_idx)) != -1) {
         switch (c) {
-        case 'z': silent       = 1;                break;
-        case 'G': ts_geno      = 1;                break;
-        case 'F': fixed_only   = 1;                break;
-        case 'R': random_only  = 1;                break;
-        case 'U': uniform_rand = 1;                break;
-        case 'E': em_iters     = atoi(optarg);     break;
-        case 'M': mode_str     = optarg;           break;
-        case 'P': pi0          = atof(optarg);     break;
-        case 'o': outroot      = optarg;           break;
-        case 'N': nprobe       = atoi(optarg);     break;
+        case 'z': silent      = 1;                break;
+        case 'G': ts_geno     = 1;                break;
+        case 'S': snp_only    = 1;                break;
+        case 'A': arg_only    = 1;                break;
+        case 'U': uniform_arg = 1;                break;
+        case 'E': em_iters    = atoi(optarg);     break;
+        case 'M': mode_str    = optarg;           break;
+        case 'P': pi0         = atof(optarg);     break;
+        case 'o': outroot     = optarg;           break;
+        case 'N': nprobe      = atoi(optarg);     break;
         case 'v': printf("sargent version %s\n", SARGENT_VERSION); exit(0);
         case 'h': printf("%s", HELP); exit(0);
         case '?':
@@ -216,11 +221,10 @@ int main(int argc, char *argv[])
 
     /* Resolve mode */
     int mode_predict = (strcmp(mode_str, "predict") == 0);
-    int mode_varcomp = (strcmp(mode_str, "varcomp") == 0);
     int mode_localize= (strcmp(mode_str, "localize") == 0);
-    if (!mode_predict && !mode_varcomp && !mode_localize) {
+    if (!mode_predict && !mode_localize) {
         fprintf(stderr, "ERROR: unrecognized --mode '%s'.  Choose from "
-                "predict, varcomp, localize.\n", mode_str);
+                "predict, localize.\n", mode_str);
         exit(EXIT_FAILURE);
     }
     if (mode_localize) {
@@ -228,14 +232,9 @@ int main(int argc, char *argv[])
                 "(see ROADMAP.md, Phase 7).\n");
         exit(EXIT_FAILURE);
     }
-    if (mode_varcomp && (fixed_only || random_only || em_iters > 0 || uniform_rand)) {
-        fprintf(stderr, "ERROR: --mode varcomp cannot be combined with "
-                "--fixed-only, --random-only, --em, or --uniform-random.\n");
-        exit(EXIT_FAILURE);
-    }
 
-    if (fixed_only && random_only) {
-        fprintf(stderr, "ERROR: --fixed-only and --random-only are mutually exclusive.\n");
+    if (snp_only && arg_only) {
+        fprintf(stderr, "ERROR: --snp-only and --arg-only are mutually exclusive.\n");
         exit(EXIT_FAILURE);
     }
 
@@ -317,7 +316,7 @@ int main(int argc, char *argv[])
         exit(EXIT_FAILURE);
     }
     if (nprobe > 0)  sg->nprobe = nprobe;
-    if (uniform_rand) sg->uniform_random = 1;
+    if (uniform_arg) sg->uniform_arg = 1;
     if (em_iters > 0) sg->em_iters = em_iters;
     if (pi0 > 0.0 && pi0 < 1.0) {
         /* Beta(1, pi0/(1-pi0)) hyperprior: prior mean of phi = 1-pi0.
@@ -326,62 +325,54 @@ int main(int argc, char *argv[])
         sg->phi_beta  = pi0 / (1.0 - pi0);
     }
 
-    if (em_iters > 0 && (fixed_only || random_only)) {
-        fprintf(stderr, "ERROR: --em cannot be combined with --fixed-only or --random-only.\n");
+    if (em_iters > 0 && (snp_only || arg_only)) {
+        fprintf(stderr, "ERROR: --em cannot be combined with --snp-only or --arg-only.\n");
         sargent_free(sg);
         exit(EXIT_FAILURE);
     }
+    (void)mode_predict;  /* currently the only operational mode */
 
-    if (mode_varcomp) {
-        /* ---- Mode: varcomp.  Method-of-moments variance components.
-         * No beta or per-tree ws2 estimated; just the three VCs. ---- */
-        if (!silent)
-            fprintf(stderr,
-                    "MoM varcomp: n=%d, p=%d, S=%d, nprobe=%d\n",
-                    sg->n, sg->p, sg->S, sg->nprobe);
-        var_mom(sg, silent);
-    } else if (em_iters > 0) {
+    if (em_iters > 0) {
         /* ---- Joint variational coordinate descent (mode: predict) ---- */
         if (!silent)
             fprintf(stderr,
                     "Joint EM: %d outer iters (%d SNPs K=%d, %d trees%s)...\n",
                     em_iters, sg->p, sg->K, sg->S,
-                    sg->uniform_random ? ", uniform-random" : "");
+                    sg->uniform_arg ? ", uniform-random" : "");
         var_joint(sg, silent);
         if (!silent)
-            fprintf(stderr, "Joint EM done: h2_fixed=%.4f  h2_random=%.4f  sigma2=%.4f\n",
-                    sg->h2_fixed, sg->h2_random, sg->sigma2);
+            fprintf(stderr, "Joint EM done: h2_snp=%.4f  h2_arg=%.4f  sigma2=%.4f\n",
+                    sg->h2_snp, sg->h2_arg, sg->sigma2);
         write_beta_table(sg, outroot, silent);
         write_w2_table(sg, outroot, silent);
     } else {
         /* ---- Sequential mode: Stage 1 then Stage 2 (mode: predict) ---- */
-        if (!random_only) {
+        if (!arg_only) {
             if (!silent)
                 fprintf(stderr, "Stage 1: inferring fixed effects (%d SNPs, K=%d)...\n",
                         sg->p, sg->K);
             var_fixed(sg, silent);
             if (!silent)
-                fprintf(stderr, "Stage 1 done: h2_fixed=%.4f  sigma2=%.4f\n",
-                        sg->h2_fixed, sg->sigma2);
+                fprintf(stderr, "Stage 1 done: h2_snp=%.4f  sigma2=%.4f\n",
+                        sg->h2_snp, sg->sigma2);
             write_beta_table(sg, outroot, silent);
         }
 
-        if (!fixed_only) {
+        if (!snp_only) {
             if (!silent)
                 fprintf(stderr, "Stage 2: inferring segment weights (%d trees%s)...\n",
-                        sg->S, sg->uniform_random ? ", uniform-random" : "");
+                        sg->S, sg->uniform_arg ? ", uniform-random" : "");
             var_random(sg, silent);
             if (!silent)
-                fprintf(stderr, "Stage 2 done: h2_random=%.4f  sigma2=%.4f\n",
-                        sg->h2_random, sg->sigma2);
+                fprintf(stderr, "Stage 2 done: h2_arg=%.4f  sigma2=%.4f\n",
+                        sg->h2_arg, sg->sigma2);
             write_w2_table(sg, outroot, silent);
         }
     }
 
     /* Write coherent summary of the final fit. */
     {
-        const char *m = mode_varcomp ? "varcomp"
-                       : (em_iters > 0 ? "joint_em" : "sequential");
+        const char *m = em_iters > 0 ? "joint_em" : "sequential";
         write_summary_json(sg, outroot, m, em_iters, silent);
     }
 
@@ -389,8 +380,8 @@ int main(int argc, char *argv[])
     if (!silent) {
         fprintf(stderr, "\nSummary:\n");
         fprintf(stderr, "  h2        : %.4f\n", sg->h2);
-        fprintf(stderr, "  h2.fixed  : %.4f\n", sg->h2_fixed);
-        fprintf(stderr, "  h2.random : %.4f\n", sg->h2_random);
+        fprintf(stderr, "  h2.snp    : %.4f\n", sg->h2_snp);
+        fprintf(stderr, "  h2.arg    : %.4f\n", sg->h2_arg);
         fprintf(stderr, "  sigma2    : %.4f\n", sg->sigma2);
     }
 

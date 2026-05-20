@@ -43,7 +43,7 @@ for f in 1.0 0.3 0.1; do
     mamba run -n sargent python "$SIM" \
         --n-indiv 300 --n-test 150 --length 300000 \
         --recomb-rate 1e-8 --mut-rate 1e-8 --Ne 10000 \
-        --h2-fixed 0.40 --h2-random 0.40 --n-causal 15 \
+        --h2-snp 0.40 --h2-arg 0.40 --n-causal 15 \
         --bed-coverage "$f" --seed 42 \
         --out "$dir/case" > "$dir/sim.log" 2>&1
     log "  medium f=$f: sequential SARGENT"

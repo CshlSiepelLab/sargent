@@ -4,7 +4,7 @@ run_suite.py — run SARGENT on every dataset in the test suite and collect metr
 
 For each case in <suitedir>/<scale>/<case_name>/ it:
   1. Runs sargent with --ts-geno (or optionally with BED files)
-  2. Parses stderr for sigma2, h2_fixed, h2_random
+  2. Parses stderr for sigma2, h2_snp, h2_arg
   3. Computes ws2_corr, beta_corr, and variance accuracy
   4. Writes a JSON result per case and a summary TSV
 
@@ -27,7 +27,7 @@ from metrics import (load_params, load_true_ws2, load_true_beta,
                      load_inferred_ws2, load_inferred_beta, load_inferred_rho,
                      ws2_metrics, beta_metrics, variance_metrics)
 
-CASE_NAMES = ["fixed_only", "fixed_heavy", "balanced", "rand_heavy", "rand_only"]
+CASE_NAMES = ["snp_only", "snp_heavy", "balanced", "arg_heavy", "arg_only"]
 
 
 def find_sargent(given):
@@ -52,7 +52,7 @@ def find_sargent(given):
 def load_summary_json(out_prefix):
     """Read sargent's .summary.json file.
 
-    Sargent now writes a coherent record of the fit (h2, h2_fixed, h2_random,
+    Sargent now writes a coherent record of the fit (h2, h2_snp, h2_arg,
     sigma2, plus mode metadata).  This avoids fragile stderr regex parsing
     that previously dropped or mis-extracted values.
     """
@@ -75,8 +75,8 @@ def run_one(case_dir, case_name, sargent_bin, args, outdir):
         return None
 
     params = load_params(prefix)
-    has_fixed  = params["h2_fixed_target"]  > 0
-    has_random = params["h2_random_target"] > 0
+    has_fixed  = params["h2_snp_target"]  > 0
+    has_random = params["h2_arg_target"] > 0
 
     # Run sargent in --silent mode; we read the coherent summary from JSON.
     cmd = [sargent_bin, "--silent"]
@@ -87,9 +87,9 @@ def run_one(case_dir, case_name, sargent_bin, args, outdir):
     if args.pi0 is not None:
         cmd += ["--pi0", str(args.pi0)]
     if not has_random:
-        cmd += ["--fixed-only"]
+        cmd += ["--snp-only"]
     elif not has_fixed:
-        cmd += ["--random-only"]
+        cmd += ["--arg-only"]
     cmd += ["--outroot", out_prefix]
     cmd += [prefix + ".phen", prefix + ".trees"]
     if not args.ts_geno:
@@ -117,24 +117,24 @@ def run_one(case_dir, case_name, sargent_bin, args, outdir):
         "n_trees":     params["n_trees"],
         "n_variants":  params["n_variants"],
         "n_causal":    params["n_causal"],
-        "h2_fixed_target":   params["h2_fixed_target"],
-        "h2_random_target":  params["h2_random_target"],
+        "h2_snp_target":   params["h2_snp_target"],
+        "h2_arg_target":  params["h2_arg_target"],
         "sigma2_true":       params["sigma2"],
     }
 
     # Variance metrics from sargent's .summary.json (internally consistent)
     record["sigma2_inferred"]   = summary.get("sigma2", float("nan"))
-    record["h2_fixed_inferred"] = summary.get("h2_fixed", float("nan"))
-    record["h2_rand_inferred"]  = summary.get("h2_random", float("nan"))
+    record["h2_snp_inferred"] = summary.get("h2_snp", float("nan"))
+    record["h2_arg_inferred"]  = summary.get("h2_arg", float("nan"))
     record["sargent_mode"]      = summary.get("mode", "unknown")
 
     vm = variance_metrics(
         sigma2_inferred=record["sigma2_inferred"],
         sigma2_true=record["sigma2_true"],
-        h2_fixed_inferred=record["h2_fixed_inferred"],
-        h2_fixed_true=params["h2_fixed_target"],
-        h2_rand_inferred=record["h2_rand_inferred"],
-        h2_rand_true=params["h2_random_target"],
+        h2_snp_inferred=record["h2_snp_inferred"],
+        h2_snp_true=params["h2_snp_target"],
+        h2_arg_inferred=record["h2_arg_inferred"],
+        h2_arg_true=params["h2_arg_target"],
     )
     record.update(vm)
 
@@ -191,7 +191,7 @@ def run_prediction(case_prefix, sargent_prefix):
 
 def print_summary(records):
     fields = ["case", "sigma2_inferred", "sigma2_true", "sigma2_relerr",
-              "h2_fixed_inferred", "h2_rand_inferred",
+              "h2_snp_inferred", "h2_arg_inferred",
               "ws2_corr_active", "beta_corr_causal", "elapsed_s"]
 
     header = "\t".join(fields)
@@ -241,8 +241,8 @@ def write_markdown(records, path, args):
             f.write("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n")
             for r in scale_recs:
                 f.write(f"| {r['case']} | {r['n_trees']} | {r['n_variants']} | "
-                        f"{r['h2_fixed_target']:.2f} | {fmt(r.get('h2_fixed_inferred'))} | "
-                        f"{r['h2_random_target']:.2f} | {fmt(r.get('h2_rand_inferred'))} | "
+                        f"{r['h2_snp_target']:.2f} | {fmt(r.get('h2_snp_inferred'))} | "
+                        f"{r['h2_arg_target']:.2f} | {fmt(r.get('h2_arg_inferred'))} | "
                         f"{r['sigma2_true']:.2f} | {fmt(r.get('sigma2_inferred'))} | "
                         f"{r['elapsed_s']:.1f}s |\n")
             f.write("\n")

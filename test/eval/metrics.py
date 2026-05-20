@@ -211,9 +211,9 @@ def beta_metrics(true_beta, inferred_beta):
     }
 
 
-def variance_metrics(sigma2_inferred, sigma2_true, h2_fixed_inferred, h2_fixed_true,
-                     h2_rand_inferred, h2_rand_true):
-    """Returns dict with relative errors for sigma2, h2_fixed, h2_random."""
+def variance_metrics(sigma2_inferred, sigma2_true, h2_snp_inferred, h2_snp_true,
+                     h2_arg_inferred, h2_arg_true):
+    """Returns dict with relative errors for sigma2, h2_snp, h2_arg."""
     def rel_err(inferred, true):
         if true == 0:
             return float("nan") if inferred == 0 else float("inf")
@@ -223,10 +223,10 @@ def variance_metrics(sigma2_inferred, sigma2_true, h2_fixed_inferred, h2_fixed_t
         "sigma2_inferred":  sigma2_inferred,
         "sigma2_true":      sigma2_true,
         "sigma2_relerr":    rel_err(sigma2_inferred, sigma2_true),
-        "h2_fixed_inferred":  h2_fixed_inferred,
-        "h2_fixed_true":      h2_fixed_true,
-        "h2_fixed_relerr":    rel_err(h2_fixed_inferred, h2_fixed_true),
-        "h2_rand_inferred":   h2_rand_inferred,
-        "h2_rand_true":       h2_rand_true,
-        "h2_rand_relerr":     rel_err(h2_rand_inferred, h2_rand_true),
+        "h2_snp_inferred":  h2_snp_inferred,
+        "h2_snp_true":      h2_snp_true,
+        "h2_snp_relerr":    rel_err(h2_snp_inferred, h2_snp_true),
+        "h2_arg_inferred":   h2_arg_inferred,
+        "h2_arg_true":       h2_arg_true,
+        "h2_arg_relerr":     rel_err(h2_arg_inferred, h2_arg_true),
     }

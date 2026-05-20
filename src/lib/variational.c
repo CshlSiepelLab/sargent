@@ -161,7 +161,7 @@ sargent_t *sargent_new(geno_reader_t *gr, tsk_treeseq_t *ts, double *y)
     sg->phi_beta   = 1.0;
 
     /* Alternative-mode flags; off by default */
-    sg->uniform_random = 0;
+    sg->uniform_arg = 0;
     sg->em_iters       = 0;
 
     return sg;
@@ -323,14 +323,14 @@ void var_fixed(sargent_t *sg, int silent)
         if (sg->sigma2 < 1e-10 * var_y)
             sg->sigma2 = 1e-10 * var_y;  /* floor to avoid u_bar → ∞ */
 
-        /* Update h2_fixed: fraction of phenotypic variance explained by X β̂ */
-        sg->h2_fixed  = (var_y > 0.0) ? 1.0 - sg->sigma2 / var_y : 0.0;
+        /* Update h2_snp: fraction of phenotypic variance explained by X β̂ */
+        sg->h2_snp  = (var_y > 0.0) ? 1.0 - sg->sigma2 / var_y : 0.0;
 
         double rel_dsig = fabs(sg->sigma2 - old_sigma2) / (old_sigma2 + 1e-15);
         if (!silent) {
             fprintf(stderr, "var_fixed iter %3d: max_delta=%.2e  sigma2=%.4f"
-                    "  h2_fixed=%.4f  rel_dsig=%.2e  pi=[",
-                    iter + 1, max_delta, sg->sigma2, sg->h2_fixed, rel_dsig);
+                    "  h2_snp=%.4f  rel_dsig=%.2e  pi=[",
+                    iter + 1, max_delta, sg->sigma2, sg->h2_snp, rel_dsig);
             for (int k = 0; k < K; k++)
                 fprintf(stderr, " %.3f", sg->pi_mix[k]);
             fprintf(stderr, " ]\n");
@@ -493,7 +493,7 @@ void var_random(sargent_t *sg, int silent)
         .nprobe = nprobe, .batch_size = 0, .use_gaussian = 0, .seed = 0,
     };
 
-    int uniform   = sg->uniform_random;
+    int uniform   = sg->uniform_arg;
     if (!silent)
         fprintf(stderr, "var_random: %s (n=%d, S=%d)\n",
                 uniform ? "uniform-kinship REML"
@@ -563,7 +563,7 @@ void var_random(sargent_t *sg, int silent)
         }
 
         double h2_rand = (var_y > 0.0) ?
-            fmax(0.0, 1.0 - sg->sigma2 / var_y - sg->h2_fixed) : 0.0;
+            fmax(0.0, 1.0 - sg->sigma2 / var_y - sg->h2_snp) : 0.0;
         double rel_dsig = fabs(sg->sigma2 - old_sigma2) / (old_sigma2 + 1e-15);
 
         /* Polyak-Ruppert accumulation after burn-in */
@@ -589,9 +589,9 @@ void var_random(sargent_t *sg, int silent)
             sg->ws2[s] = ws2_accum[s] / n_accum;
     }
 
-    sg->h2_random = (var_y > 0.0) ?
-        fmax(0.0, 1.0 - sg->sigma2 / var_y - sg->h2_fixed) : 0.0;
-    sg->h2 = sg->h2_fixed + sg->h2_random;
+    sg->h2_arg = (var_y > 0.0) ?
+        fmax(0.0, 1.0 - sg->sigma2 / var_y - sg->h2_snp) : 0.0;
+    sg->h2 = sg->h2_snp + sg->h2_arg;
 
     /* Post-hoc activation probability from converged ws2 values.
      *
@@ -721,7 +721,7 @@ void var_joint(sargent_t *sg, int silent)
         .nprobe = sg->nprobe, .batch_size = 0, .use_gaussian = 0, .seed = 0,
     };
 
-    int uniform   = sg->uniform_random;
+    int uniform   = sg->uniform_arg;
     if (!silent)
         fprintf(stderr,
                 "var_joint: interleaved coordinate descent "
@@ -859,11 +859,11 @@ void var_joint(sargent_t *sg, int silent)
             sg->sigma2 = fmax(1e-10 * var_y, fmin(var_y, sg->sigma2));
         }
 
-        /* Report h2_fixed from current X β̂, and h2_random from σ² + Xβ. */
+        /* Report h2_snp from current X β̂, and h2_arg from σ² + Xβ. */
         double var_r = vec_var(r, n);
-        sg->h2_fixed  = (var_y > 0.0) ? fmax(0.0, 1.0 - var_r / var_y) : 0.0;
-        sg->h2_random = (var_y > 0.0) ? fmax(0.0, var_r / var_y - sg->sigma2 / var_y) : 0.0;
-        sg->h2        = sg->h2_fixed + sg->h2_random;
+        sg->h2_snp  = (var_y > 0.0) ? fmax(0.0, 1.0 - var_r / var_y) : 0.0;
+        sg->h2_arg = (var_y > 0.0) ? fmax(0.0, var_r / var_y - sg->sigma2 / var_y) : 0.0;
+        sg->h2        = sg->h2_snp + sg->h2_arg;
 
         double rel_dsig = fabs(sg->sigma2 - old_sigma2) / (old_sigma2 + 1e-15);
 
@@ -871,7 +871,7 @@ void var_joint(sargent_t *sg, int silent)
             fprintf(stderr,
                     "var_joint iter %3d: max_dβ=%.2e  sigma2=%.4f  h2_f=%.4f  h2_r=%.4f"
                     "  ws2_mean=%.3e  v_jj=%.2e  rel_dsig=%.2e\n",
-                    outer + 1, max_dbeta, sg->sigma2, sg->h2_fixed, sg->h2_random,
+                    outer + 1, max_dbeta, sg->sigma2, sg->h2_snp, sg->h2_arg,
                     ws2_mean, v_jj, rel_dsig);
 
         old_sigma2 = sg->sigma2;
@@ -909,290 +909,6 @@ cleanup:
     free(work); free(order_buf); free(gv);
 }
 
-/* =========================================================================
- * var_mom: Method-of-moments variance-component estimation
- * =========================================================================
- *
- * Model:  y = X beta + u + epsilon
- *   beta ~ N(0, sigma2_beta_tilde / p · I_p), so X beta has covariance
- *        sigma2_beta_tilde · K_X with K_X = (X X^T)/p
- *   u ~ N(0, sigma2_g K_g),  K_g = (1/S) sum_s G_s
- *   epsilon ~ N(0, sigma2 I)
- *
- * Three moment equations E[y^T M y] = tr(M V) for M in {I, K_X, K_g}:
- *
- *   yty       = sigma2_beta_tilde tr(K_X)     + sigma2_g tr(K_g)     + sigma2 · n
- *   yt_KX_y   = sigma2_beta_tilde tr(K_X^2)   + sigma2_g tr(K_X K_g) + sigma2 tr(K_X)
- *   yt_Kg_y   = sigma2_beta_tilde tr(K_X K_g) + sigma2_g tr(K_g^2)   + sigma2 tr(K_g)
- *
- * Quantities computed:
- *   yty       = ||y_centered||^2                                       (exact)
- *   yt_KX_y   = ||X^T y_c||^2 / p                                      (exact, one pass over SNPs)
- *   yt_Kg_y   = (1/S) sum_s y_c^T G_s y_c  via compute_quad_all        (exact)
- *   tr(K_X)   = n                                                       (exact)
- *   tr(K_g), tr(K_X^2), tr(K_g^2), tr(K_X K_g)                          (Hutchinson)
- *
- * Per Hutchinson probe z:
- *   t_p   = X^T z         (length p; one pass)
- *   u_X   = X t_p / p     (length n; one pass)
- *   u_g   = K_g z         (one v_matvec with ws2[s] = 1/S, sigma2 = 0)
- *   accumulate: z^T u_X (= tr_KX), z^T u_g (= tr_Kg),
- *               ||u_X||^2 (= tr_KX2), ||u_g||^2 (= tr_Kg2), u_X^T u_g (= tr_KX_Kg)
- *
- * Solve the 3x3 linear system by Cramer's rule.  Clip negative VCs to zero.
- * ====================================================================== */
-
-static void solve_3x3(double M[3][3], const double rhs[3],
-                      double *x0, double *x1, double *x2)
-{
-    double det =
-        M[0][0]*(M[1][1]*M[2][2] - M[1][2]*M[2][1])
-      - M[0][1]*(M[1][0]*M[2][2] - M[1][2]*M[2][0])
-      + M[0][2]*(M[1][0]*M[2][1] - M[1][1]*M[2][0]);
-    if (fabs(det) < 1e-30) {
-        fprintf(stderr,
-                "var_mom: warning — singular moment matrix (det=%.3e); "
-                "returning zeros\n", det);
-        *x0 = *x1 = *x2 = 0.0;
-        return;
-    }
-    double d0 =
-        rhs[0] *(M[1][1]*M[2][2] - M[1][2]*M[2][1])
-      - M[0][1]*(rhs[1] *M[2][2] - M[1][2]*rhs[2])
-      + M[0][2]*(rhs[1] *M[2][1] - M[1][1]*rhs[2]);
-    double d1 =
-        M[0][0]*(rhs[1] *M[2][2] - M[1][2]*rhs[2])
-      - rhs[0] *(M[1][0]*M[2][2] - M[1][2]*M[2][0])
-      + M[0][2]*(M[1][0]*rhs[2] - rhs[1] *M[2][0]);
-    double d2 =
-        M[0][0]*(M[1][1]*rhs[2] - rhs[1] *M[2][1])
-      - M[0][1]*(M[1][0]*rhs[2] - rhs[1] *M[2][0])
-      + rhs[0] *(M[1][0]*M[2][1] - M[1][1]*M[2][0]);
-    *x0 = d0 / det;
-    *x1 = d1 / det;
-    *x2 = d2 / det;
-}
-
-/* Simple xorshift-based Rademacher draw; deterministic given seed. */
-static inline double rademacher(unsigned long long *state)
-{
-    *state ^= (*state << 13);
-    *state ^= (*state >> 7);
-    *state ^= (*state << 17);
-    return (*state & 0x1) ? 1.0 : -1.0;
-}
-
-void var_mom(sargent_t *sg, int silent)
-{
-    int n      = sg->n;
-    int p      = sg->p;
-    int S      = sg->S;
-    int nprobe = sg->nprobe > 0 ? sg->nprobe : 10;
-
-    /* ----- y centred ----- */
-    double y_mean = 0.0;
-    for (int i = 0; i < n; i++) y_mean += sg->y[i];
-    y_mean /= n;
-
-    double *y_c = malloc((size_t)n * sizeof(double));
-    if (!y_c) { fprintf(stderr, "var_mom: out of memory\n"); return; }
-    for (int i = 0; i < n; i++) y_c[i] = sg->y[i] - y_mean;
-
-    double var_y = vec_var(sg->y, n);
-
-    /* ----- yty (exact) ----- */
-    double yty = 0.0;
-    for (int i = 0; i < n; i++) yty += y_c[i] * y_c[i];
-
-    /* ----- yt_KX_y = ||X^T y_c||^2 / p (exact, one SNP pass) ----- */
-    double *g = malloc((size_t)n * sizeof(double));
-    double *Xt_yc = malloc((size_t)p * sizeof(double));
-    if (!g || !Xt_yc) { fprintf(stderr, "var_mom: out of memory\n");
-        free(y_c); free(g); free(Xt_yc); return; }
-    geno_rewind(sg->gr);
-    for (int j = 0; j < p; j++) {
-        if (geno_read_variant(sg->gr, g, GENO_STANDARDIZE) <= 0) break;
-        double d = 0.0;
-        for (int i = 0; i < n; i++) d += g[i] * y_c[i];
-        Xt_yc[j] = d;
-    }
-    double yt_KX_y = 0.0;
-    for (int j = 0; j < p; j++) yt_KX_y += Xt_yc[j] * Xt_yc[j];
-    yt_KX_y /= (double)p;
-
-    /* ----- yt_Kg_y via compute_quad_all on y_c ----- */
-    tsk_size_t n_nodes   = tsk_treeseq_get_num_nodes(sg->ts);
-    double    *work      = malloc(2 * n_nodes * sizeof(double));
-    tsk_id_t  *order_buf = malloc(n_nodes * sizeof(tsk_id_t));
-    double    *gv        = malloc((size_t)n * sizeof(double));
-    double    *A_s       = malloc((size_t)S * sizeof(double));
-    double    *ws2_uni   = malloc((size_t)S * sizeof(double));
-    double    *z_vec     = malloc((size_t)n * sizeof(double));
-    double    *u_X       = malloc((size_t)n * sizeof(double));
-    double    *u_g       = malloc((size_t)n * sizeof(double));
-    double    *Xt_z      = malloc((size_t)p * sizeof(double));
-
-    if (!work || !order_buf || !gv || !A_s || !ws2_uni || !z_vec ||
-        !u_X || !u_g || !Xt_z) {
-        fprintf(stderr, "var_mom: out of memory\n");
-        free(y_c); free(g); free(Xt_yc);
-        free(work); free(order_buf); free(gv); free(A_s); free(ws2_uni);
-        free(z_vec); free(u_X); free(u_g); free(Xt_z);
-        return;
-    }
-
-    compute_quad_all(sg->ts, sg->hap_to_indiv, n, S, sg->S_orig, sg->prune_map,
-                     y_c, A_s, work, order_buf, gv);
-    double sum_A = 0.0;
-    for (int s = 0; s < S; s++) sum_A += A_s[s];
-    double yt_Kg_y = sum_A / (double)S;
-
-    /* ----- Hutchinson trace estimates ----- */
-    double tr_KX_exact = (double)n;
-    double tr_KX_hutch = 0.0;
-    double tr_Kg      = 0.0;
-    double tr_KX2     = 0.0;
-    double tr_Kg2     = 0.0;
-    double tr_KX_Kg   = 0.0;
-
-    /* Set up uniform-K_g matvec data */
-    for (int s = 0; s < S; s++) ws2_uni[s] = 1.0 / (double)S;
-    v_matvec_data_t vd_Kg = {
-        .ts = sg->ts, .ws2 = ws2_uni, .sigma2 = 0.0,
-        .n = n, .S = S, .S_orig = sg->S_orig, .prune_map = sg->prune_map,
-        .hap_to_indiv = sg->hap_to_indiv,
-        .work = work, .order_buf = order_buf, .gv = gv,
-    };
-
-    if (!silent)
-        fprintf(stderr, "var_mom: %d probes, n=%d, p=%d, S=%d\n",
-                nprobe, n, p, S);
-
-    unsigned long long rng_state = 0xDEADBEEFCAFEBABEULL;
-
-    for (int q = 0; q < nprobe; q++) {
-        /* Draw Rademacher z */
-        for (int i = 0; i < n; i++) z_vec[i] = rademacher(&rng_state);
-
-        /* u_X = K_X z = (1/p) X X^T z.  Two passes over SNPs. */
-        geno_rewind(sg->gr);
-        for (int j = 0; j < p; j++) {
-            if (geno_read_variant(sg->gr, g, GENO_STANDARDIZE) <= 0) break;
-            double d = 0.0;
-            for (int i = 0; i < n; i++) d += g[i] * z_vec[i];
-            Xt_z[j] = d;
-        }
-        for (int i = 0; i < n; i++) u_X[i] = 0.0;
-        geno_rewind(sg->gr);
-        for (int j = 0; j < p; j++) {
-            if (geno_read_variant(sg->gr, g, GENO_STANDARDIZE) <= 0) break;
-            for (int i = 0; i < n; i++) u_X[i] += g[i] * Xt_z[j];
-        }
-        double inv_p = 1.0 / (double)p;
-        for (int i = 0; i < n; i++) u_X[i] *= inv_p;
-
-        /* u_g = K_g z = (1/S) Σ_s G_s z  via v_matvec (σ²=0, ws²=1/S) */
-        v_matvec(u_g, z_vec, n, &vd_Kg);
-
-        /* Accumulate traces */
-        double zKXz = 0.0, zKgz = 0.0, uXuX = 0.0, ugug = 0.0, uXug = 0.0;
-        for (int i = 0; i < n; i++) {
-            zKXz += z_vec[i] * u_X[i];
-            zKgz += z_vec[i] * u_g[i];
-            uXuX += u_X[i]   * u_X[i];
-            ugug += u_g[i]   * u_g[i];
-            uXug += u_X[i]   * u_g[i];
-        }
-        tr_KX_hutch += zKXz;
-        tr_Kg       += zKgz;
-        tr_KX2      += uXuX;
-        tr_Kg2      += ugug;
-        tr_KX_Kg    += uXug;
-    }
-
-    tr_KX_hutch /= nprobe;
-    tr_Kg       /= nprobe;
-    tr_KX2      /= nprobe;
-    tr_Kg2      /= nprobe;
-    tr_KX_Kg    /= nprobe;
-
-    /* --- Normalise K_g so tr(K_g_norm)/n = 1. --------------------
-     * K_g has tr proportional to ARG branch lengths (often huge), making the
-     * moment matrix ill-conditioned.  Define K_g_norm = c · K_g with
-     * c = n / tr(K_g).  Substitute into moment equations:
-     *   tr(M K_g_norm)        = c · tr(M K_g)
-     *   tr(K_g_norm · K_g_norm) = c² · tr(K_g²)
-     *   y^T K_g_norm y         = c · y^T K_g y
-     * Solve for σ̃²_g_norm = σ²_g · tr(K_g)/n which is in variance-per-individual
-     * units; everything in the moment matrix is then O(n) or comparable. */
-    double c_norm = (tr_Kg > 0.0) ? (double)n / tr_Kg : 1.0;
-    double tr_Kg_norm    = c_norm * tr_Kg;                   /* = n by design */
-    double tr_Kg2_norm   = c_norm * c_norm * tr_Kg2;
-    double tr_KX_Kg_norm = c_norm * tr_KX_Kg;
-    double yt_Kg_norm_y  = c_norm * yt_Kg_y;
-
-    if (!silent)
-        fprintf(stderr,
-                "var_mom: tr(K_X) exact=%.4f hutch=%.4f; tr(K_g) raw=%.4e "
-                "(scale c=%.4e); after norm: tr(K_g_norm)=%.4f, "
-                "tr(K_g_norm^2)=%.4f, tr(K_X K_g_norm)=%.4f\n",
-                tr_KX_exact, tr_KX_hutch, tr_Kg, c_norm,
-                tr_Kg_norm, tr_Kg2_norm, tr_KX_Kg_norm);
-    if (!silent)
-        fprintf(stderr,
-                "var_mom: y'y=%.4f, y'K_X y=%.4f, y'K_g_norm y=%.4f\n",
-                yty, yt_KX_y, yt_Kg_norm_y);
-
-    /* ----- Solve 3x3 moment system with normalised K_g -----
-     *
-     *   [ tr_KX      tr_Kg_norm        n    ] [ s2_beta_tilde ]   [ yty           ]
-     *   [ tr_KX2     tr_KX_Kg_norm     tr_KX] [ s2_g_norm     ] = [ yt_KX_y       ]
-     *   [ tr_KX_Kg_norm  tr_Kg2_norm   tr_Kg_norm] [ s2 ]         [ yt_Kg_norm_y  ]
-     *
-     * After normalisation, every coefficient is O(n) or O(p·n) for K_X^2 row.
-     * Solve in this scale; report s2_g_norm directly as the random-variance
-     * contribution per individual. */
-    double M[3][3] = {
-        { tr_KX_exact,   tr_Kg_norm,    (double)n },
-        { tr_KX2,        tr_KX_Kg_norm, tr_KX_exact },
-        { tr_KX_Kg_norm, tr_Kg2_norm,   tr_Kg_norm },
-    };
-    double rhs[3] = { yty, yt_KX_y, yt_Kg_norm_y };
-    double s2_beta, s2_g_norm, s2;
-    solve_3x3(M, rhs, &s2_beta, &s2_g_norm, &s2);
-
-    /* Non-negativity */
-    if (s2_beta    < 0.0) s2_beta    = 0.0;
-    if (s2_g_norm  < 0.0) s2_g_norm  = 0.0;
-    if (s2         < 0.0) s2         = 0.0;
-
-    /* Variance attribution (per individual on the centred-y scale):
-     *   var(Xβ)/n   = s2_beta  · tr(K_X)/n        = s2_beta
-     *   var(u)/n    = s2_g_norm · tr(K_g_norm)/n   = s2_g_norm
-     *   var(ε)/n    = s2
-     */
-    double var_fixed_part  = s2_beta;
-    double var_random_part = s2_g_norm;
-    double total = var_fixed_part + var_random_part + s2;
-    if (total <= 0.0) total = var_y;   /* fall back to empirical var */
-
-    sg->h2_fixed  = var_fixed_part  / total;
-    sg->h2_random = var_random_part / total;
-    sg->sigma2    = s2;
-    sg->h2        = sg->h2_fixed + sg->h2_random;
-
-    if (!silent)
-        fprintf(stderr,
-                "var_mom: s2_beta_tilde=%.4f, s2_g_norm=%.4f, sigma2=%.4f, "
-                "h2_fixed=%.4f, h2_random=%.4f (sum=%.4f, var(y)=%.4f)\n",
-                s2_beta, s2_g_norm, s2, sg->h2_fixed, sg->h2_random,
-                sg->h2_fixed + sg->h2_random, var_y);
-
-    /* ----- Cleanup ----- */
-    free(y_c); free(g); free(Xt_yc);
-    free(work); free(order_buf); free(gv); free(A_s); free(ws2_uni);
-    free(z_vec); free(u_X); free(u_g); free(Xt_z);
-}
 
 /* =========================================================================
  * var_fixed_posteriors: post-convergence gamma_jk computation

@@ -9,11 +9,11 @@ Usage:
     python make_test_suite.py [--outdir DIR] [--scales small medium] [--seeds-offset N]
 
 Output structure:
-    <outdir>/small/fixed_only/     n=100, h2_fixed=0.80, h2_rand=0.00
-    <outdir>/small/fixed_heavy/    n=100, h2_fixed=0.60, h2_rand=0.20
-    <outdir>/small/balanced/       n=100, h2_fixed=0.40, h2_rand=0.40
-    <outdir>/small/rand_heavy/     n=100, h2_fixed=0.20, h2_rand=0.60
-    <outdir>/small/rand_only/      n=100, h2_fixed=0.00, h2_rand=0.80
+    <outdir>/small/snp_only/     n=100, h2_snp=0.80, h2_arg=0.00
+    <outdir>/small/snp_heavy/    n=100, h2_snp=0.60, h2_arg=0.20
+    <outdir>/small/balanced/       n=100, h2_snp=0.40, h2_arg=0.40
+    <outdir>/small/arg_heavy/     n=100, h2_snp=0.20, h2_arg=0.60
+    <outdir>/small/arg_only/      n=100, h2_snp=0.00, h2_arg=0.80
     <outdir>/medium/*              n=500, same splits
 """
 
@@ -28,11 +28,11 @@ SIMULATE_PY = os.path.join(SCRIPT_DIR, "..", "..", "scripts", "simulate.py")
 
 # Five h² splits; total h²=0.8, sigma2=0.2
 CASES = [
-    {"name": "fixed_only",  "h2_fixed": 0.80, "h2_rand": 0.00},
-    {"name": "fixed_heavy", "h2_fixed": 0.60, "h2_rand": 0.20},
-    {"name": "balanced",    "h2_fixed": 0.40, "h2_rand": 0.40},
-    {"name": "rand_heavy",  "h2_fixed": 0.20, "h2_rand": 0.60},
-    {"name": "rand_only",   "h2_fixed": 0.00, "h2_rand": 0.80},
+    {"name": "snp_only",  "h2_snp": 0.80, "h2_arg": 0.00},
+    {"name": "snp_heavy", "h2_snp": 0.60, "h2_arg": 0.20},
+    {"name": "balanced",    "h2_snp": 0.40, "h2_arg": 0.40},
+    {"name": "arg_heavy",  "h2_snp": 0.20, "h2_arg": 0.60},
+    {"name": "arg_only",   "h2_snp": 0.00, "h2_arg": 0.80},
 ]
 
 SCALES = {
@@ -89,8 +89,8 @@ def generate_one(case, scale_cfg, outdir, seed_offset, regime, n_test, dry_run, 
         "--mut-rate",    str(scale_cfg["mut_rate"]),
         "--Ne",          str(scale_cfg["Ne"]),
         "--n-causal",    str(scale_cfg["n_causal"]),
-        "--h2-fixed",    str(case["h2_fixed"]),
-        "--h2-random",   str(case["h2_rand"]),
+        "--h2-snp",    str(case["h2_snp"]),
+        "--h2-arg",   str(case["h2_arg"]),
         "--regime",      regime,
         "--seed",        str(seed),
         "--out",         prefix,
@@ -111,8 +111,8 @@ def generate_one(case, scale_cfg, outdir, seed_offset, regime, n_test, dry_run, 
     with open(prefix + ".params.json") as f:
         p = json.load(f)
     print(f"    n_trees={p['n_trees']}, n_variants={p['n_variants']}, "
-          f"h2_fixed_realised={p['h2_fixed_realised']:.3f}, "
-          f"h2_random_realised={p['h2_random_realised']:.3f}",
+          f"h2_snp_realised={p['h2_snp_realised']:.3f}, "
+          f"h2_arg_realised={p['h2_arg_realised']:.3f}",
           flush=True)
 
 

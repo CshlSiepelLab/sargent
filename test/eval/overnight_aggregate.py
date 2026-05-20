@@ -119,7 +119,7 @@ def main():
           "regime=sparse, total h²=0.8.")
     print()
 
-    case_names = ["fixed_only", "fixed_heavy", "balanced", "rand_heavy", "rand_only"]
+    case_names = ["snp_only", "snp_heavy", "balanced", "arg_heavy", "arg_only"]
     seeds_h2 = [42, 43, 44]
 
     print("### Prediction R² (mean ± SD across 3 seeds)")
@@ -127,11 +127,11 @@ def main():
     print("| Case | h²_f / h²_r | BayesR | GBLUP | ARG-BLUP-uni | Seq SARGENT | **Joint EM SARGENT** |")
     print("|---|---|:---:|:---:|:---:|:---:|:---:|")
     h2_targets = {
-        "fixed_only":  ("0.80", "0.00"),
-        "fixed_heavy": ("0.60", "0.20"),
+        "snp_only":  ("0.80", "0.00"),
+        "snp_heavy": ("0.60", "0.20"),
         "balanced":    ("0.40", "0.40"),
-        "rand_heavy":  ("0.20", "0.60"),
-        "rand_only":   ("0.00", "0.80"),
+        "arg_heavy":  ("0.20", "0.60"),
+        "arg_only":   ("0.00", "0.80"),
     }
     for case_name in case_names:
         seq, em = [], []

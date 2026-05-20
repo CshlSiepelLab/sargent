@@ -4,10 +4,14 @@ USAGE: sargent [OPTIONS] <phenotypes> <input.trees> [<geno_prefix>]
 
 DESCRIPTION: Fit a Bayesian sparse linear mixed model incorporating ancestral
 recombination graphs (ARGs).  Phenotypes are modelled as y = X*beta + u + eps
-where X*beta is a BayesR fixed-effect component and u is a random effect whose
+where X*beta is a BayesR fit to typed SNPs and u is a random effect whose
 covariance is a weighted sum of local-tree kinship matrices from the ARG.
-Inference is performed in two stages: (1) variational coordinate descent for
-fixed effects; (2) REML-style updates for segment weights and residual variance.
+
+By design, the model prioritises typed SNPs: the BayesR fit explains as
+much variance as possible (h2_snp), and the ARG-derived random effect picks
+up additional "missing" heritability not captured by the typed SNPs
+(h2_arg).  This sequential interpretation is well-defined even though a
+classical fixed-vs-random decomposition is not identifiable.
 
 ARGUMENTS:
     <phenotypes>
@@ -36,14 +40,14 @@ MAIN OPTIONS:
         Obtain genotypes from the tree sequence file rather than a BED
         file.  When this option is given, <geno_prefix> must be omitted.
 
-    --fixed-only, -F
-        Run Stage 1 (fixed-effects inference) only.  Produces
+    --snp-only, -S
+        Run Stage 1 (BayesR fit to typed SNPs) only.  Produces
         <outroot>.beta.tsv but not <outroot>.w2.tsv.
 
-    --random-only, -R
-        Run Stage 2 (random-effects inference) only, skipping Stage 1.
-        Fixed effects are set to zero.  Produces <outroot>.w2.tsv but
-        not <outroot>.beta.tsv.
+    --arg-only, -A
+        Run Stage 2 (ARG random-effect inference) only, skipping Stage 1.
+        SNP effects are set to zero.  Produces <outroot>.w2.tsv but not
+        <outroot>.beta.tsv.
 
     --pi0 <val>, -P <val>
         Prior expected fraction of null segments (0 < val < 1).  Sets a
@@ -57,21 +61,17 @@ MAIN OPTIONS:
 
     --mode <name>, -M <name>
         Choose the operational mode (default: predict).  Modes:
-          predict   — out-of-sample prediction.  Runs sequential (default)
-                      or joint EM (with --em N).  Outputs .beta.tsv,
-                      .w2.tsv, .summary.json.  Variance components in
-                      .summary.json are biased; use --mode varcomp for
-                      accurate estimates.
-          varcomp   — method-of-moments variance components.  Unbiased
-                      h2_fixed, h2_random, sigma2 estimates without
-                      fitting beta or per-tree ws2.  Outputs
-                      .summary.json only.  Cannot be combined with --em,
-                      --uniform-random, --fixed-only, or --random-only.
-          localize  — per-window missing heritability decomposition (not
-                      yet implemented; see ROADMAP.md Phase 7).
+          predict   - the main pipeline.  Runs sequential (Stage 1
+                      BayesR on typed SNPs, then Stage 2 ARG random
+                      effect) or joint EM (with --em N).  Outputs
+                      .beta.tsv, .w2.tsv, .summary.json with h2_snp
+                      (variance explained by SNP fit) and h2_arg
+                      (additional variance captured by the ARG).
+          localize  - per-window decomposition of h2_arg across the
+                      genome (not yet implemented; see ROADMAP.md Phase 7).
 
 ALGORITHMIC VARIANTS (for systematic comparison):
-    --uniform-random, -U
+    --uniform-arg, -U
         Replace Stage 2's per-tree REML with a single shared variance
         component on the uniformly-weighted kinship K = (1/S) sum_s G_s.
         Equivalent to fitting ARG-BLUP with a single tau^2.  Useful when
@@ -86,13 +86,12 @@ ALGORITHMIC VARIANTS (for systematic comparison):
         next iteration (manuscript-style mean-field VB).
         Initialised with beta=0 and warm uniform ws^2 so the first beta
         sweep sees a non-trivial random offset and cannot cannibalise.
-        Polyak-Ruppert averaging on ws^2 and sigma^2 over the second half.
-        Cannot be combined with --fixed-only or --random-only.
+        Cannot be combined with --snp-only or --arg-only.
 
 
 OUTPUT FILES:
     <outroot>.beta.tsv
-        Fixed-effect estimates.  Written after Stage 1 (or when both
+        SNP-effect estimates.  Written after Stage 1 (or when both
         stages are run).  Columns: gamma_1 ... gamma_K  E_beta, where
         gamma_k is the posterior probability that SNP j belongs to
         mixture component k, and E_beta is the posterior expected value
@@ -104,3 +103,7 @@ OUTPUT FILES:
         is the posterior responsibility of component m for segment s, and
         E_ws2 is the posterior expected value of w_s^2.  One row per
         local tree (segment).
+
+    <outroot>.summary.json
+        Coherent record of the fit: mode, h2_snp, h2_arg, h2 (total),
+        sigma2, plus context (n_indiv, n_variants, n_trees, etc.).

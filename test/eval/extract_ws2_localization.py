@@ -87,7 +87,7 @@ def metrics_for_case(case_prefix, sargent_prefix):
         return None   # tree-count mismatch (shouldn't happen for train)
 
     labels = (true_ws2 > 0).astype(int)
-    if labels.sum() == 0:    # no active trees (fixed_only case)
+    if labels.sum() == 0:    # no active trees (snp_only case)
         return {"n_active_true": 0, "auc_rho": float("nan"),
                 "auc_ws2": float("nan"), "precision_05": float("nan"),
                 "recall_05": float("nan"), "logws2_corr_active": float("nan"),
@@ -174,7 +174,7 @@ def main():
     print()
     print("| case | method | AUC_rho | AUC_ws² | precision@0.5 | recall@0.5 | log(ws²)_corr_active | n_active_true | n_called |")
     print("|---|:---:|:---:|:---:|:---:|:---:|:---:|---:|---:|")
-    for case_name in ["fixed_only", "fixed_heavy", "balanced", "rand_heavy", "rand_only"]:
+    for case_name in ["snp_only", "snp_heavy", "balanced", "arg_heavy", "arg_only"]:
         for method in ["seq", "em"]:
             recs = []
             for seed in [42, 43, 44]:
