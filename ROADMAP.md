@@ -210,22 +210,80 @@ empirical failure; see "MoM comparison result" above).
 
 ---
 
-## Phase 4 — Profiling
+## Phase 3.5 — Postdoc-pipeline compatibility
+
+**Goal**: make sargent + the eval scripts ingest input files produced
+by Nurdan's simulation pipeline (under `~/test-sargent/nurdan/`) so
+she can test SARGENT against her own data in parallel.
+
+### File-format inventory (from `~/test-sargent/nurdan/...`)
+
+- **Genotypes**: PLINK `.bed/.bim/.fam` (already supported) *and* a CSV
+  variant (`all.genotype.csv`).  Use the BED.
+- **Tree sequence**: `all.ts` (binary tskit format, our standard).
+  Newick `.nwk` also provided but we don't need it.
+- **Phenotype file**: `all.vc_*.pheno`, format
+  `0 tsk_<i> y1 y2 y3 y4 y5` — five independent replicate phenotypes
+  per individual; pick one column.  Current `read_phenotypes` takes
+  the *last* whitespace-separated field, which would pick the 5th
+  replicate.  Needs an explicit column selector.
+- **Truth file**: `all.vc_*.truth.csv` with columns
+  `phenotype,h2_fix,h2_rand,sigma2,h2_total,n_active_kernels,orthogonalized`
+  — still uses old `h2_fix`/`h2_rand` naming; ingest layer translates.
+- **SNP effects**: `all.vc_*.snp_effects.csv` (long form,
+  `phenotype,snp_id,effect_size`).
+- **Kernel weights**: `all.vc_*.kernel_weights.csv` (long form,
+  `phenotype,kernel,gamma,pi`).
+- **Train/test split convention**: indv 1–150 train, 151–200 test
+  (different from our 2/3 split).
+
+### Work items
+
+- [ ] Add `--pheno-col <N>` (1-indexed) option to `sargent` for the
+  multi-column phenotype file format.
+- [ ] Add a small adapter script `scripts/import_nurdan.py` that
+  converts a Nurdan case directory into our `case.*` layout so it can
+  be fed to `predict.py` without modification.  Output: `case.phen`
+  (one column), `case.trees`, `case.bed/bim/fam`, `case.params.json`
+  (translated from `truth.csv`), `case.true_beta.tsv`,
+  `case.true_ws2.tsv`.
+- [ ] Confirm sargent runs on one Nurdan case end-to-end and the
+  recovered h²_snp / h²_arg are within tolerance of `truth.csv`.
+
+### Deliverables
+
+- [ ] `scripts/import_nurdan.py` committed
+- [ ] One example case under `test/eval/nurdan_smoke/` (paths only;
+  data lives outside repo)
+- [ ] `test/eval/phase3_5_summary.md` with R² numbers on at least
+  one Nurdan case vs the manuscript's expected result
+
+### Notes
+
+- Highest external-dependency phase; do early to unblock the postdoc.
+- Implementation should not touch the model code; pure ingest layer.
+
+---
+
+## Phase 4 — Profiling (desktop track)
 
 **Goal**: identify the top three hot functions in sargent so we know
-where to optimise.
+where to optimise.  Owned by the desktop Claude (macOS, `samply`).
 
 ### Tools
 
-- macOS: `Instruments.app` Time Profiler template (sample-based).
-- Or `gprof` if we add `-pg` to CFLAGS in `build/`.
-- Or just `clock_gettime()` instrumentation inside the candidate
-  hot functions.
+- **Primary**: `samply record ./build/src/progs/sargent ...` then open
+  the resulting `.json.gz` profile in the Firefox Profiler UI.
+- Backup: Xcode `Instruments.app` Time Profiler template if samply
+  has issues with `dlopen`'d tskit symbols.
+- Build with debug info: re-configure cmake with
+  `-DCMAKE_BUILD_TYPE=RelWithDebInfo` so samply can resolve symbols.
 
 ### Targets to profile
 
 Representative case: balanced h², bed_coverage=1.0, n=300, L=300 kb
-(medium scale). Both sequential and joint EM modes.
+(medium scale; see `test/sim/make_test_suite.py`). Both sequential
+and joint EM modes (default invocation + `--sequential`).
 
 Expected hot spots (to confirm):
 1. `tree_cov_matvec` — called once per tree per V-matvec.
@@ -236,10 +294,12 @@ Expected hot spots (to confirm):
 
 ### Deliverables
 
-- [ ] `PROFILE.md` with measured breakdown of wall time across the
-  candidate hot spots
-- [ ] Recommendations for what to optimise (informed by phase 5 plan
-  below)
+- [ ] `test/profiling/profile_setup.sh` — simulates a fixed
+  medium-scale case (seeded) and runs sargent under samply for each
+  of {sequential, joint EM}
+- [ ] `test/profiling/PROFILE.md` with measured breakdown of wall
+  time across the candidate hot spots, screenshot of each flamegraph
+- [ ] Recommendations for what to optimise, fed into Phase 5
 
 ---
 
@@ -318,8 +378,64 @@ Same as Phase 3 for each mode, plus:
 ### Deliverables
 
 - [ ] Larger-scale benchmark report in `summary.md`
-- [ ] Demonstrated that prediction R² and MoM h² values don't shift
+- [ ] Demonstrated that prediction R² and h² values don't shift
   with scale (within multi-seed noise)
+
+---
+
+## Phase 6b — SV-flavoured unobserved-variants simulation
+
+**Goal**: a more realistic missing-heritability simulation in which
+typed SNPs are present at reasonable density *and* a separate class of
+unobserved variants is generated with larger / more variable effect
+sizes (a stand-in for structural variants).  The expectation is that
+the ARG random component carries the unobserved-variant contribution,
+giving SARGENT a clearer win over BayesR than the current
+bed-coverage-subsampling scheme.
+
+### Why this is interesting
+
+Current simulator: all causal variants are common SNPs; missing
+heritability is induced by dropping a fraction $f$ from the BED.  This
+penalises BayesR but the "unseen" variants have the same effect-size
+distribution as the seen ones.
+
+Proposed: two distinct causal classes:
+- **Class S (SNPs)**: typed, BayesR-prior effect sizes (small-to-moderate,
+  spike-and-slab).
+- **Class U (unobserved)**: not in the BED, larger and more dispersed
+  effect-size distribution (e.g. Laplace or scaled-t with heavier tail);
+  represents structural variants and rare large-effect alleles.
+
+Heritability split: choose $h^2_S$, $h^2_U$, $\sigma^2$.  Class U is
+exactly the heritability the ARG component must recover.
+
+### Work items
+
+- [ ] Extend `scripts/simulate.py`: new flags `--h2-unobs <h2>` and
+  `--unobs-effect-dist {laplace,t,custom}` and `--unobs-effect-scale`.
+- [ ] Class U sites are sampled from the tree-sequence variants but
+  excluded from the BED before writing.
+- [ ] `params.json` carries `h2_unobs_target` / `h2_unobs_realised`
+  alongside the existing fields.
+- [ ] Update `predict.py` to recognise the new params field (no
+  algorithm change — SARGENT's job is to recover this without knowing
+  the partition).
+- [ ] Add `test/eval/sv_sweep.sh` — a sweep over $h^2_S / h^2_U$ at
+  fixed coverage and density.  Aggregate as before.
+
+### Success criterion
+
+At the parameter combination "small h²_S, large h²_U, dense SNPs",
+SARGENT should beat both BayesR and ARG-BLUP-uniform.  If it doesn't,
+that's a signal that the per-segment $w_s^2$ structure isn't actually
+buying us anything beyond a single ARG-wide variance component, and
+we'd need to rethink the random model.
+
+### Dependencies
+
+- Sits after Phase 6 (large-scale validation) in the *committed*
+  ordering, but can be developed earlier as desktop work.
 
 ---
 
