@@ -155,21 +155,72 @@ Two parts; ship together.
 implementation and the new incremental-`S[]` version on a 100-tree
 case.
 
-### Chunk 3 — Incremental `out_h[]`
+### Chunk 3 — Drop the per-tree pre-order pass
 
-- Update `out_h[]` per edge diff using the Δacc rule.
-- Drop the per-tree pre-order pass entirely.
-- This is the >30× speedup.
+Originally planned as one chunk delivering ">30× speedup".  After
+discussion + benchmarking on chunk 2, that turned out to be overly
+optimistic: per-sample walk-up does similar arithmetic to tskit's
+post-order + pre-order (≈ n_haps · depth vs ≈ 2 · n_nodes), so the
+asymptotic win is only the removal of tskit's function-call overhead.
+Subdivided into two parts for safer review:
 
-**Acceptance**: paranoia harness passes on the Phase 3 multi-seed
-sweep (40 cases × multiple matvecs each), and end-to-end sargent
-output matches naive to `L_inf < 1e-10`.
+#### Chunk 3a — Per-sample walk-up + branch-length cache
+
+- Replace tsk_tree_preorder + per-tree acc[] + read-off with a
+  per-sample walk-up using our_parent[u].
+- Add bl[u] = time[parent(u)] - time[u] cache, maintained alongside
+  our_parent[] at edge-diff time, so the inner walk-up loop reads a
+  single multiplicand instead of subtracting two times.
+- Measured on s42_balanced (200 indv, 274 trees) and Nurdan
+  (200 indv, 2739 trees): 1.06×–1.20× wall-time speedup vs naive.
+  Modest but real; sets up batching (3b) cleanly.
+
+**Acceptance**: paranoia harness passes for naive vs incremental on
+the full s42_balanced debug case (100 probes × 274 trees).
+
+#### Chunk 3b — Batched matvec across probes
+
+- New API: `tree_cov_matvec_batch(out[K], in[K], K, &state, &tree)` --
+  do K independent matvecs at the current tree position before
+  advancing.
+- Refactor `hutch_trace_all` to walk the tree sequence once and call
+  the batched matvec at each tree boundary (currently it walks the
+  sequence once per probe through `Av`).
+- Amortises the tsk_tree_next + edge_diff S[]/our_parent[]/bl[] update
+  across K matvecs.  Expected gain on the Hutchinson path: ~1.5×.
+- Does NOT help CG (matvecs there are sequential by definition).
+
+**Acceptance**: hutch_trace_all output matches the unbatched
+implementation; sargent end-to-end h² values match (FP precision)
+on s42_balanced and Nurdan.
 
 ### Chunk 4 — Drop naive from hot path, profile
 
+- Wire `tree_cov_matvec_incremental` (+ batched variant from 3b) into
+  the production walker (`tree_walker_run` and any direct callers).
 - Keep naive only behind a `--paranoid-matvec` debug flag.
-- Re-profile with `samply`; expect tskit traversal cost to fall from
-  70 % to <5 % of wall time.
+- Re-profile with `samply`; measure actual wall-time delta on a
+  representative sargent run.
+
+## Deferred optimisations
+
+### Per-(sample, tree) ancestor-path cache (flagged, off by default)
+
+For each (sample h, tree s), precompute a flat array of (ancestor_id,
+branch_length) pairs walking from h to the root.  At matvec time, the
+per-sample walk-up becomes a sequential memory scan of this cache
+indexed by h and s; reads S[anc] for each cache entry.  Eliminates
+pointer-chasing through our_parent[] and the bl[] indirection.
+
+- **Storage**: O(n_haps × n_trees × avg_depth × 16 B).
+  Nurdan-scale (400 × 2739 × 9 × 16) ≈ 158 MB.
+  Biobank-scale (500k × 200k × 25 × 16) ≈ 40 TB.  Does not scale.
+- **Build cost**: one full ts walk at setup, O(seconds).
+- **Expected speedup over chunk 3a**: 1.5–2× from improved memory
+  locality on the inner walk.  Cumulative over naive: ~1.8–2.4×.
+- **When to add**: after chunk 4 profiling confirms per-sample walk
+  is still the bottleneck.  Behind a flag (`--ancestor-cache`) with
+  automatic disable when the cache exceeds a memory budget.
 
 ## Open questions for later
 

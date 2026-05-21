@@ -501,27 +501,36 @@ void tree_cov_matvec_pairwise(double *out, const double *in, int n_indiv,
 }
 
 /* ---------------------------------------------------------------------------
- * Incremental tree-cov matvec: maintains S[u] across tree boundaries.
+ * Incremental tree-cov matvec: maintains S[u], our_parent[u], bl[u] across
+ * tree boundaries.  Phase 5 chunk 3a: no per-tree pre-order pass; matvec
+ * read-out is a per-sample walk-up from sample to root, accumulating
+ * bl[u] * S[u] along the way.
  *
  * On each tree boundary we read the edge diff from tree->tree_pos:
  *
  *   For each edge in OUT (parent p, child c) -- being removed:
  *     S[c] is unchanged (subtree below c is intact; only its attachment moves).
  *     Walk up our_parent[] from p to root, subtracting S[c] from each
- *     ancestor's S.  Then our_parent[c] := TSK_NULL.
+ *     ancestor's S.  Then our_parent[c] := TSK_NULL, bl[c] := 0.
  *
  *   For each edge in IN (parent p, child c) -- being added:
- *     Set our_parent[c] := p.  Walk up our_parent[] from p to root, adding
- *     S[c] to each ancestor's S.
+ *     Set our_parent[c] := p, bl[c] := time[p] - time[c].
+ *     Walk up our_parent[] from p to root, adding S[c] to each ancestor's S.
  *
  * Tskit's edge insertion/removal order guarantees consistency: at the time
  * an edge (p, c) is processed for removal our_parent[c] == p, and at the
  * time an edge (p, c) is processed for insertion the parent p is already
  * stitched into our_parent[].
  *
- * After the diff is applied, we still run a per-tree pre-order pass to
- * compute acc[] from S[] (chunk 2 scope -- chunk 3 will make that
- * incremental too).
+ * Matvec read-out:
+ *   for each sample h:
+ *       a = 0
+ *       walk u = h, h's parent, ..., until our_parent[u] == TSK_NULL
+ *           a += bl[u] * S[u]
+ *       out[indiv(h)] += a
+ *
+ * O(n_haps * avg_depth) per tree; no n_nodes scan, no tsk_tree_preorder call,
+ * no acc[] array.
  * --------------------------------------------------------------------------- */
 int tree_cov_matvec_inc_state_init(tree_cov_matvec_inc_state_t *st,
                                     const tsk_treeseq_t *ts,
@@ -534,10 +543,9 @@ int tree_cov_matvec_inc_state_init(tree_cov_matvec_inc_state_t *st,
     st->n_nodes       = tsk_treeseq_get_num_nodes(ts);
 
     st->S          = malloc((size_t)st->n_nodes * sizeof(double));
-    st->acc        = malloc((size_t)st->n_nodes * sizeof(double));
     st->our_parent = malloc((size_t)st->n_nodes * sizeof(tsk_id_t));
-    st->order_buf  = malloc((size_t)st->n_nodes * sizeof(tsk_id_t));
-    if (!st->S || !st->acc || !st->our_parent || !st->order_buf) {
+    st->bl         = malloc((size_t)st->n_nodes * sizeof(double));
+    if (!st->S || !st->our_parent || !st->bl) {
         tree_cov_matvec_inc_state_free(st);
         return -1;
     }
@@ -548,9 +556,8 @@ void tree_cov_matvec_inc_state_free(tree_cov_matvec_inc_state_t *st)
 {
     if (!st) return;
     free(st->S);          st->S          = NULL;
-    free(st->acc);        st->acc        = NULL;
     free(st->our_parent); st->our_parent = NULL;
-    free(st->order_buf);  st->order_buf  = NULL;
+    free(st->bl);         st->bl         = NULL;
 }
 
 void tree_cov_matvec_inc_state_reset(tree_cov_matvec_inc_state_t *st,
@@ -560,6 +567,7 @@ void tree_cov_matvec_inc_state_reset(tree_cov_matvec_inc_state_t *st,
 
     for (tsk_size_t u = 0; u < st->n_nodes; u++) {
         st->our_parent[u] = TSK_NULL;
+        st->bl[u]         = 0.0;
         tsk_id_t si = sample_index_map[u];
         if (si >= 0) {
             int indiv = st->hap_to_indiv[(int)si];
@@ -581,9 +589,10 @@ void tree_cov_matvec_incremental(double *out,
     const tsk_table_collection_t *tables      = st->ts->tables;
     const tsk_id_t               *edge_parent = tables->edges.parent;
     const tsk_id_t               *edge_child  = tables->edges.child;
+    const double                 *time        = tables->nodes.time;
     const tsk_tree_position_t    *pos         = &tree->tree_pos;
 
-    /* Apply edge diff to S[] and our_parent[]. */
+    /* Apply edge diff to S[], our_parent[], bl[]. */
     for (tsk_id_t j = pos->out.start; j != pos->out.stop; j++) {
         tsk_id_t e = pos->out.order[j];
         tsk_id_t p = edge_parent[e];
@@ -592,40 +601,34 @@ void tree_cov_matvec_incremental(double *out,
         for (tsk_id_t u = p; u != TSK_NULL; u = st->our_parent[u])
             st->S[u] -= sc;
         st->our_parent[c] = TSK_NULL;
+        st->bl[c]         = 0.0;
     }
     for (tsk_id_t j = pos->in.start; j != pos->in.stop; j++) {
         tsk_id_t e = pos->in.order[j];
         tsk_id_t p = edge_parent[e];
         tsk_id_t c = edge_child[e];
         st->our_parent[c] = p;
+        st->bl[c]         = time[p] - time[c];
         double sc = st->S[c];
         for (tsk_id_t u = p; u != TSK_NULL; u = st->our_parent[u])
             st->S[u] += sc;
     }
 
-    /* Per-tree pre-order pass to compute acc[] from the now-updated S[]. */
-    const double *time = tables->nodes.time;
-    tsk_size_t n_order = 0;
-    tsk_tree_preorder(tree, st->order_buf, &n_order);
-    for (tsk_size_t k = 0; k < n_order; k++) {
-        tsk_id_t u = st->order_buf[k];
-        tsk_id_t p = tree->parent[u];
-        if (p == TSK_NULL) {
-            st->acc[u] = 0.0;
-        } else {
-            double bl = time[p] - time[u];
-            st->acc[u] = st->acc[p] + bl * st->S[u];
-        }
-    }
-
-    /* Read off out[i] = acc[hap_a(i)] + acc[hap_b(i)]. */
+    /* Per-sample walk-up from each haploid sample to the root, accumulating
+     * bl[u] * S[u].  Replaces the per-tree pre-order + acc[] + readout. */
     for (int i = 0; i < st->n_indiv; i++) out[i] = 0.0;
+
     const tsk_id_t *samples = tsk_treeseq_get_samples(st->ts);
     tsk_size_t n_hap = tsk_treeseq_get_num_samples(st->ts);
-    for (tsk_size_t h = 0; h < n_hap; h++) {
-        int indiv = st->hap_to_indiv[(int)h];
-        if (indiv >= 0 && indiv < st->n_indiv)
-            out[indiv] += st->acc[samples[h]];
+    for (tsk_size_t hi = 0; hi < n_hap; hi++) {
+        int indiv = st->hap_to_indiv[(int)hi];
+        if (indiv < 0 || indiv >= st->n_indiv) continue;
+        double a = 0.0;
+        for (tsk_id_t u = samples[hi]; st->our_parent[u] != TSK_NULL;
+             u = st->our_parent[u]) {
+            a += st->bl[u] * st->S[u];
+        }
+        out[indiv] += a;
     }
 }
 
