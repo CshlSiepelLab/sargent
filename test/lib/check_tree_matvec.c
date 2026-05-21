@@ -2,14 +2,15 @@
  * SARGENT — Phase 5 paranoia harness for tree-cov matvec implementations.
  *
  * Loads a tree sequence, generates K random Gaussian probe vectors, and for
- * each (tree, probe) compares two independent implementations of
+ * each (tree, probe) compares three independent implementations of
  *   out = G_s * in
  * (where G_s[i,j] = 0.5 * (time_root - time_MRCA(haps_of_i, haps_of_j))):
- *   1. tree_cov_matvec           (production: post-/pre-order two-pass)
- *   2. tree_cov_matvec_pairwise  (reference:  direct pairwise MRCA sum)
+ *   1. tree_cov_matvec               (production: post-/pre-order two-pass)
+ *   2. tree_cov_matvec_pairwise      (reference:  direct pairwise MRCA sum)
+ *   3. tree_cov_matvec_incremental   (Phase 5 chunk 2: edge-diff S[u] updates)
  *
- * Asserts L_inf agreement < tol.  Reports max abs / max rel diff across
- * all (tree, probe) pairs.  Exits 0 on success, 1 on first divergence.
+ * Asserts L_inf agreement < tol on both (1 vs 2) and (1 vs 3).  Reports max
+ * abs/rel diff per comparison.  Exits 0 if all comparisons pass.
  *
  * Usage:
  *   check_tree_matvec <input.trees> [n_probes] [max_trees] [tol] [seed]
@@ -100,24 +101,35 @@ int main(int argc, char **argv)
     double   *in        = malloc((size_t)n_indiv * sizeof(double));
     double   *out_naive = malloc((size_t)n_indiv * sizeof(double));
     double   *out_ref   = malloc((size_t)n_indiv * sizeof(double));
+    double   *out_inc   = malloc((size_t)n_indiv * sizeof(double));
     double   *work      = malloc(2 * n_nodes * sizeof(double));
     tsk_id_t *order_buf = malloc(n_nodes * sizeof(tsk_id_t));
     int      *mark      = malloc(n_nodes * sizeof(int));
 
-    if (!in || !out_naive || !out_ref || !work || !order_buf || !mark) {
+    if (!in || !out_naive || !out_ref || !out_inc || !work || !order_buf || !mark) {
         fprintf(stderr, "ERROR: out of memory\n");
         return 2;
     }
 
-    double max_abs_diff = 0.0;
-    double max_rel_diff = 0.0;
-    int    n_compare    = 0;
-    int    n_fail       = 0;
-    int    error        = 0;
+    tree_cov_matvec_inc_state_t inc;
+    if (tree_cov_matvec_inc_state_init(&inc, &ts, n_indiv, hap_to_indiv) < 0) {
+        fprintf(stderr, "ERROR: tree_cov_matvec_inc_state_init failed\n");
+        return 2;
+    }
+
+    /* Two comparisons: (naive vs ref) and (naive vs inc). */
+    double max_abs_diff_ref = 0.0, max_rel_diff_ref = 0.0;
+    double max_abs_diff_inc = 0.0, max_rel_diff_inc = 0.0;
+    int    n_compare = 0;
+    int    n_fail_ref = 0, n_fail_inc = 0;
+    int    error      = 0;
 
     for (int k = 0; k < n_probes; k++) {
         /* Fresh probe each iteration */
         for (int i = 0; i < n_indiv; i++) in[i] = rand_normal(&seed);
+
+        /* Reset incremental state for this probe. */
+        tree_cov_matvec_inc_state_reset(&inc, in);
 
         tsk_tree_t tree;
         ret = tsk_tree_init(&tree, &ts, 0);
@@ -131,26 +143,49 @@ int main(int argc, char **argv)
 
             tree_cov_matvec(out_naive, in, n_indiv, &tree, work, order_buf, hap_to_indiv);
             tree_cov_matvec_pairwise(out_ref, in, n_indiv, &tree, mark, hap_to_indiv);
+            tree_cov_matvec_incremental(out_inc, &inc, &tree);
 
             for (int i = 0; i < n_indiv; i++) {
                 double a = out_naive[i];
                 double b = out_ref[i];
-                double d = fabs(a - b);
-                double mag = fmax(fabs(a), fabs(b));
-                if (d > max_abs_diff) max_abs_diff = d;
-                if (mag > 0.0) {
-                    double r = d / mag;
-                    if (r > max_rel_diff) max_rel_diff = r;
-                }
-                /* Mixed tolerance: tol * (1 + mag).  Don't bail -- just count. */
-                if (d > tol * (1.0 + mag)) {
-                    if (n_fail < 3) {
-                        fprintf(stderr,
-                                "  diff probe=%d tree=%d indiv=%d  naive=%.17g  ref=%.17g  "
-                                "abs=%.3e  rel=%.3e\n",
-                                k, s, i, a, b, d, (mag > 0.0) ? d / mag : 0.0);
+                double c = out_inc[i];
+                /* (naive, ref) */
+                {
+                    double d = fabs(a - b);
+                    double mag = fmax(fabs(a), fabs(b));
+                    if (d > max_abs_diff_ref) max_abs_diff_ref = d;
+                    if (mag > 0.0) {
+                        double r = d / mag;
+                        if (r > max_rel_diff_ref) max_rel_diff_ref = r;
                     }
-                    n_fail++;
+                    if (d > tol * (1.0 + mag)) {
+                        if (n_fail_ref < 3) {
+                            fprintf(stderr,
+                                    "  REF diff probe=%d tree=%d i=%d  naive=%.17g  ref=%.17g  "
+                                    "abs=%.3e  rel=%.3e\n",
+                                    k, s, i, a, b, d, (mag > 0.0) ? d / mag : 0.0);
+                        }
+                        n_fail_ref++;
+                    }
+                }
+                /* (naive, inc) */
+                {
+                    double d = fabs(a - c);
+                    double mag = fmax(fabs(a), fabs(c));
+                    if (d > max_abs_diff_inc) max_abs_diff_inc = d;
+                    if (mag > 0.0) {
+                        double r = d / mag;
+                        if (r > max_rel_diff_inc) max_rel_diff_inc = r;
+                    }
+                    if (d > tol * (1.0 + mag)) {
+                        if (n_fail_inc < 3) {
+                            fprintf(stderr,
+                                    "  INC diff probe=%d tree=%d i=%d  naive=%.17g  inc=%.17g  "
+                                    "abs=%.3e  rel=%.3e\n",
+                                    k, s, i, a, c, d, (mag > 0.0) ? d / mag : 0.0);
+                        }
+                        n_fail_inc++;
+                    }
                 }
             }
             n_compare++;
@@ -163,12 +198,17 @@ int main(int argc, char **argv)
         if (error) break;
     }
 
-    int fail = error || (n_fail > 0);
-    fprintf(stderr,
-            "  n_compare=%d  n_fail=%d  max_abs_diff=%.3e  max_rel_diff=%.3e  tol=%.1e  -> %s\n",
-            n_compare, n_fail, max_abs_diff, max_rel_diff, tol, fail ? "FAIL" : "OK");
+    int fail = error || (n_fail_ref > 0) || (n_fail_inc > 0);
+    fprintf(stderr, "  n_compare=%d  tol=%.1e\n", n_compare, tol);
+    fprintf(stderr, "    naive vs ref:  n_fail=%d  max_abs=%.3e  max_rel=%.3e\n",
+            n_fail_ref, max_abs_diff_ref, max_rel_diff_ref);
+    fprintf(stderr, "    naive vs inc:  n_fail=%d  max_abs=%.3e  max_rel=%.3e\n",
+            n_fail_inc, max_abs_diff_inc, max_rel_diff_inc);
+    fprintf(stderr, "  -> %s\n", fail ? "FAIL" : "OK");
 
-    free(in); free(out_naive); free(out_ref);
+    tree_cov_matvec_inc_state_free(&inc);
+
+    free(in); free(out_naive); free(out_ref); free(out_inc);
     free(work); free(order_buf); free(mark);
     free(hap_to_indiv);
     tsk_treeseq_free(&ts);

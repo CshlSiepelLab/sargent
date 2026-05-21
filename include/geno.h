@@ -102,6 +102,61 @@ void tree_cov_matvec(double *out, const double *in, int n_indiv,
                      double *work, tsk_id_t *order_buf,
                      const int *hap_to_indiv);
 
+/* ---------------------------------------------------------------------------
+ * Incremental tree-cov matvec.
+ *
+ * Maintains S[u] (post-order subtree sum of `in`) across tree boundaries
+ * using tskit's edge-diff machinery, so each tree boundary only pays
+ * O(|edges_changed| * depth) instead of the O(n_nodes) post-order pass
+ * the naive implementation does.  The pre-order pass (acc[u] and read-off)
+ * still runs per tree in Phase 5 chunk 2; chunk 3 makes that incremental too.
+ *
+ * Usage:
+ *
+ *   tree_cov_matvec_inc_state_t st;
+ *   tree_cov_matvec_inc_state_init(&st, ts, n_indiv, hap_to_indiv);
+ *   for each matvec call:
+ *       tree_cov_matvec_inc_state_reset(&st, in);  // resets S[], our_parent[]
+ *       for ret = tsk_tree_first(&tree); ret == OK; ret = tsk_tree_next(&tree):
+ *           tree_cov_matvec_incremental(out, &st, &tree);
+ *           ...
+ *   tree_cov_matvec_inc_state_free(&st);
+ *
+ * Validated against the naive tree_cov_matvec and the pairwise reference via
+ * test/lib/check_tree_matvec.
+ * --------------------------------------------------------------------------- */
+
+typedef struct {
+    const tsk_treeseq_t *ts;
+    int                  n_indiv;
+    const int           *hap_to_indiv;   /* not owned */
+    tsk_size_t           n_nodes;
+    double              *S;              /* length n_nodes; updated incrementally */
+    double              *acc;            /* length n_nodes; scratch for pre-order */
+    tsk_id_t            *our_parent;     /* length n_nodes; tracks tree structure */
+    tsk_id_t            *order_buf;      /* length n_nodes; scratch for pre-order */
+} tree_cov_matvec_inc_state_t;
+
+/* Allocate scratch buffers; returns 0 on success, -1 on OOM. */
+int  tree_cov_matvec_inc_state_init(tree_cov_matvec_inc_state_t *st,
+                                    const tsk_treeseq_t *ts,
+                                    int n_indiv,
+                                    const int *hap_to_indiv);
+
+void tree_cov_matvec_inc_state_free(tree_cov_matvec_inc_state_t *st);
+
+/* Reset S[] and our_parent[] to the "empty tree" state for the given input
+ * vector.  Call once per matvec before iterating trees. */
+void tree_cov_matvec_inc_state_reset(tree_cov_matvec_inc_state_t *st,
+                                     const double *in);
+
+/* Process the edge diff at tree boundary using tree->tree_pos and compute
+ * out = G_s * in for the current tree.  Call AFTER tsk_tree_first/_next has
+ * positioned `tree` at the new interval. */
+void tree_cov_matvec_incremental(double *out,
+                                 tree_cov_matvec_inc_state_t *st,
+                                 const tsk_tree_t *tree);
+
 /* Reference implementation of out = G_s * in, computed by direct pairwise
  * MRCA-time summation.
  *
