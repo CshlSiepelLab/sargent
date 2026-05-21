@@ -152,10 +152,27 @@ void tree_cov_matvec_inc_state_reset(tree_cov_matvec_inc_state_t *st,
 
 /* Process the edge diff at tree boundary using tree->tree_pos and compute
  * out = G_s * in for the current tree.  Call AFTER tsk_tree_first/_next has
- * positioned `tree` at the new interval. */
+ * positioned `tree` at the new interval.
+ *
+ * Internally this is `tree_cov_matvec_inc_advance(st, tree)` followed by
+ * `tree_cov_matvec_inc_readout(out, st)`.  Use the split variants directly
+ * if you want to skip the readout for trees that don't contribute to the
+ * accumulator (e.g. ws²[sp] == 0 in v_matvec). */
 void tree_cov_matvec_incremental(double *out,
                                  tree_cov_matvec_inc_state_t *st,
                                  const tsk_tree_t *tree);
+
+/* Apply the edge diff at tree->tree_pos to S[], our_parent[], bl[].  Must be
+ * called for every tree boundary even if the corresponding readout is
+ * skipped -- otherwise S[] drifts out of sync with the underlying tree. */
+void tree_cov_matvec_inc_advance(tree_cov_matvec_inc_state_t *st,
+                                  const tsk_tree_t *tree);
+
+/* Per-sample walk-up readout: out[i] = sum over haps h of indiv i of
+ * sum_{v ancestor of h} bl[v] * S[v].  Uses the current contents of S[],
+ * our_parent[], bl[] in `st` (must be coherent with the current tree). */
+void tree_cov_matvec_inc_readout(double *out,
+                                  const tree_cov_matvec_inc_state_t *st);
 
 /* Reference implementation of out = G_s * in, computed by direct pairwise
  * MRCA-time summation.
@@ -217,3 +234,24 @@ int tree_walker_run(const tsk_treeseq_t *ts,
                     tree_pre_visit_fn    pre_visit,     /* nullable */
                     tree_visit_fn        visit,
                     void                *ctx);
+
+/* ---------------------------------------------------------------------------
+ * Incremental tree-walker (Phase 5 chunk 4): same shape as tree_walker_run
+ * but consumes an externally-owned inc_state for the per-tree matvec.
+ *
+ * - calls tree_cov_matvec_inc_state_reset(inc, in) at the start.
+ * - calls tree_cov_matvec_inc_advance(inc, &tree) at every tree boundary
+ *   (state must stay coherent even when readout is skipped).
+ * - calls pre_visit; if it returns 0, skip the readout but keep state.
+ * - otherwise calls tree_cov_matvec_inc_readout(gv, inc) and then visit.
+ *
+ * Returns 0 on success, -1 on tskit error.
+ * --------------------------------------------------------------------------- */
+int tree_walker_run_inc(tree_cov_matvec_inc_state_t *inc,
+                        int                  S_orig,
+                        const int           *prune_map,    /* nullable; NULL = identity */
+                        const double        *in,
+                        double              *gv,           /* length inc->n_indiv */
+                        tree_pre_visit_fn    pre_visit,    /* nullable */
+                        tree_visit_fn        visit,
+                        void                *ctx);
