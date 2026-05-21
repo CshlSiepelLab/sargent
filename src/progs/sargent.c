@@ -196,8 +196,9 @@ int main(int argc, char *argv[])
     int arg_only    = 0;
     int nprobe      = 0;   /* 0 = use sargent_t default (10) */
     int uniform_arg = 0;
-    int em_iters    = 50;  /* default 50 (joint EM); --sequential sets to 0 */
-    int sequential_flag = 0; /* --sequential: force em_iters = 0 */
+    int em_iters    = 0;   /* default 0 (sequential Stage 1 then Stage 2);
+                              joint EM is opt-in via --em N (N > 0) */
+    int sequential_flag = 0; /* --sequential: explicit-no-op kept for forward-compat */
     int em_flag_set = 0;     /* tracks whether --em was explicitly passed */
     int pheno_col   = 0;     /* 0 = last whitespace field (legacy); >0 = 1-indexed column */
     double pi0      = -1.0; /* < 0 means unset */
@@ -266,11 +267,13 @@ int main(int argc, char *argv[])
 
     /* Resolve em / sequential flags.
      *
-     * Default: em_iters = 50 (joint EM).
-     * --sequential       => em_iters = 0 (Stage 1 then Stage 2).
-     * --em N             => override iteration count (N >= 0).
-     * --snp-only / --arg-only silently imply --sequential (joint EM needs
-     * both stages).
+     * Default: em_iters = 0 (sequential Stage 1 then Stage 2).
+     * --em N             => opt into joint EM for N outer iterations
+     *                      (joint EM is currently unstable on cases with
+     *                      large numbers of trees; see ROADMAP §4.5).
+     * --sequential       => explicit no-op (kept for forward-compat with
+     *                      scripts written when joint EM was the default).
+     * --snp-only / --arg-only force sequential and conflict with --em N>0.
      * --sequential together with an explicit --em N>0 is an error.
      */
     if (sequential_flag && em_flag_set && em_iters > 0) {
