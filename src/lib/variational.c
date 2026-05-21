@@ -367,6 +367,28 @@ typedef struct {
     double              *gv;        /* n scratch (borrowed) */
 } v_matvec_data_t;
 
+/* --- v_matvec via tree_walker_run --- */
+
+typedef struct {
+    double       *out;
+    const double *ws2;
+    int           n;
+} v_matvec_visit_ctx_t;
+
+static int v_matvec_pre(int s_orig, int sp, void *ctx)
+{
+    (void)s_orig;
+    const v_matvec_visit_ctx_t *vc = ctx;
+    return vc->ws2[sp] != 0.0;
+}
+
+static void v_matvec_visit(const tree_walk_state_t *st, void *ctx)
+{
+    v_matvec_visit_ctx_t *vc = ctx;
+    double w = vc->ws2[st->sp];
+    for (int i = 0; i < vc->n; i++) vc->out[i] += w * st->gv[i];
+}
+
 static void v_matvec(double *out, const double *in, int n, void *data)
 {
     v_matvec_data_t *d = data;
@@ -380,28 +402,29 @@ static void v_matvec(double *out, const double *in, int n, void *data)
     }
     if (!has_random) return;
 
-    tsk_tree_t tree;
-    int ret = tsk_tree_init(&tree, d->ts, 0);
-    if (ret < 0) {
-        fprintf(stderr, "v_matvec: tsk_tree_init: %s\n", tsk_strerror(ret));
-        return;
-    }
-    int s = 0;
-    for (ret = tsk_tree_first(&tree); ret == TSK_TREE_OK && s < d->S_orig;
-         ret = tsk_tree_next(&tree), s++) {
-        int sp = d->prune_map[s];
-        if (d->ws2[sp] == 0.0) continue;
-        tree_cov_matvec(d->gv, in, d->n, &tree, d->work, d->order_buf, d->hap_to_indiv);
-        for (int i = 0; i < n; i++) out[i] += d->ws2[sp] * d->gv[i];
-    }
-    if (ret < 0)
-        fprintf(stderr, "v_matvec: tree error: %s\n", tsk_strerror(ret));
-    tsk_tree_free(&tree);
+    v_matvec_visit_ctx_t vc = { .out = out, .ws2 = d->ws2, .n = n };
+    tree_walker_run(d->ts, d->hap_to_indiv, d->n, d->S_orig, d->prune_map,
+                    in, d->gv, d->work, d->order_buf,
+                    v_matvec_pre, v_matvec_visit, &vc);
 }
 
-/* Compute A[sp] = r_tilde^T G_sp r_tilde for all S pruned segments.
- * Iterates S_orig original trees; only the representative (first) tree of
- * each pruned segment is evaluated. */
+/* --- compute_quad_all via tree_walker_run --- */
+
+typedef struct {
+    double       *A;
+    const double *r_tilde;
+    int           n;
+} quad_visit_ctx_t;
+
+static void quad_visit(const tree_walk_state_t *st, void *ctx)
+{
+    quad_visit_ctx_t *qc = ctx;
+    double a = 0.0;
+    for (int i = 0; i < qc->n; i++) a += qc->r_tilde[i] * st->gv[i];
+    qc->A[st->sp] += a;
+}
+
+/* Compute A[sp] = r_tilde^T G_sp r_tilde for all S pruned segments. */
 static void compute_quad_all(const tsk_treeseq_t *ts, const int *hap_to_indiv,
                               int n, int S, int S_orig, const int *prune_map,
                               const double *r_tilde,
@@ -409,25 +432,10 @@ static void compute_quad_all(const tsk_treeseq_t *ts, const int *hap_to_indiv,
                               double *work, tsk_id_t *order_buf, double *gv)
 {
     for (int sp = 0; sp < S; sp++) A[sp] = 0.0;
-
-    tsk_tree_t tree;
-    int ret = tsk_tree_init(&tree, ts, 0);
-    if (ret < 0) {
-        fprintf(stderr, "compute_quad_all: tsk_tree_init: %s\n", tsk_strerror(ret));
-        return;
-    }
-    int s = 0;
-    for (ret = tsk_tree_first(&tree); ret == TSK_TREE_OK && s < S_orig;
-         ret = tsk_tree_next(&tree), s++) {
-        int sp = prune_map[s];
-        tree_cov_matvec(gv, r_tilde, n, &tree, work, order_buf, hap_to_indiv);
-        double a = 0.0;
-        for (int i = 0; i < n; i++) a += r_tilde[i] * gv[i];
-        A[sp] += a;   /* accumulate all trees in bin */
-    }
-    if (ret < 0)
-        fprintf(stderr, "compute_quad_all: tree error: %s\n", tsk_strerror(ret));
-    tsk_tree_free(&tree);
+    quad_visit_ctx_t qc = { .A = A, .r_tilde = r_tilde, .n = n };
+    tree_walker_run(ts, hap_to_indiv, n, S_orig, prune_map,
+                    r_tilde, gv, work, order_buf,
+                    NULL, quad_visit, &qc);
 }
 
 

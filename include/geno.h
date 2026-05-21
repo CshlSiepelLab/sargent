@@ -101,3 +101,46 @@ void tree_cov_matvec(double *out, const double *in, int n_indiv,
                      const tsk_tree_t *tree,
                      double *work, tsk_id_t *order_buf,
                      const int *hap_to_indiv);
+
+/* ---------------------------------------------------------------------------
+ * Tree-walker API (Phase 5).
+ *
+ * Iterates a tree sequence once, calling a per-tree callback with the result
+ * of G_s * in for each tree.  Centralises tree-by-tree iteration across the
+ * three callers (v_matvec, compute_quad_all, hutch trace probe).  The
+ * implementation can be evolved from naive per-tree traversal to incremental
+ * edge-diff updates without touching call sites.
+ *
+ * Usage:
+ *
+ *   int my_pre(int s_orig, int sp, void *ctx) { ... return 1 to visit; }
+ *   void my_visit(const tree_walk_state_t *st, void *ctx) { ... }
+ *   tree_walker_run(ts, hap_to_indiv, n_indiv, S_orig, prune_map,
+ *                   in, gv, work, order_buf, my_pre, my_visit, ctx);
+ *
+ * pre_visit may be NULL (always visit).
+ * --------------------------------------------------------------------------- */
+
+typedef struct {
+    int      n_indiv;        /* convenience copy */
+    int      s_orig;         /* current original-tree index in [0, S_orig) */
+    int      sp;             /* current pruned-segment index (= s_orig when prune_map is NULL) */
+    double  *gv;             /* G_s * in for the current tree, length n_indiv */
+} tree_walk_state_t;
+
+typedef int  (*tree_pre_visit_fn)(int s_orig, int sp, void *ctx);
+typedef void (*tree_visit_fn)    (const tree_walk_state_t *st, void *ctx);
+
+/* Returns 0 on success, -1 on tskit init/iteration failure. */
+int tree_walker_run(const tsk_treeseq_t *ts,
+                    const int           *hap_to_indiv,
+                    int                  n_indiv,
+                    int                  S_orig,
+                    const int           *prune_map,    /* nullable; NULL = identity */
+                    const double        *in,
+                    double              *gv,            /* length n_indiv */
+                    double              *work,          /* length 2 * n_nodes */
+                    tsk_id_t            *order_buf,     /* length n_nodes */
+                    tree_pre_visit_fn    pre_visit,     /* nullable */
+                    tree_visit_fn        visit,
+                    void                *ctx);

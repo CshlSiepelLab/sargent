@@ -438,6 +438,79 @@ void tree_cov_matvec(double *out, const double *in, int n_indiv,
     }
 }
 
+/* ---------------------------------------------------------------------------
+ * tree_walker_run: iterate a tree sequence, invoking a per-tree visitor.
+ *
+ * Phase 5 chunk 1: this implementation is a thin wrapper around the existing
+ * tsk_tree_first/_next loop + tree_cov_matvec.  No behaviour change; the
+ * value-add is centralising tree-iteration across the three callers so the
+ * incremental tree-cov computation (chunks 2-3) can replace the inner work
+ * without touching call sites.
+ * --------------------------------------------------------------------------- */
+int tree_walker_run(const tsk_treeseq_t *ts,
+                    const int           *hap_to_indiv,
+                    int                  n_indiv,
+                    int                  S_orig,
+                    const int           *prune_map,
+                    const double        *in,
+                    double              *gv,
+                    double              *work,
+                    tsk_id_t            *order_buf,
+                    tree_pre_visit_fn    pre_visit,
+                    tree_visit_fn        visit,
+                    void                *ctx)
+{
+    tsk_tree_t tree;
+    int ret = tsk_tree_init(&tree, ts, 0);
+    if (ret < 0) {
+        fprintf(stderr, "tree_walker_run: tsk_tree_init: %s\n", tsk_strerror(ret));
+        return -1;
+    }
+
+    tree_walk_state_t st = {
+        .n_indiv = n_indiv,
+        .s_orig  = 0,
+        .sp      = 0,
+        .gv      = gv,
+    };
+
+    int s = 0;
+    for (ret = tsk_tree_first(&tree); ret == TSK_TREE_OK && s < S_orig;
+         ret = tsk_tree_next(&tree), s++) {
+        int sp = prune_map ? prune_map[s] : s;
+        if (pre_visit && !pre_visit(s, sp, ctx))
+            continue;
+        tree_cov_matvec(gv, in, n_indiv, &tree, work, order_buf, hap_to_indiv);
+        st.s_orig = s;
+        st.sp     = sp;
+        visit(&st, ctx);
+    }
+    if (ret < 0) {
+        fprintf(stderr, "tree_walker_run: tsk_tree iteration: %s\n", tsk_strerror(ret));
+        tsk_tree_free(&tree);
+        return -1;
+    }
+    tsk_tree_free(&tree);
+    return 0;
+}
+
+/* Context + visitor for estimate_g_scale below. */
+typedef struct {
+    const double *eps;
+    int           n_indiv;
+    double        sum;
+    int           count;
+} g_scale_ctx_t;
+
+static void g_scale_visit(const tree_walk_state_t *st, void *vctx)
+{
+    g_scale_ctx_t *c = vctx;
+    double dot = 0.0;
+    for (int i = 0; i < c->n_indiv; i++) dot += c->eps[i] * st->gv[i];
+    c->sum  += dot / c->n_indiv;
+    c->count++;
+}
+
 /* Estimate E[tr(G_s)/n] using a single Rademacher probe over all trees.
  *
  * Performs one complete tree-sequence walk; for each tree s computes
@@ -471,21 +544,13 @@ double estimate_g_scale(const tsk_treeseq_t *ts, const int *hap_to_indiv,
         eps[i] = (rng & 1u) ? 1.0 : -1.0;
     }
 
-    double sum = 0.0;
-    int    count = 0;
-    tsk_tree_t tree;
-    int ret = tsk_tree_init(&tree, ts, 0);
+    g_scale_ctx_t gctx = { .eps = eps, .n_indiv = n_indiv, .sum = 0.0, .count = 0 };
+    int ret = tree_walker_run(ts, hap_to_indiv, n_indiv, S, /*prune_map=*/NULL,
+                              eps, gv, work, order_buf,
+                              NULL, g_scale_visit, &gctx);
     if (ret < 0) goto cleanup;
-
-    for (ret = tsk_tree_first(&tree); ret == TSK_TREE_OK;
-         ret = tsk_tree_next(&tree)) {
-        tree_cov_matvec(gv, eps, n_indiv, &tree, work, order_buf, hap_to_indiv);
-        double dot = 0.0;
-        for (int i = 0; i < n_indiv; i++) dot += eps[i] * gv[i];
-        sum += dot / n_indiv;
-        count++;
-    }
-    tsk_tree_free(&tree);
+    double sum   = gctx.sum;
+    int    count = gctx.count;
 
 cleanup:
     free(work); free(order_buf); free(eps); free(gv);
