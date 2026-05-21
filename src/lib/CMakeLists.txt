@@ -21,4 +21,5 @@ target_link_libraries(sargent_core PUBLIC
 find_package(OpenMP)
 if(OpenMP_C_FOUND)
   target_link_libraries(sargent_core PUBLIC OpenMP::OpenMP_C)
+  target_compile_definitions(sargent_core PUBLIC SARGENT_HAS_OPENMP)
 endif()
