@@ -137,15 +137,17 @@ sargent --mode localize  ...       # window-based per-region h² (Phase 7; stub)
 ### Default behaviour
 
 `--mode predict` (default):
-- Runs joint variational coordinate descent (50 outer iterations) by default
-  (flipped 2026-05-20 after Phase 3 validation: joint EM > sequential
-  by 3–7% R² across the parameter sweep and is robust to single-seed
-  blow-ups that hurt sequential).
-- `--sequential` opts back into the two-stage Stage1→Stage2 pipeline
-  (the manuscript's SNP-prioritised decomposition).
-- `--em N` overrides the joint-EM iteration count.
-- `--snp-only` / `--arg-only` restrict to one stage and silently
-  imply `--sequential`.
+- Runs the sequential Stage 1 (BayesR on typed SNPs) → Stage 2 (per-tree
+  REML EM on the ARG) pipeline. **Re-defaulted 2026-05-21** after the
+  Phase 3.5 Nurdan smoke test exposed joint EM's σ²-collapse at scale
+  (see Phase 4.5 below); the brief Phase 3 default flip was reverted.
+- `--em N` (N ≥ 1) opts into joint variational coordinate descent.
+  EXPERIMENTAL until Phase 4.5; runs fine on debug-scale data but
+  degenerates on cases with ≳1000 local trees.
+- `--sequential` is now a no-op kept for explicit-documentation and
+  forward-compat with scripts written during the brief joint-EM default.
+- `--snp-only` / `--arg-only` restrict to one stage and conflict with
+  `--em N>0`.
 - Outputs `.beta.tsv`, `.w2.tsv`, `.summary.json` with `h2_snp`,
   `h2_arg`, `h2`, `sigma2`.
 
@@ -202,11 +204,14 @@ empirical failure; see "MoM comparison result" above).
   recover R²≈0.58, matching ARG-BLUP-uniform; BayesR/GBLUP collapse to ~0.07.
 - Joint EM > sequential by 3–7% R² across all sweep cells, and is robust
   to single-seed blow-ups that hurt sequential (e.g. seed 43 f=0.6).
-- → **Joint EM is now the default for `--mode predict`**; sequential is
-  available via `--sequential`.
+- ~~Joint EM is now the default for `--mode predict`~~ — flipped on
+  2026-05-20 based on this debug-scale result, then **reverted on
+  2026-05-21** after the Phase 3.5 Nurdan smoke test exposed joint EM's
+  σ²-collapse at scale.  See Phase 4.5 (joint EM redesign).
 - Decompositions are unidentifiable in opposite directions (sequential
   over-attributes to h²_snp, joint EM over-attributes to h²_arg), but
-  inferred h²_total agrees with realised truth within 5–15% for both.
+  inferred h²_total agrees with realised truth within 5–15% for both
+  on debug-scale data.
 
 ---
 
@@ -300,6 +305,77 @@ Expected hot spots (to confirm):
 - [ ] `test/profiling/PROFILE.md` with measured breakdown of wall
   time across the candidate hot spots, screenshot of each flamegraph
 - [ ] Recommendations for what to optimise, fed into Phase 5
+
+---
+
+## Phase 4.5 — Joint EM redesign at scale
+
+**Goal**: make `--em N` mode usable on cases with ~thousands of local
+trees.  Currently joint EM σ² collapses to ~0, h²_arg → 1, h²_snp → 0
+on the Nurdan smoke case (n=200, S=2739, p=2488), independent of the
+iteration count.  Sequential SARGENT on the same case gives
+h²_total=0.826 (within 3% of truth), so the failure is specific to
+the joint-EM dynamics, not the underlying model.
+
+### What we know from the diagnostic (2026-05-21)
+
+Three independent issues, in stacked order of cause:
+
+1. **β-sweep instability** — `r̃ = V^{-1} r` is computed at the start
+   of each outer iter and held stale through the entire β-sweep.  With
+   p ≫ n_train (2488 SNPs in LD), all SNPs see the same residual and
+   cumulatively overshoot.  Confirmed: iter 1 alone produces residual
+   variance 23× the phenotype variance.  A naïve fix
+   (`β = (1-ω)β_old + ω·β_raw` with ω=0.5) stabilises the per-SNP
+   trajectory but does NOT fix issue 2.
+2. **σ² collapse** — the multiplicative update `σ² *= A_0/B_0` with
+   `A_0 = ‖V^{-1} r‖²` and `B_0 ≈ tr(V^{-1})` (Hutchinson) can swing 2
+   orders of magnitude per iter when V is near-singular, and finds a
+   fixed point at σ² ≈ 0 once β is back under control.  Damping σ²
+   would slow the descent but not change the fixed point.
+3. **h²_arg reporting bug** — `h²_arg = (var_r - σ²)/var_y` reports as
+   the leftover after subtracting σ², regardless of whether the random
+   effect `u` is actually fitting anything.  When β=0 and σ²→0,
+   h²_arg→1 by definition even with ws²_mean ≈ 1e-8 (i.e. `u` is
+   essentially zero).  Independent of (1) and (2).
+
+### Proposed redesign
+
+Stacking patches on the current dynamics risks finding a fourth issue
+underneath.  Better to rewrite the σ² and h²_arg paths from first
+principles, mirroring what var_random does:
+
+- **σ² update**: replace multiplicative `A_0/B_0` with a direct
+  residual-variance update that conditions on the current u prediction:
+  `σ² = ‖y - X β - E[u]‖² / n`.  This is what var_random does
+  internally and is empirically stable on Nurdan-scale data.
+- **h²_arg**: report `var(E[u])/var(y)` where `E[u] = Σ_s w_s G_s r̃`,
+  not the residual subtraction.
+- **β-sweep**: either (a) multiple inner β-sweeps with `r̃` recomputed
+  between them, or (b) use the locally-updated `r` instead of the stale
+  `r̃` (forfeits the V-correction but is stable; equivalent to
+  classical BayesR with σ² that already accounts for u).
+- **Warm-start option**: as a fallback, accept that joint EM is a
+  *polish* step initialised from sequential's posterior, not a
+  cold-start algorithm.  Sequential runs first, joint EM runs N≤10 iters
+  on top.
+
+### Acceptance criteria
+
+- [ ] Joint EM converges (σ² stays positive, h²_arg < 1) on the
+  Nurdan smoke case
+- [ ] At debug scale, joint EM still wins by ≥3% R² over sequential
+  (so we don't regress on the Phase 3 finding)
+- [ ] At Nurdan scale, joint EM matches or beats sequential on h²_total
+  recovery
+- [ ] Re-default `--mode predict` to joint EM if both prior bullets hold
+
+### Dependencies
+
+- Phase 4 profiling (where is the per-iter cost?) — already done.
+- Independent of Phase 5 (incremental matvec).
+- Should be scheduled before Phase 6 (large-scale validation), since
+  scaling up only matters once both modes work.
 
 ---
 
