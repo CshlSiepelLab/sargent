@@ -102,6 +102,24 @@ void tree_cov_matvec(double *out, const double *in, int n_indiv,
                      double *work, tsk_id_t *order_buf,
                      const int *hap_to_indiv);
 
+/* Reference implementation of out = G_s * in, computed by direct pairwise
+ * MRCA-time summation.
+ *
+ * For each haploid sample pair (h_a, h_b):
+ *   G contribution to (indiv(h_a), indiv(h_b)) =
+ *       0.5 * (time(root) - time(MRCA(h_a, h_b)))
+ *
+ * O(n_haps^2 * depth) per tree.  Intended for the paranoia harness
+ * (test/lib/check_tree_matvec) -- cross-check against tree_cov_matvec
+ * (current production) and tree_cov_matvec_incremental (Phase 5 chunk 3).
+ * Do NOT use in the hot path.
+ *
+ * mark: caller-allocated scratch, n_nodes ints, contents arbitrary on entry. */
+void tree_cov_matvec_pairwise(double *out, const double *in, int n_indiv,
+                              const tsk_tree_t *tree,
+                              int *mark,
+                              const int *hap_to_indiv);
+
 /* ---------------------------------------------------------------------------
  * Tree-walker API (Phase 5).
  *
