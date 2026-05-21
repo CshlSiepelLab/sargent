@@ -18,9 +18,14 @@
 #include "variational.h"
 #include "sargent.help.h"
 
-/* Read n phenotype values from f.  Each non-comment line may have one or more
-   whitespace-separated fields; the last field is taken as the phenotype. */
-static double *read_phenotypes(FILE *f, int n)
+/* Read n phenotype values from f.
+ *
+ * Each non-comment line is split on whitespace.  When pheno_col > 0 the
+ * value at that 1-indexed field is used.  When pheno_col == 0 (legacy /
+ * default), the *last* whitespace-separated field is used (single-column
+ * files behave as before).
+ */
+static double *read_phenotypes(FILE *f, int n, int pheno_col)
 {
     double *y = malloc((size_t)n * sizeof(double));
     if (!y) return NULL;
@@ -29,13 +34,26 @@ static double *read_phenotypes(FILE *f, int n)
     int i = 0;
     while (i < n && fgets(line, sizeof(line), f)) {
         if (line[0] == '#') continue;
-        char *last = NULL, *tok = strtok(line, " \t\n\r");
-        while (tok) { last = tok; tok = strtok(NULL, " \t\n\r"); }
-        if (!last) continue;
+        const char *pick = NULL;
+        char *tok = strtok(line, " \t\n\r");
+        if (pheno_col > 0) {
+            int idx = 1;
+            while (tok && idx < pheno_col) { tok = strtok(NULL, " \t\n\r"); idx++; }
+            if (!tok) {
+                fprintf(stderr, "ERROR: phenotype line %d has fewer than %d fields\n",
+                        i + 1, pheno_col);
+                free(y); return NULL;
+            }
+            pick = tok;
+        } else {
+            while (tok) { pick = tok; tok = strtok(NULL, " \t\n\r"); }
+            if (!pick) continue;
+        }
         char *end;
-        y[i] = strtod(last, &end);
-        if (end == last) {
-            fprintf(stderr, "ERROR: bad phenotype value on line %d\n", i + 1);
+        y[i] = strtod(pick, &end);
+        if (end == pick) {
+            fprintf(stderr, "ERROR: bad phenotype value '%s' on line %d\n",
+                    pick, i + 1);
             free(y); return NULL;
         }
         i++;
@@ -181,6 +199,7 @@ int main(int argc, char *argv[])
     int em_iters    = 50;  /* default 50 (joint EM); --sequential sets to 0 */
     int sequential_flag = 0; /* --sequential: force em_iters = 0 */
     int em_flag_set = 0;     /* tracks whether --em was explicitly passed */
+    int pheno_col   = 0;     /* 0 = last whitespace field (legacy); >0 = 1-indexed column */
     double pi0      = -1.0; /* < 0 means unset */
     const char *outroot = "sargent";
     const char *mode_str = "predict";   /* predict | localize (stub) */
@@ -196,13 +215,14 @@ int main(int argc, char *argv[])
         {"uniform-arg",    0, 0, 'U'},
         {"em",             1, 0, 'E'},
         {"sequential",     0, 0, 'Q'},
+        {"pheno-col",      1, 0, 'C'},
         {"mode",           1, 0, 'M'},
         {"version",        0, 0, 'v'},
         {"help",           0, 0, 'h'},
         {0, 0, 0, 0}
     };
 
-    while ((c = getopt_long(argc, argv, "zGSAUQE:M:o:N:P:vh", long_opts, &opt_idx)) != -1) {
+    while ((c = getopt_long(argc, argv, "zGSAUQE:C:M:o:N:P:vh", long_opts, &opt_idx)) != -1) {
         switch (c) {
         case 'z': silent      = 1;                break;
         case 'G': ts_geno     = 1;                break;
@@ -212,6 +232,7 @@ int main(int argc, char *argv[])
         case 'E': em_iters    = atoi(optarg);
                   em_flag_set = 1;                break;
         case 'Q': sequential_flag = 1;            break;
+        case 'C': pheno_col   = atoi(optarg);     break;
         case 'M': mode_str    = optarg;           break;
         case 'P': pi0         = atof(optarg);     break;
         case 'o': outroot     = optarg;           break;
@@ -326,7 +347,7 @@ int main(int argc, char *argv[])
     if (!silent)
         fprintf(stderr, "Polymorphic variants: %d\n", gr->n_variants);
 
-    double *y = read_phenotypes(pheno_fh, gr->n_samples);
+    double *y = read_phenotypes(pheno_fh, gr->n_samples, pheno_col);
     fclose(pheno_fh);
     if (!y) {
         geno_close(gr);

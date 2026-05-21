@@ -16,7 +16,10 @@ classical fixed-vs-random decomposition is not identifiable.
 ARGUMENTS:
     <phenotypes>
         Phenotype file.  Each non-comment line should contain one phenotype
-        value (the last whitespace-separated field on the line is used).
+        value (by default, the last whitespace-separated field on the line
+        is used; use --pheno-col N to pick a specific 1-indexed column,
+        which is helpful for files with multiple replicate columns or ID
+        columns).
 
     <input.trees>
         Tree sequence file (.trees).  Used for local-tree covariance matrices
@@ -58,6 +61,13 @@ MAIN OPTIONS:
     --outroot <prefix>, -o <prefix>
         Set the output file prefix (default: "sargent").  Output files
         are named <prefix>.beta.tsv and <prefix>.w2.tsv.
+
+    --pheno-col <N>, -C <N>
+        1-indexed column to read from the phenotype file (default: 0,
+        meaning the LAST whitespace-separated field on each line).
+        Useful for multi-column phenotype files of the form
+        "family_id  indv_id  y1  y2 ... yK", where you would pass
+        --pheno-col 3 to select y1, --pheno-col 4 to select y2, etc.
 
     --mode <name>, -M <name>
         Choose the operational mode (default: predict).  Modes:
