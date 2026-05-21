@@ -433,6 +433,68 @@ significantly shortened by reusing an existing implementation.
 
 ---
 
+## Phase 5.5 — Algorithmic / parallelism follow-ups (deferred)
+
+Captured 2026-05-21 after Phase 5 chunk 4 landed only 1.17–1.29× end-to-end.
+The matvec hot path is near its arithmetic floor; the bigger gains live
+above the matvec layer.  Not actioning these now — pick them up after
+the chunk-4 re-profile says which one matters.
+
+### Preconditioned CG
+
+CG currently runs 50–100 inner iterations per V-solve.  V = Σ ws² G_s +
+σ² I; a Jacobi preconditioner (M = diag(V)) is cheap to maintain
+incrementally (we already have S[u] which gives diag(G_s); diag(V) is a
+weighted sum across trees).  Hope: halve the iteration count.
+
+- **Where it pays**: every V-solve in CG, ~50 matvecs per outer iter.
+  Multiplies into hutch_trace_all (nprobe × CG_solve).
+- **Risk**: preconditioner construction must stay O(n) per V-solve; if
+  it becomes O(n × trees) it costs as much as it saves.
+
+### Smarter Hutchinson trace estimation
+
+Today: vanilla Hutchinson, nprobe Rademacher probes, variance O(1/√K).
+Alternatives:
+
+- **Hutch++** (Meyer-Musco-Musco-Woodruff 2021): combines a low-rank
+  approximation with residual Hutchinson.  Order-of-magnitude variance
+  reduction for matrices with rapid spectral decay (which V is, when
+  ws² is sparse — i.e. most of the time for sargent).
+- **XTrace / XNysTrace** (Epperly-Tropp-Webber 2024): adaptive variants
+  with better tail bounds.
+
+Both could plausibly drop nprobe from 30 to ~10 with equivalent
+posterior variance.
+
+### Better EM convergence
+
+Joint EM (`var_joint`) and per-tree REML EM (`var_random`) currently
+run a fixed max-iter.  Plausible wins:
+
+- Track `‖θ_k - θ_{k-1}‖` and bail when stable.  Empirically the joint
+  EM h² values are pinned by iter 15–20 even though we run 50.
+- Polyak-Ruppert averaging is already in `var_random`; could add it to
+  `var_joint`.
+
+These cost only `if` statements and one extra norm computation per iter.
+
+### OpenMP over per-sample walks
+
+The per-sample walk-up `for hi in 0..n_haps: ...` in
+`tree_cov_matvec_inc_readout` is embarrassingly parallel — each sample's
+accumulation is independent.  At n_haps=2000 (medium) or biobank scale,
+this is 4–8× on a multicore laptop, more on a workstation.
+
+- Requires no new state; OpenMP `#pragma omp parallel for` over the
+  outer loop, `reduction(+:out[:n_indiv])` for the accumulator.
+- Build already links libomp.dylib on macOS.
+
+This is the biggest theoretical multiplier currently sitting unused.
+Worth doing *after* the re-profile if matvec stays in the top three.
+
+---
+
 ## Phase 6 — Larger-scale validation
 
 **Goal**: confirm SARGENT works at "moderately large" scales after the
