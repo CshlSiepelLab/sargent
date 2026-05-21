@@ -78,6 +78,7 @@ set(SARGENT_INCLUDE_DIR "${CMAKE_SOURCE_DIR}/include")
 
 add_subdirectory(src/lib)
 add_subdirectory(src/progs)
+add_subdirectory(test/lib)
 
 # ---- Installation ------------------------------------------------------
 install(DIRECTORY "${SARGENT_INCLUDE_DIR}/"

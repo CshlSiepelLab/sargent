@@ -439,6 +439,68 @@ void tree_cov_matvec(double *out, const double *in, int n_indiv,
 }
 
 /* ---------------------------------------------------------------------------
+ * tree_cov_matvec_pairwise: REFERENCE implementation of out = G_s * in.
+ *
+ * Walks every haploid sample pair (h_a, h_b), computes MRCA(h_a, h_b) by
+ * mark-and-walk, and accumulates the 0.5 * (time(root) - time(mrca)) entry
+ * into the matvec result.  O(n_haps^2 * depth) per tree.
+ *
+ * Independent of the production two-pass post-/pre-order algorithm; used as
+ * a paranoia cross-check (test/lib/check_tree_matvec) before we trust the
+ * incremental edge-diff implementation in chunks 2-3.
+ *
+ * `mark` is caller-allocated scratch of length tsk_treeseq_get_num_nodes(ts);
+ * contents are arbitrary on entry, clobbered on exit.
+ * --------------------------------------------------------------------------- */
+void tree_cov_matvec_pairwise(double *out, const double *in, int n_indiv,
+                              const tsk_tree_t *tree,
+                              int *mark,
+                              const int *hap_to_indiv)
+{
+    const tsk_treeseq_t *ts      = tree->tree_sequence;
+    const tsk_size_t     n_nodes = tsk_treeseq_get_num_nodes(ts);
+    const tsk_id_t      *parent  = tree->parent;
+    const double        *time    = ts->tables->nodes.time;
+    const tsk_id_t      *samples = tsk_treeseq_get_samples(ts);
+    const tsk_size_t     n_haps  = tsk_treeseq_get_num_samples(ts);
+
+    for (int i = 0; i < n_indiv; i++) out[i] = 0.0;
+    for (tsk_size_t u = 0; u < n_nodes; u++) mark[u] = -1;
+
+    int version = 0;
+    for (tsk_size_t a = 0; a < n_haps; a++) {
+        tsk_id_t ha = samples[a];
+        int ia = hap_to_indiv[(int)a];
+        if (ia < 0 || ia >= n_indiv) continue;
+
+        version++;
+        /* Walk ha to root, marking ancestors and tracking the root. */
+        tsk_id_t root_a = ha;
+        for (tsk_id_t u = ha; u != TSK_NULL; u = parent[u]) {
+            mark[u]  = version;
+            root_a   = u;
+        }
+        double time_root = time[root_a];
+
+        for (tsk_size_t b = 0; b < n_haps; b++) {
+            tsk_id_t hb = samples[b];
+            int ib = hap_to_indiv[(int)b];
+            if (ib < 0 || ib >= n_indiv) continue;
+
+            /* Walk hb to first marked node (= MRCA(ha, hb) within this tree). */
+            tsk_id_t mrca = TSK_NULL;
+            for (tsk_id_t u = hb; u != TSK_NULL; u = parent[u]) {
+                if (mark[u] == version) { mrca = u; break; }
+            }
+            if (mrca == TSK_NULL) continue;  /* different roots (forest) */
+
+            double T = time_root - time[mrca];
+            out[ia] += 0.5 * T * in[ib];
+        }
+    }
+}
+
+/* ---------------------------------------------------------------------------
  * tree_walker_run: iterate a tree sequence, invoking a per-tree visitor.
  *
  * Phase 5 chunk 1: this implementation is a thin wrapper around the existing
