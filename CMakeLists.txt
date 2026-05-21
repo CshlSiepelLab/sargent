@@ -57,23 +57,10 @@ set_target_properties(tskit::tskit PROPERTIES
 
 message(STATUS "tskit will be built from ${TSKIT_SOURCE_DIR}")
 
-# ---- OpenMP ------------------------------------------------------------
-# Apple Clang needs hints to find Homebrew's libomp
-if(APPLE)
-  execute_process(
-    COMMAND brew --prefix libomp
-    OUTPUT_VARIABLE LIBOMP_PREFIX
-    OUTPUT_STRIP_TRAILING_WHITESPACE
-    ERROR_QUIET)
-  if(LIBOMP_PREFIX)
-    set(OpenMP_C_FLAGS "-Xpreprocessor -fopenmp -I${LIBOMP_PREFIX}/include"
-        CACHE STRING "" FORCE)
-    set(OpenMP_C_LIB_NAMES "omp" CACHE STRING "" FORCE)
-    set(OpenMP_omp_LIBRARY "${LIBOMP_PREFIX}/lib/libomp.dylib" CACHE PATH "" FORCE)
-  endif()
-endif()
-
 # ---- Project layout ----------------------------------------------------
+# OpenMP detection happens inside src/lib/CMakeLists.txt via the standard
+# find_package(OpenMP).  Building with Homebrew llvm clang (see README) gives
+# OpenMP for free; Apple Clang users get a non-parallel build.
 set(SARGENT_INCLUDE_DIR "${CMAKE_SOURCE_DIR}/include")
 
 add_subdirectory(src/lib)

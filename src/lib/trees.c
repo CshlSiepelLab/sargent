@@ -616,22 +616,40 @@ void tree_cov_matvec_inc_advance(tree_cov_matvec_inc_state_t *st,
     }
 }
 
-/* Per-sample walk-up: out[indiv(h)] += sum_{v ancestor of h} bl[v] * S[v]. */
+/* Per-sample walk-up: out[indiv(h)] += sum_{v ancestor of h} bl[v] * S[v].
+ *
+ * Parallelised over haplotypes when SARGENT_HAS_OPENMP is set AND there is
+ * enough work to amortise thread fork/join overhead.  Empirically:
+ *
+ *   n_hap = 400  (s42_balanced):  serial 1.08x, 8 threads 0.60x  -> skip
+ *   n_hap = 2000 (medium n=1000): serial 0.95x, 8 threads 1.83x  -> parallelise
+ *
+ * The if() clause gives the OpenMP runtime a chance to skip the fork at
+ * small n_hap; threshold 1000 sits comfortably between the two data
+ * points and gives correct behaviour on cases we've measured.
+ *
+ * Each indiv has exactly 2 contributing haps so #pragma omp atomic on
+ * out[indiv] += a is at most 2-way contended -- cheaper than maintaining
+ * a per-thread accumulator. */
 void tree_cov_matvec_inc_readout(double *out,
                                   const tree_cov_matvec_inc_state_t *st)
 {
-    for (int i = 0; i < st->n_indiv; i++) out[i] = 0.0;
+    const int n_indiv = st->n_indiv;
+    for (int i = 0; i < n_indiv; i++) out[i] = 0.0;
 
     const tsk_id_t *samples = tsk_treeseq_get_samples(st->ts);
-    tsk_size_t n_hap = tsk_treeseq_get_num_samples(st->ts);
+    const tsk_size_t n_hap  = tsk_treeseq_get_num_samples(st->ts);
+
+    #pragma omp parallel for schedule(static) if(n_hap > 1000)
     for (tsk_size_t hi = 0; hi < n_hap; hi++) {
         int indiv = st->hap_to_indiv[(int)hi];
-        if (indiv < 0 || indiv >= st->n_indiv) continue;
+        if (indiv < 0 || indiv >= n_indiv) continue;
         double a = 0.0;
         for (tsk_id_t u = samples[hi]; st->our_parent[u] != TSK_NULL;
              u = st->our_parent[u]) {
             a += st->bl[u] * st->S[u];
         }
+        #pragma omp atomic
         out[indiv] += a;
     }
 }
