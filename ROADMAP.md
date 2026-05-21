@@ -308,13 +308,71 @@ Expected hot spots (to confirm):
 
 ---
 
-## Phase 4.5 — Joint EM redesign at scale
+## Phase 4.5 — Joint EM redesign at scale — DONE 2026-05-21
 
 **Goal**: make `--em N` mode usable on cases with ~thousands of local
-trees.  Currently joint EM σ² collapses to ~0, h²_arg → 1, h²_snp → 0
+trees.  Originally joint EM σ² collapsed to ~0, h²_arg → 1, h²_snp → 0
 on the Nurdan smoke case (n=200, S=2739, p=2488), independent of the
+iteration count.
+
+**What landed** (warm-start + damping + h²_arg fix + divergence revert):
+- `--em N` now means "run sequential SARGENT first, then N polish
+  iterations of var_joint starting from sequential's posterior".
+  Joint EM is a *polish* step, not a cold-start algorithm.
+- σ² update damped (ω=0.25, ratio clipped to [0.5, 2.0], floor raised
+  to 0.001·var_y) -- prevents the Newton step from overshooting when
+  V is near-singular.
+- β update damped (ω=0.5) -- halves the cumulative drift from stale r̃
+  across the β-sweep.
+- h²_arg now reports `var(E[u | y, β])/var(y)` using the BLUP closed
+  form `E[u] = r − σ²·r̃`, replacing the bogus
+  `(var_r − σ²)/var_y` formula that saturated at 1 when β fit y.
+- Divergence detection: if any polish iter shows `rel_dsig > 0.05`
+  (BayesR mixture-snap signature) the iter is reverted to the start-
+  of-iter snapshot and the polish stops.  Captures the genuine
+  improvement up to the snap; bails before degeneration.
+
+**End-to-end results** (vs sequential-only):
+
+| Case            | Sequential                       | Phase 4.5 polish                              |
+|-----------------|----------------------------------|-----------------------------------------------|
+| s42_balanced    | h²=0.857  h²_snp=0.857  h²_arg=0  σ²=0.188 | h²=0.941  h²_snp=0.734  h²_arg=0.207  σ²=0.189 (revert at iter 9) |
+| Nurdan          | h²=0.826  h²_snp=0.768  h²_arg=0.057  σ²=0.174 | h²=0.800  h²_snp=0.483  h²_arg=0.317  σ²=0.162 (clean 20 iters) |
+| Truth (both)    | h²=0.80   h²_snp=0.40   h²_arg=0.40   σ²=0.20  | |
+
+Phase 4.5 produces a more balanced SNP/ARG decomposition than sequential
+in both cases.  On Nurdan it's now usable; on s42 the revert keeps
+the genuine improvement (h²_arg=0.21 vs sequential's 0) and discards
+the polish-induced explosion at iter 9.
+
+**Diagnosis of the underlying issue** (for posterity / Phase 4.5 v2):
+
+The σ² update `σ² *= A_0/B_0` is the textbook REML EM Newton step.
+The dynamics are unstable when BayesR's mixture posterior snaps
+discontinuously (a SNP suddenly favouring a different effect-size
+component because the residual structure shifted).  When that
+happens within an outer iter, the β-sweep produces a large
+discontinuous β change, r changes a lot, the A_0/B_0 ratio computed
+from the *pre-sweep* state is no longer a valid Newton step for σ²,
+and σ² overshoots.  Once V's condition number is wrong the next
+iter's CG produces a wild r_tilde, and the cascade is fast.
+
+Sequential SARGENT avoids this because Stage 2 holds β fixed; only
+ws² and σ² update, both with continuous likelihoods.
+
+A real fix would smooth the BayesR mixture posterior (annealing
+temperature, soft mixture-component weights) -- bigger surgery,
+deferred.  The warm-start + revert combination is the pragmatic
+Phase 4.5 fix that makes the existing `--em N` mode usable.
+
+---
+
+### Original problem statement (pre-Phase-4.5)
+
+Originally joint EM σ² collapsed to ~0, h²_arg → 1, h²_snp → 0 on the
+Nurdan smoke case (n=200, S=2739, p=2488), independent of the
 iteration count.  Sequential SARGENT on the same case gives
-h²_total=0.826 (within 3% of truth), so the failure is specific to
+h²_total=0.826 (within 3% of truth), so the failure was specific to
 the joint-EM dynamics, not the underlying model.
 
 ### What we know from the diagnostic (2026-05-21)

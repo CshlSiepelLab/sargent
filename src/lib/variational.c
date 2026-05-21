@@ -714,6 +714,20 @@ void var_joint(sargent_t *sg, int silent)
     double ws2_max   = var_y / fmax(S, 1);
     double ws2_floor = 1e-12 * ws2_max;
 
+    /* Phase 4.5 divergence-detection snapshots: at the start of every iter
+     * we snapshot (β, ws², σ²); if the iter produced a wild rel_dsig we
+     * restore to break out of an exploding polish trajectory. */
+    double *beta_snap   = malloc((size_t)p * sizeof(double));
+    double *ws2_snap    = malloc((size_t)S * sizeof(double));
+    double  sigma2_snap = 0.0;
+    double  h2_snp_snap = 0.0;
+    double  h2_arg_snap = 0.0;
+    if (!beta_snap || !ws2_snap) {
+        fprintf(stderr, "var_joint: out of memory (snapshot)\n");
+        free(beta_snap); free(ws2_snap);
+        goto cleanup;
+    }
+
     v_matvec_data_t vd = {
         .ts = sg->ts, .ws2 = sg->ws2, .sigma2 = sg->sigma2,
         .n = n, .S = S, .S_orig = sg->S_orig, .prune_map = sg->prune_map,
@@ -736,6 +750,13 @@ void var_joint(sargent_t *sg, int silent)
     double old_sigma2   = sg->sigma2;
 
     for (int outer = 0; outer < max_outer; outer++) {
+
+        /* --- 0. Snapshot (β, ws², σ², h²_snp, h²_arg) for divergence-revert --- */
+        memcpy(beta_snap, sg->beta, (size_t)p * sizeof(double));
+        memcpy(ws2_snap,  sg->ws2,  (size_t)S * sizeof(double));
+        sigma2_snap = sg->sigma2;
+        h2_snp_snap = sg->h2_snp;
+        h2_arg_snap = sg->h2_arg;
 
         /* --- 1. Compute residual r = y - X β --- */
         memcpy(r, sg->y, (size_t)n * sizeof(double));
@@ -814,12 +835,20 @@ void var_joint(sargent_t *sg, int silent)
             }
             for (int k = 0; k < K; k++) gamma[k] /= sum_g;
 
-            double beta_new = 0.0;
+            double beta_raw = 0.0;
             for (int k = 0; k < K; k++) {
                 if (gamma[k] == 0.0 || sg->sigma2_mix[k] == 0.0) continue;
                 double v_post = 1.0 / (v_jj + 1.0 / sg->sigma2_mix[k]);
-                beta_new += gamma[k] * t_j * v_post;
+                beta_raw += gamma[k] * t_j * v_post;
             }
+            /* Damped β update: β_new = (1-ω)·β_old + ω·β_raw, ω=0.5.
+             *
+             * Phase 4.5: r̃ is held stale through the entire β-sweep (line 829),
+             * so with p ≫ n_train and SNPs in LD all SNPs see the same residual
+             * and cumulatively overshoot.  Halving the step kills the
+             * cumulative drift without changing the EM fixed point. */
+            const double EM_DAMP_BETA = 0.5;
+            double beta_new = (1.0 - EM_DAMP_BETA) * beta_old + EM_DAMP_BETA * beta_raw;
             sg->beta[j] = beta_new;
             for (int k = 0; k < K; k++) gamma_sum[k] += gamma[k];
 
@@ -856,17 +885,58 @@ void var_joint(sargent_t *sg, int silent)
             ws2_mean /= S;
         }
 
-        /* --- 7. σ² update --- */
+        /* --- 7. σ² update (Phase 4.5: damped + ratio-clipped + raised floor) ---
+         *
+         * The plain multiplicative update σ² *= A_0/B_0 oscillates wildly
+         * when V is near-singular (which it becomes as σ² shrinks and ws²
+         * is small).  Three layers of stabilisation:
+         *
+         *   1. Damp with ω=0.25: σ²_new = σ²·(1 + ω·(A_0/B_0 - 1)).
+         *   2. Clip per-iter step ratio to [0.5, 2.0].  Even with
+         *      damping, A_0/B_0 can swing from 0.3 to 3+ in a single iter
+         *      when CG produces near-singular r_tilde; the cap prevents
+         *      single-step blow-ups.
+         *   3. Floor σ² at 0.001·var_y (was 1e-10·var_y).  Below 0.001·var_y,
+         *      V is dominated by the random component (ws² >> σ²) and CG
+         *      is ill-conditioned, which is exactly what drives the
+         *      A_0/B_0 swings.  Keeping σ² above the floor keeps V away
+         *      from singularity. */
+        const double EM_DAMP_SIGMA = 0.25;
         if (B_0 > 0.0) {
-            sg->sigma2 *= A_0 / B_0;
-            sg->sigma2 = fmax(1e-10 * var_y, fmin(var_y, sg->sigma2));
+            double ratio = A_0 / B_0;
+            double step  = 1.0 + EM_DAMP_SIGMA * (ratio - 1.0);
+            step         = fmax(0.5, fmin(2.0, step));
+            sg->sigma2  *= step;
+            sg->sigma2   = fmax(1e-3 * var_y, fmin(var_y, sg->sigma2));
         }
 
-        /* Report h2_snp from current X β̂, and h2_arg from σ² + Xβ. */
+        /* --- 8. h² accounting (Phase 4.5: report var(E[u])/var(y) properly) ---
+         *
+         * BLUP of u given y is E[u | y, β] = K_g V^{-1} r = (V-σ²I)V^{-1}r
+         *                                  = r - σ²·r_tilde.
+         * h²_snp = var(Xβ)/var(y) = (var_y - var_r)/var_y    (since y centered)
+         * h²_arg = var(E[u])/var(y)
+         * h²     = h²_snp + h²_arg
+         *
+         * This replaces the chunk-4 reporting h²_arg = (var_r - σ²)/var_y,
+         * which treated h²_arg as "everything not in X β minus noise" --
+         * an over-estimate when E[u] doesn't actually fit (the Nurdan
+         * σ²-collapse failure mode). */
         double var_r = vec_var(r, n);
-        sg->h2_snp  = (var_y > 0.0) ? fmax(0.0, 1.0 - var_r / var_y) : 0.0;
-        sg->h2_arg = (var_y > 0.0) ? fmax(0.0, var_r / var_y - sg->sigma2 / var_y) : 0.0;
-        sg->h2        = sg->h2_snp + sg->h2_arg;
+        double var_eu = 0.0;
+        {
+            double mean_eu = 0.0;
+            for (int i = 0; i < n; i++) mean_eu += r[i] - sg->sigma2 * r_tilde[i];
+            mean_eu /= n;
+            for (int i = 0; i < n; i++) {
+                double eu = (r[i] - sg->sigma2 * r_tilde[i]) - mean_eu;
+                var_eu += eu * eu;
+            }
+            var_eu /= n;
+        }
+        sg->h2_snp = (var_y > 0.0) ? fmax(0.0, 1.0 - var_r / var_y) : 0.0;
+        sg->h2_arg = (var_y > 0.0) ? fmax(0.0, fmin(1.0, var_eu / var_y)) : 0.0;
+        sg->h2     = sg->h2_snp + sg->h2_arg;
 
         double rel_dsig = fabs(sg->sigma2 - old_sigma2) / (old_sigma2 + 1e-15);
 
@@ -876,6 +946,31 @@ void var_joint(sargent_t *sg, int silent)
                     "  ws2_mean=%.3e  v_jj=%.2e  rel_dsig=%.2e\n",
                     outer + 1, max_dbeta, sg->sigma2, sg->h2_snp, sg->h2_arg,
                     ws2_mean, v_jj, rel_dsig);
+
+        /* --- 9. Phase 4.5: divergence detection --------------------------
+         *
+         * The polish trajectory should track a smooth EM descent.  rel_dsig
+         * above 0.05 (5% per-iter relative σ² change) signals the start of
+         * an oscillation; observed empirically on the s42_balanced debug
+         * case where iter 9 jumped to rel_dsig=0.21 and the polish then
+         * diverged.  Revert to the start-of-iter snapshot and stop.
+         *
+         * Skip the first iter (cold-start can produce a large legitimate
+         * step from the warm-start init to the polish minimum). */
+        if (outer >= 1 && rel_dsig > 0.05) {
+            if (!silent)
+                fprintf(stderr,
+                        "var_joint: divergence detected at iter %d "
+                        "(rel_dsig=%.2e > 0.05); reverting to iter %d state\n",
+                        outer + 1, rel_dsig, outer);
+            memcpy(sg->beta, beta_snap, (size_t)p * sizeof(double));
+            memcpy(sg->ws2,  ws2_snap,  (size_t)S * sizeof(double));
+            sg->sigma2 = sigma2_snap;
+            sg->h2_snp = h2_snp_snap;
+            sg->h2_arg = h2_arg_snap;
+            sg->h2     = h2_snp_snap + h2_arg_snap;
+            break;
+        }
 
         old_sigma2 = sg->sigma2;
     }
@@ -908,6 +1003,7 @@ void var_joint(sargent_t *sg, int silent)
 cleanup:
     cg_state_free(cg);
     if (inc_ok) tree_cov_matvec_inc_state_free(&inc);
+    free(beta_snap); free(ws2_snap);
     free(r); free(r_tilde); free(A); free(B); free(g);
     free(log_g); free(gamma); free(gamma_sum);
     free(gv);

@@ -74,17 +74,11 @@ MAIN OPTIONS:
           predict   - the main pipeline.  Default fit is sequential
                       (Stage 1 BayesR on typed SNPs, then Stage 2
                       per-tree REML EM for the ARG random effect).
-                      Use --em N (N >= 1) to opt into joint variational
-                      coordinate descent on (beta, ws^2, sigma^2)
-                      instead.  Outputs .beta.tsv, .w2.tsv,
-                      .summary.json with h2_snp (variance explained
-                      by SNP fit) and h2_arg (additional variance
-                      captured by the ARG).
-                      NB: joint EM (--em N) is unstable at scale
-                      (sigma^2 collapses on cases with ~thousands of
-                      local trees; see ROADMAP.md Phase 4.5).  Use
-                      sequential as the production default until the
-                      joint-EM redesign lands.
+                      Use --em N (N >= 1) for sequential followed by N
+                      joint-EM polish iterations on (beta, ws^2, sigma^2).
+                      Outputs .beta.tsv, .w2.tsv, .summary.json with
+                      h2_snp (variance explained by SNP fit) and h2_arg
+                      (additional variance captured by the ARG).
           localize  - per-window decomposition of h2_arg across the
                       genome (not yet implemented; see ROADMAP.md Phase 7).
 
@@ -96,20 +90,27 @@ ALGORITHMIC VARIANTS (for systematic comparison):
         per-tree weights are unidentifiable.
 
     --em <N>, -E <N>
-        Opt into joint variational coordinate descent for N outer
-        iterations (default: 0, i.e. sequential).  Each outer iteration
-        does ONE V-solve, ONE sweep of BayesR beta updates using V-aware
-        precision, and ONE REML EM step on ws^2 and sigma^2.  All updates
-        share a common residual snapshot per iteration.  Cannot be
-        combined with --sequential, --snp-only, or --arg-only.
+        Run sequential SARGENT (Stage 1 + Stage 2) and then N polish
+        iterations of joint variational coordinate descent on
+        (beta, ws^2, sigma^2), starting from sequential's posterior.
+        Each polish iteration does ONE V-solve, ONE damped BayesR beta
+        sweep, ONE REML EM step on ws^2, and ONE damped multiplicative
+        sigma^2 step.  Default: 0 (sequential only).  Cannot be combined
+        with --sequential, --snp-only, or --arg-only.
 
-        EXPERIMENTAL: joint EM is currently unstable on cases with
-        roughly more than a few hundred local trees -- sigma^2 collapses
-        toward zero and h2_arg becomes uninformative.  On the
-        debug-scale Phase 3 sweep (n=200-300, S=270 trees) it works and
-        outperforms sequential by 3-7% R^2; at Nurdan scale (S=2700
-        trees) it does not.  Use sequential as the production default
-        until the joint-EM redesign lands (ROADMAP.md Phase 4.5).
+        The polish trajectory is monitored: if sigma^2 changes by more
+        than 5 percent in one iteration (a signature of BayesR mixture-
+        component snapping that destabilises the EM dynamics), the iter
+        is reverted and the polish stops.  In practice this yields a
+        few iterations of meaningful improvement over sequential when
+        n_indiv * n_trees is small enough for the cold-start basin to
+        be narrow, and a clean revert otherwise.
+
+        Phase 4.5 (2026-05-21) made joint EM usable at scale by warm-
+        starting from sequential rather than from beta=0.  The earlier
+        cold-start variant degenerated on cases with ~thousands of
+        local trees (sigma^2 collapsed; h2_arg saturated at 1).  See
+        ROADMAP.md Phase 4.5 for the full diagnosis.
 
     --sequential, -Q
         Forces the two-stage Stage1->Stage2 pipeline.  This is the

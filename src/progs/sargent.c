@@ -378,12 +378,37 @@ int main(int argc, char *argv[])
     (void)mode_predict;  /* currently the only operational mode */
 
     if (em_iters > 0) {
-        /* ---- Joint variational coordinate descent (mode: predict) ---- */
+        /* ---- Warm-started joint EM (Phase 4.5) -----------------------------
+         *
+         * Cold-start var_joint was empirically unstable at scale: on the
+         * Nurdan smoke case (n=200, p=2488, S=2739) the β-sweep with stale
+         * r̃ caused β to explode in iter 1, which drove σ² oscillation
+         * (collapse with the original A_0/B_0 update; bounded oscillation
+         * after Phase 4.5 damping + ratio-clipping).  Damping alone did
+         * not yield convergence.
+         *
+         * Phase 4.5 ships warm-start: run sequential (var_fixed then
+         * var_random) first, then use that β/ws²/σ² as the initial point
+         * for var_joint.  Treats joint EM as a polish step on a known-good
+         * fit rather than as a cold-start optimiser.
+         * ------------------------------------------------------------------ */
         if (!silent)
             fprintf(stderr,
-                    "Joint EM: %d outer iters (%d SNPs K=%d, %d trees%s)...\n",
+                    "Joint EM: warm-start (sequential + %d polish iters; "
+                    "%d SNPs K=%d, %d trees%s)\n",
                     em_iters, sg->p, sg->K, sg->S,
                     sg->uniform_arg ? ", uniform-random" : "");
+
+        if (!silent) fprintf(stderr, "  warm-start Stage 1 (BayesR fit to SNPs)...\n");
+        var_fixed(sg, silent);
+        if (!silent)
+            fprintf(stderr, "  warm-start Stage 2 (per-tree REML EM)...\n");
+        var_random(sg, silent);
+
+        if (!silent)
+            fprintf(stderr,
+                    "  joint EM polish (%d outer iters from warm β/ws²/σ²)\n",
+                    em_iters);
         var_joint(sg, silent);
         if (!silent)
             fprintf(stderr, "Joint EM done: h2_snp=%.4f  h2_arg=%.4f  sigma2=%.4f\n",
