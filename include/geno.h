@@ -105,18 +105,19 @@ void tree_cov_matvec(double *out, const double *in, int n_indiv,
 /* ---------------------------------------------------------------------------
  * Incremental tree-cov matvec.
  *
- * Maintains S[u] (post-order subtree sum of `in`) across tree boundaries
- * using tskit's edge-diff machinery, so each tree boundary only pays
- * O(|edges_changed| * depth) instead of the O(n_nodes) post-order pass
- * the naive implementation does.  The pre-order pass (acc[u] and read-off)
- * still runs per tree in Phase 5 chunk 2; chunk 3 makes that incremental too.
+ * Maintains S[u] (post-order subtree sum of `in`), our_parent[u], and
+ * bl[u] (= time[parent(u)] - time[u]) across tree boundaries using tskit's
+ * edge-diff machinery.  Each tree boundary pays O(|edges_changed| * depth)
+ * for S[] and our_parent[] / bl[] updates, plus a per-sample walk-up from
+ * each sample to the root for the matvec output (no per-tree pre-order
+ * pass over n_nodes).
  *
  * Usage:
  *
  *   tree_cov_matvec_inc_state_t st;
  *   tree_cov_matvec_inc_state_init(&st, ts, n_indiv, hap_to_indiv);
  *   for each matvec call:
- *       tree_cov_matvec_inc_state_reset(&st, in);  // resets S[], our_parent[]
+ *       tree_cov_matvec_inc_state_reset(&st, in);  // resets S[], our_parent[], bl[]
  *       for ret = tsk_tree_first(&tree); ret == OK; ret = tsk_tree_next(&tree):
  *           tree_cov_matvec_incremental(out, &st, &tree);
  *           ...
@@ -132,9 +133,8 @@ typedef struct {
     const int           *hap_to_indiv;   /* not owned */
     tsk_size_t           n_nodes;
     double              *S;              /* length n_nodes; updated incrementally */
-    double              *acc;            /* length n_nodes; scratch for pre-order */
     tsk_id_t            *our_parent;     /* length n_nodes; tracks tree structure */
-    tsk_id_t            *order_buf;      /* length n_nodes; scratch for pre-order */
+    double              *bl;             /* length n_nodes; bl[u] = time[parent(u)] - time[u] */
 } tree_cov_matvec_inc_state_t;
 
 /* Allocate scratch buffers; returns 0 on success, -1 on OOM. */
