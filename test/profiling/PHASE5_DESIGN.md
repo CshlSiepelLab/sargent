@@ -194,13 +194,63 @@ the full s42_balanced debug case (100 probes × 274 trees).
 implementation; sargent end-to-end h² values match (FP precision)
 on s42_balanced and Nurdan.
 
-### Chunk 4 — Drop naive from hot path, profile
+### Chunk 4 — Wire incremental into production
 
-- Wire `tree_cov_matvec_incremental` (+ batched variant from 3b) into
-  the production walker (`tree_walker_run` and any direct callers).
-- Keep naive only behind a `--paranoid-matvec` debug flag.
-- Re-profile with `samply`; measure actual wall-time delta on a
-  representative sargent run.
+Splits `tree_cov_matvec_incremental` into `_advance` (state update) and
+`_readout` (per-sample walk-up).  Adds `tree_walker_run_inc`: same shape
+as the chunk-1 walker but consumes an externally-owned long-lived
+`tree_cov_matvec_inc_state_t` so it can be reused across the many
+matvec calls in CG / Hutchinson / compute_quad_all.
+
+`v_matvec`, `compute_quad_all`, `estimate_g_scale` rewired to
+`tree_walker_run_inc`.  `v_matvec_data_t` now owns a pointer to the
+inc_state allocated by `var_random` / `var_joint` at setup, and freed
+at cleanup.
+
+End-to-end on `s42_balanced` (Phase 3 debug case, 200 indv x 274 trees
+x 144 SNPs):
+
+| Mode        | Pre-chunk-4 | Chunk 4   | Speedup | Output match |
+|-------------|------------:|----------:|--------:|--------------|
+| sequential  |     38.6 s  |   32.9 s  |  1.17x  | bit-identical |
+| joint EM 50 |     98.2 s  |   76.4 s  |  1.29x  | drift 1e-6 (FP accumulation order) |
+
+Drift in joint EM is from the matvec-output order changing inside CG /
+Hutchinson; accumulated over ~50 outer iters of ~50 CG matvecs each it
+lands at 1e-6 in the final h2 values.  Well below the relative tolerance
+required for inference; the harness baseline is max_rel = 1.43e-9 per
+matvec.
+
+### Scaling test (medium case n=1000, 2946 trees, ~6k nodes)
+
+Generated via `scripts/simulate.py --n-indiv 1000 --length 1Mb`; run
+through `bench_tree_matvec`:
+
+|                | n_haps | n_trees | speedup vs naive |
+|----------------|-------:|--------:|-----------------:|
+| s42_balanced   |    400 |     274 | 1.06-1.20x       |
+| Nurdan         |    400 |    2739 | 1.18-1.21x       |
+| medium (n=1k)  |   2000 |    2946 | 1.11x            |
+
+Scaling-hypothesis result: **speedup does not widen with sample count**.
+At 5x the haploid count, chunk-3a's win is slightly smaller (1.11x vs
+~1.20x), consistent with the desk arithmetic in chunk 3a's review:
+per-tree work for incremental scales as `n_haps * avg_depth` while naive
+scales as `2 * n_nodes`; the ratio drifts toward 1 (or below) as
+n_haps grows.
+
+Bigger speedup at scale would require chunk 3b (batched matvec across
+probes) or the deferred ancestor-path cache.
+
+### Chunk 4 follow-ups (not in this chunk)
+
+- Re-profile with `samply` on the desktop to confirm where the remaining
+  hot spots are after chunk 4.  Expected: tskit tree_pos advance and
+  the per-sample walk-up.
+- Optional `--paranoid-matvec` debug flag that runs both naive and
+  incremental and asserts agreement.  Not strictly needed since the
+  harness covers it; consider only if production drift is ever
+  suspected.
 
 ## Deferred optimisations
 

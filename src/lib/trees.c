@@ -582,9 +582,11 @@ void tree_cov_matvec_inc_state_reset(tree_cov_matvec_inc_state_t *st,
     }
 }
 
-void tree_cov_matvec_incremental(double *out,
-                                 tree_cov_matvec_inc_state_t *st,
-                                 const tsk_tree_t *tree)
+/* Apply the edge diff at tree->tree_pos to S[], our_parent[], bl[].
+ * Must be called for every tree boundary even if the readout is skipped --
+ * S[] tracks the post-order subtree sum and goes out of sync otherwise. */
+void tree_cov_matvec_inc_advance(tree_cov_matvec_inc_state_t *st,
+                                  const tsk_tree_t *tree)
 {
     const tsk_table_collection_t *tables      = st->ts->tables;
     const tsk_id_t               *edge_parent = tables->edges.parent;
@@ -592,7 +594,6 @@ void tree_cov_matvec_incremental(double *out,
     const double                 *time        = tables->nodes.time;
     const tsk_tree_position_t    *pos         = &tree->tree_pos;
 
-    /* Apply edge diff to S[], our_parent[], bl[]. */
     for (tsk_id_t j = pos->out.start; j != pos->out.stop; j++) {
         tsk_id_t e = pos->out.order[j];
         tsk_id_t p = edge_parent[e];
@@ -613,9 +614,12 @@ void tree_cov_matvec_incremental(double *out,
         for (tsk_id_t u = p; u != TSK_NULL; u = st->our_parent[u])
             st->S[u] += sc;
     }
+}
 
-    /* Per-sample walk-up from each haploid sample to the root, accumulating
-     * bl[u] * S[u].  Replaces the per-tree pre-order + acc[] + readout. */
+/* Per-sample walk-up: out[indiv(h)] += sum_{v ancestor of h} bl[v] * S[v]. */
+void tree_cov_matvec_inc_readout(double *out,
+                                  const tree_cov_matvec_inc_state_t *st)
+{
     for (int i = 0; i < st->n_indiv; i++) out[i] = 0.0;
 
     const tsk_id_t *samples = tsk_treeseq_get_samples(st->ts);
@@ -630,6 +634,63 @@ void tree_cov_matvec_incremental(double *out,
         }
         out[indiv] += a;
     }
+}
+
+void tree_cov_matvec_incremental(double *out,
+                                 tree_cov_matvec_inc_state_t *st,
+                                 const tsk_tree_t *tree)
+{
+    tree_cov_matvec_inc_advance(st, tree);
+    tree_cov_matvec_inc_readout(out, st);
+}
+
+/* ---------------------------------------------------------------------------
+ * tree_walker_run_inc: incremental tree-walker driving the advance/readout
+ * split.  pre_visit may skip the readout; advance always runs to keep S[]
+ * coherent across the tree-sequence walk.
+ * --------------------------------------------------------------------------- */
+int tree_walker_run_inc(tree_cov_matvec_inc_state_t *inc,
+                        int                  S_orig,
+                        const int           *prune_map,
+                        const double        *in,
+                        double              *gv,
+                        tree_pre_visit_fn    pre_visit,
+                        tree_visit_fn        visit,
+                        void                *ctx)
+{
+    tsk_tree_t tree;
+    int ret = tsk_tree_init(&tree, inc->ts, 0);
+    if (ret < 0) {
+        fprintf(stderr, "tree_walker_run_inc: tsk_tree_init: %s\n", tsk_strerror(ret));
+        return -1;
+    }
+
+    tree_cov_matvec_inc_state_reset(inc, in);
+
+    tree_walk_state_t st = {
+        .n_indiv = inc->n_indiv,
+        .gv      = gv,
+    };
+
+    int s = 0;
+    for (ret = tsk_tree_first(&tree); ret == TSK_TREE_OK && s < S_orig;
+         ret = tsk_tree_next(&tree), s++) {
+        int sp = prune_map ? prune_map[s] : s;
+        tree_cov_matvec_inc_advance(inc, &tree);    /* always update state */
+        if (pre_visit && !pre_visit(s, sp, ctx))
+            continue;
+        tree_cov_matvec_inc_readout(gv, inc);
+        st.s_orig = s;
+        st.sp     = sp;
+        visit(&st, ctx);
+    }
+    if (ret < 0) {
+        fprintf(stderr, "tree_walker_run_inc: tsk_tree iteration: %s\n", tsk_strerror(ret));
+        tsk_tree_free(&tree);
+        return -1;
+    }
+    tsk_tree_free(&tree);
+    return 0;
 }
 
 /* ---------------------------------------------------------------------------
@@ -721,13 +782,13 @@ double estimate_g_scale(const tsk_treeseq_t *ts, const int *hap_to_indiv,
     int S = (int)tsk_treeseq_get_num_trees(ts);
     if (S <= 0 || n_indiv <= 0) return 1.0;
 
-    tsk_size_t nnd = tsk_treeseq_get_num_nodes(ts);
-    double   *work     = malloc(2 * nnd * sizeof(double));
-    tsk_id_t *order_buf = malloc(nnd * sizeof(tsk_id_t));
-    double   *eps      = malloc((size_t)n_indiv * sizeof(double));
-    double   *gv       = malloc((size_t)n_indiv * sizeof(double));
-    if (!work || !order_buf || !eps || !gv) {
-        free(work); free(order_buf); free(eps); free(gv);
+    double *eps = malloc((size_t)n_indiv * sizeof(double));
+    double *gv  = malloc((size_t)n_indiv * sizeof(double));
+    tree_cov_matvec_inc_state_t inc;
+    int inc_ok = (tree_cov_matvec_inc_state_init(&inc, ts, n_indiv, hap_to_indiv) == 0);
+    if (!eps || !gv || !inc_ok) {
+        free(eps); free(gv);
+        if (inc_ok) tree_cov_matvec_inc_state_free(&inc);
         return 1.0;
     }
 
@@ -739,14 +800,13 @@ double estimate_g_scale(const tsk_treeseq_t *ts, const int *hap_to_indiv,
     }
 
     g_scale_ctx_t gctx = { .eps = eps, .n_indiv = n_indiv, .sum = 0.0, .count = 0 };
-    int ret = tree_walker_run(ts, hap_to_indiv, n_indiv, S, /*prune_map=*/NULL,
-                              eps, gv, work, order_buf,
-                              NULL, g_scale_visit, &gctx);
-    if (ret < 0) goto cleanup;
+    int ret = tree_walker_run_inc(&inc, S, /*prune_map=*/NULL,
+                                  eps, gv, NULL, g_scale_visit, &gctx);
     double sum   = gctx.sum;
     int    count = gctx.count;
 
-cleanup:
-    free(work); free(order_buf); free(eps); free(gv);
+    tree_cov_matvec_inc_state_free(&inc);
+    free(eps); free(gv);
+    (void)ret;
     return (count > 0 && sum > 0.0) ? sum / count : 1.0;
 }

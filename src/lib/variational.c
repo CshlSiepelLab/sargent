@@ -362,9 +362,8 @@ typedef struct {
     int                  S_orig;     /* original tree count (for tskit iteration) */
     const int           *prune_map;  /* length S_orig: orig tree → pruned seg */
     const int           *hap_to_indiv;
-    double              *work;      /* 2 * n_nodes scratch (borrowed) */
-    tsk_id_t            *order_buf; /* n_nodes scratch (borrowed) */
-    double              *gv;        /* n scratch (borrowed) */
+    double              *gv;         /* n scratch (borrowed) */
+    tree_cov_matvec_inc_state_t *inc; /* borrowed; long-lived incremental state */
 } v_matvec_data_t;
 
 /* --- v_matvec via tree_walker_run --- */
@@ -403,9 +402,8 @@ static void v_matvec(double *out, const double *in, int n, void *data)
     if (!has_random) return;
 
     v_matvec_visit_ctx_t vc = { .out = out, .ws2 = d->ws2, .n = n };
-    tree_walker_run(d->ts, d->hap_to_indiv, d->n, d->S_orig, d->prune_map,
-                    in, d->gv, d->work, d->order_buf,
-                    v_matvec_pre, v_matvec_visit, &vc);
+    tree_walker_run_inc(d->inc, d->S_orig, d->prune_map, in, d->gv,
+                        v_matvec_pre, v_matvec_visit, &vc);
 }
 
 /* --- compute_quad_all via tree_walker_run --- */
@@ -425,17 +423,15 @@ static void quad_visit(const tree_walk_state_t *st, void *ctx)
 }
 
 /* Compute A[sp] = r_tilde^T G_sp r_tilde for all S pruned segments. */
-static void compute_quad_all(const tsk_treeseq_t *ts, const int *hap_to_indiv,
+static void compute_quad_all(tree_cov_matvec_inc_state_t *inc,
                               int n, int S, int S_orig, const int *prune_map,
                               const double *r_tilde,
-                              double *A,
-                              double *work, tsk_id_t *order_buf, double *gv)
+                              double *A, double *gv)
 {
     for (int sp = 0; sp < S; sp++) A[sp] = 0.0;
     quad_visit_ctx_t qc = { .A = A, .r_tilde = r_tilde, .n = n };
-    tree_walker_run(ts, hap_to_indiv, n, S_orig, prune_map,
-                    r_tilde, gv, work, order_buf,
-                    NULL, quad_visit, &qc);
+    tree_walker_run_inc(inc, S_orig, prune_map, r_tilde, gv,
+                        NULL, quad_visit, &qc);
 }
 
 
@@ -462,15 +458,15 @@ void var_random(sargent_t *sg, int silent)
     double   *B          = malloc((size_t)S * sizeof(double));
     double   *ws2_accum  = calloc((size_t)S,  sizeof(double));
 
-    tsk_size_t n_nodes   = tsk_treeseq_get_num_nodes(sg->ts);
-    double    *work      = malloc(2 * n_nodes * sizeof(double));
-    tsk_id_t  *order_buf = malloc(n_nodes * sizeof(tsk_id_t));
     double    *gv        = malloc((size_t)n * sizeof(double));
 
     cg_state_t *cg = cg_state_new(n, NULL);
 
+    tree_cov_matvec_inc_state_t inc;
+    int inc_ok = (tree_cov_matvec_inc_state_init(&inc, sg->ts, n, sg->hap_to_indiv) == 0);
+
     if (!r || !r_tilde || !A || !B || !ws2_accum ||
-        !work || !order_buf || !gv || !cg) {
+        !gv || !cg || !inc_ok) {
         fprintf(stderr, "var_random: out of memory\n");
         goto cleanup;
     }
@@ -495,7 +491,7 @@ void var_random(sargent_t *sg, int silent)
         .ts = sg->ts, .ws2 = sg->ws2, .sigma2 = sg->sigma2,
         .n = n, .S = S, .S_orig = sg->S_orig, .prune_map = sg->prune_map,
         .hap_to_indiv = sg->hap_to_indiv,
-        .work = work, .order_buf = order_buf, .gv = gv,
+        .gv = gv, .inc = &inc,
     };
     hutch_opts_t hopts = {
         .nprobe = nprobe, .batch_size = 0, .use_gaussian = 0, .seed = 0,
@@ -528,8 +524,8 @@ void var_random(sargent_t *sg, int silent)
         A_0 = 0.0;
         for (int i = 0; i < n; i++) A_0 += r_tilde[i] * r_tilde[i];
 
-        compute_quad_all(sg->ts, sg->hap_to_indiv, n, S, sg->S_orig, sg->prune_map,
-                         r_tilde, A, work, order_buf, gv);
+        compute_quad_all(&inc, n, S, sg->S_orig, sg->prune_map,
+                         r_tilde, A, gv);
 
         hutch_trace_all(cg, v_matvec, &vd, sg->ts, sg->hap_to_indiv,
                         n, S, sg->S_orig, sg->prune_map, B, &B_0, &hopts);
@@ -637,13 +633,12 @@ void var_random(sargent_t *sg, int silent)
 
 cleanup:
     cg_state_free(cg);
+    if (inc_ok) tree_cov_matvec_inc_state_free(&inc);
     free(r);
     free(r_tilde);
     free(A);
     free(B);
     free(ws2_accum);
-    free(work);
-    free(order_buf);
     free(gv);
 }
 
@@ -702,15 +697,15 @@ void var_joint(sargent_t *sg, int silent)
     double   *gamma      = malloc((size_t)K * sizeof(double));
     double   *gamma_sum  = malloc((size_t)K * sizeof(double));
 
-    tsk_size_t n_nodes   = tsk_treeseq_get_num_nodes(sg->ts);
-    double    *work      = malloc(2 * n_nodes * sizeof(double));
-    tsk_id_t  *order_buf = malloc(n_nodes * sizeof(tsk_id_t));
     double    *gv        = malloc((size_t)n * sizeof(double));
 
     cg_state_t *cg = cg_state_new(n, NULL);
 
+    tree_cov_matvec_inc_state_t inc;
+    int inc_ok = (tree_cov_matvec_inc_state_init(&inc, sg->ts, n, sg->hap_to_indiv) == 0);
+
     if (!r || !r_tilde || !A || !B || !g || !log_g || !gamma ||
-        !gamma_sum || !work || !order_buf || !gv || !cg) {
+        !gamma_sum || !gv || !cg || !inc_ok) {
         fprintf(stderr, "var_joint: out of memory\n");
         goto cleanup;
     }
@@ -723,7 +718,7 @@ void var_joint(sargent_t *sg, int silent)
         .ts = sg->ts, .ws2 = sg->ws2, .sigma2 = sg->sigma2,
         .n = n, .S = S, .S_orig = sg->S_orig, .prune_map = sg->prune_map,
         .hap_to_indiv = sg->hap_to_indiv,
-        .work = work, .order_buf = order_buf, .gv = gv,
+        .gv = gv, .inc = &inc,
     };
     hutch_opts_t hopts = {
         .nprobe = sg->nprobe, .batch_size = 0, .use_gaussian = 0, .seed = 0,
@@ -764,8 +759,8 @@ void var_joint(sargent_t *sg, int silent)
         /* --- 3. A_0, A[s], B_0, B[s] --- */
         double A_0 = 0.0, B_0 = 0.0;
         for (int i = 0; i < n; i++) A_0 += r_tilde[i] * r_tilde[i];
-        compute_quad_all(sg->ts, sg->hap_to_indiv, n, S, sg->S_orig, sg->prune_map,
-                         r_tilde, A, work, order_buf, gv);
+        compute_quad_all(&inc, n, S, sg->S_orig, sg->prune_map,
+                         r_tilde, A, gv);
         hutch_trace_all(cg, v_matvec, &vd, sg->ts, sg->hap_to_indiv,
                         n, S, sg->S_orig, sg->prune_map, B, &B_0, &hopts);
 
@@ -912,9 +907,10 @@ void var_joint(sargent_t *sg, int silent)
 
 cleanup:
     cg_state_free(cg);
+    if (inc_ok) tree_cov_matvec_inc_state_free(&inc);
     free(r); free(r_tilde); free(A); free(B); free(g);
     free(log_g); free(gamma); free(gamma_sum);
-    free(work); free(order_buf); free(gv);
+    free(gv);
 }
 
 
