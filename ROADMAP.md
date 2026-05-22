@@ -580,11 +580,49 @@ Expected gain from eliminating per-tree fork overhead: approach the 1.83×
 End-to-end gain still limited by the serial advance fraction, but
 likely 1.4–1.7× realistically.
 
-Worth doing after Phase 6 validation is complete.
+**Work plan (explicit deliverable)**:
 
----
+- [ ] Restructure `tree_walker_run_inc` (src/lib/trees.c) so the
+  `#pragma omp parallel` wraps the tree-iteration loop body.  Trees
+  still advance sequentially (the edge-diff updates S[] / our_parent[]
+  in order); use `#pragma omp single` to bracket `_advance` and the
+  visit callback, and `#pragma omp for` to parallelise the per-sample
+  readout.
+- [ ] Drop the `if(n_hap > 1000)` threshold inside `_readout` (no
+  longer needed once fork-join overhead is one-time per matvec).
+- [ ] Validate via the harness (`test/lib/check_tree_matvec`) — output
+  must be bit-identical to single-thread.
+- [ ] Bench wall-time on s42_balanced (n_hap=400), medium (n_hap=2000),
+  and Nurdan (n_hap=400, ~2700 trees).  Compare against the pre-hoist
+  numbers in `PROFILE_PHASE5.md` / `PHASE6_LARGER_SCALE.md`.
+- [ ] If realised speedup is below 1.3× on medium with 8 threads,
+  re-profile to find the next bottleneck before declaring it done.
 
-## Phase 6 — Larger-scale validation (in progress)
+**Sequencing**: schedule after Phase 6 closes out (we have the baseline
+numbers now to gauge against).
+
+### σ² damping convention (var_fixed vs var_joint)
+
+After Phase 4.5 (var_joint) and PR #15 (var_fixed) shipped, the two
+functions use different σ² damping schemes.  This is a design choice,
+not an inconsistency to "fix":
+
+- **var_fixed**: σ² update is the MLE direct form `σ² ← ||r||²/n`.
+  Bounded above by var(y) by construction.  Damping rule: full step
+  on descent, half step on ascent.  Cheap and adequate because the
+  proposal is already in a sane range.
+
+- **var_joint**: σ² update is the Newton-style form `σ² *= A_0/B_0`,
+  where `A_0 = ||V⁻¹r||²` and `B_0 = tr(V⁻¹)` (Hutchinson estimate).
+  The ratio `A_0/B_0` is UNBOUNDED — when V is near-singular CG can
+  produce a wild r̃ and the ratio spikes to 100+.  Damping rule:
+  symmetric ω=0.25 multiplicative + per-iter ratio clipped to
+  [0.5, 2.0] + floor at 0.001·var(y).  Asymmetric-only would allow
+  arbitrarily large ascent steps when V is ill-conditioned.
+
+Both schemes target the same root cause (BayesR mixture-snap cascade)
+but the input dynamics differ.  Code comments in both functions
+cross-reference this design note.
 
 **Goal**: confirm SARGENT works at "moderately large" scales after the
 incremental matvec + Phase 4.5 + OpenMP have all landed.

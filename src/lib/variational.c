@@ -329,7 +329,13 @@ void var_fixed(sargent_t *sg, int silent)
          * Without this, a mixture-snap that zeroes several betas can double
          * σ² in one iteration, driving the cascade that Phase 4.5 (bdce0e6)
          * diagnosed for var_joint — the same instability affects var_fixed at
-         * moderate n (observed: n=1000, p=3340 diverges without the cap).   */
+         * moderate n (observed: n=1000, p=3340 diverges without the cap).
+         *
+         * Note: var_fixed uses the MLE direct update ||r||²/n (bounded by
+         * var(y)), so asymmetric damping suffices.  var_joint uses a Newton
+         * step σ² *= A_0/B_0 whose ratio can be unbounded; it needs
+         * additional symmetric + clip damping.  See ROADMAP "σ² damping
+         * convention" subsection for the design rationale. */
         double rr = 0.0;
         for (int i = 0; i < n; i++) rr += r[i] * r[i];
         double sigma2_raw = rr / n;
@@ -915,7 +921,13 @@ void var_joint(sargent_t *sg, int silent)
          *      V is dominated by the random component (ws² >> σ²) and CG
          *      is ill-conditioned, which is exactly what drives the
          *      A_0/B_0 swings.  Keeping σ² above the floor keeps V away
-         *      from singularity. */
+         *      from singularity.
+         *
+         * Note: differs from var_fixed's asymmetric (full-step descent /
+         * half-step ascent) σ² damping.  Both target the same root cause
+         * (BayesR mixture-snap cascade) but var_joint's Newton-ratio
+         * proposal is unbounded above so it needs the symmetric+clip form.
+         * See ROADMAP "σ² damping convention" subsection. */
         const double EM_DAMP_SIGMA = 0.25;
         if (B_0 > 0.0) {
             double ratio = A_0 / B_0;
