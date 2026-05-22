@@ -553,85 +553,171 @@ Worth doing *after* the re-profile if matvec stays in the top three.
 
 ---
 
-## Phase 6 — Larger-scale validation
+## Phase 6 — Larger-scale validation (in progress)
 
 **Goal**: confirm SARGENT works at "moderately large" scales after the
-incremental matvec.
+incremental matvec + Phase 4.5 + OpenMP have all landed.
 
 ### Test sets
 
-- **Larger scale**: n=1000, L=5 Mb (~10k trees), bed_coverage ∈
-  {1.0, 0.3, 0.1}, balanced h², 3–5 seeds.
-- **X-larger** (stretch goal): n=2000, L=10 Mb. Probably only feasible
-  with the incremental matvec optimisation.
+- **Medium**: n=1000, L=1 Mb, ~3000 trees, bed_coverage=1.0, balanced
+  h².  Already simulated; desktop running the multi-thread × mode matrix.
+- **Larger**: n=2000, L=2 Mb, ~6000 trees, bed_coverage=1.0, balanced h².
+  Tentative; desktop will fork this if Medium results look clean.
+- **Original target** (deferred): n=1000-2000, L=5-10 Mb (10k+ trees).
+  Only feasible after additional perf work.
 
 ### Metrics
 
-Same as Phase 3 for each mode, plus:
-- Wall time per case for each mode (pre- and post-incremental optimisation).
-- Memory footprint.
+For each (case × mode × threads):
+- Wall time end-to-end.
+- h² values (snp/arg/total) vs realised truth in `params.json`.
+- OpenMP speedup ratio (`OMP_NUM_THREADS=1` baseline vs default).
+- Phase 4.5 polish behaviour (clean vs divergence-revert).
 
 ### Deliverables
 
-- [ ] Larger-scale benchmark report in `summary.md`
-- [ ] Demonstrated that prediction R² and h² values don't shift
-  with scale (within multi-seed noise)
+- [ ] `test/profiling/PHASE6_LARGER_SCALE.md` from the desktop run.
+- [ ] OpenMP investigation if the multi-thread speedup is below
+  expectation (microbench predicted ~1.5-1.8× on n_haps=2000).
+- [ ] Update this ROADMAP entry with measured numbers.
 
 ---
 
-## Phase 6b — SV-flavoured unobserved-variants simulation
+## Phase 6b — SV-flavoured unobserved-variants simulation (simulator done 2026-05-21)
 
-**Goal**: a more realistic missing-heritability simulation in which
-typed SNPs are present at reasonable density *and* a separate class of
-unobserved variants is generated with larger / more variable effect
-sizes (a stand-in for structural variants).  The expectation is that
-the ARG random component carries the unobserved-variant contribution,
-giving SARGENT a clearer win over BayesR than the current
-bed-coverage-subsampling scheme.
+**Goal**: missing-heritability simulation in which typed SNPs are
+present at reasonable density *and* a separate class of unobserved
+variants is generated with larger / more variable effect sizes
+(stand-in for structural variants).  The expectation is that the ARG
+random component carries the unobserved-variant contribution, giving
+SARGENT a clearer win over BayesR than the bed-coverage-subsampling
+scheme.
 
-### Why this is interesting
+Causal classes:
+- **Class S (SNPs)**: typed, BayesR-prior effect sizes
+  (spike-and-slab, mostly small).
+- **Class U (unobserved)**: not in the BED, larger effects from
+  Gaussian or Laplace at `--unobs-effect-scale × √max(σ²_mix)`
+  (default 5×).  Stand-in for SVs and rare large-effect alleles.
 
-Current simulator: all causal variants are common SNPs; missing
-heritability is induced by dropping a fraction $f$ from the BED.  This
-penalises BayesR but the "unseen" variants have the same effect-size
-distribution as the seen ones.
+### What's done (PRs #12 + #13)
 
-Proposed: two distinct causal classes:
-- **Class S (SNPs)**: typed, BayesR-prior effect sizes (small-to-moderate,
-  spike-and-slab).
-- **Class U (unobserved)**: not in the BED, larger and more dispersed
-  effect-size distribution (e.g. Laplace or scaled-t with heavier tail);
-  represents structural variants and rare large-effect alleles.
+- `scripts/simulate.py` extended with `--h2-unobs`, `--n-unobs-causal`,
+  `--unobs-effect-dist {gaussian,laplace}`, `--unobs-effect-scale`.
+- Class U sites carved out of the polymorphic pool BEFORE causal_idx
+  and force-excluded from the BED panel regardless of `--bed-coverage`.
+- `params.json` carries `h2_unobs_target / h2_unobs_realised`,
+  `n_unobs_causal`, `unobs_effect_dist`, `unobs_effect_scale`.
+- Companion `--causal-fraction` flag (PR #12) defaults to 1% (SBayesR
+  canonical), so SNP-causal scales with the BED-eligible variant count.
 
-Heritability split: choose $h^2_S$, $h^2_U$, $\sigma^2$.  Class U is
-exactly the heritability the ARG component must recover.
+### Open follow-ups (deferred per user review)
 
-### Work items
+- [ ] `predict.py` / `run_suite.py` recognising `h2_unobs_target` and
+  reporting SV recovery alongside h²_snp / h²_arg.
+- [ ] `test/eval/sv_sweep.sh` — sweep over h²_S / h²_U grid at fixed
+  coverage and density.  Aggregates as the Phase 3 overnight sweep does.
+- [ ] MAF-conditional SV sampling (real SVs are MAF-skewed; currently
+  uniform draw from the polymorphic pool).
+- [ ] Scaled-t SV distribution as a third option besides Gaussian
+  and Laplace.
+- [ ] Per-effect-scale variation (each SV draws its own scale rather
+  than sharing one).
 
-- [ ] Extend `scripts/simulate.py`: new flags `--h2-unobs <h2>` and
-  `--unobs-effect-dist {laplace,t,custom}` and `--unobs-effect-scale`.
-- [ ] Class U sites are sampled from the tree-sequence variants but
-  excluded from the BED before writing.
-- [ ] `params.json` carries `h2_unobs_target` / `h2_unobs_realised`
-  alongside the existing fields.
-- [ ] Update `predict.py` to recognise the new params field (no
-  algorithm change — SARGENT's job is to recover this without knowing
-  the partition).
-- [ ] Add `test/eval/sv_sweep.sh` — a sweep over $h^2_S / h^2_U$ at
-  fixed coverage and density.  Aggregate as before.
+### Success criterion (validated in Phase 6c)
+
+At "small h²_S, large h²_U, dense SNPs": SARGENT should beat both
+BayesR-only and ARG-BLUP-uniform.  If it doesn't, that signals the
+per-segment ws² structure isn't buying us anything beyond a single
+ARG-wide variance component.
+
+---
+
+## Phase 6c — Method comparison on Phase 6b SV simulations
+
+**Goal**: systematic comparison of SARGENT vs baseline methods on
+the SV-flavoured simulator, to demonstrate (or refute) the polygenic
+recovery story.
+
+### Methods to compare
+
+For each Phase 6b case (h²_S / h²_U grid):
+
+- BayesR-only (SNP fit; current `predict.py` baseline).
+- GBLUP (single variance component on standard kinship).
+- ARG-BLUP-uniform (single ARG random component, no per-tree weights).
+- **Sequential SARGENT** (current default).
+- **Joint EM polish** (Phase 4.5 `--em N`).
+
+Each compared on:
+
+- Prediction R² (held-out test set).
+- h²_snp / h²_arg recovery vs realised truth.
+- h²_unobs recovery (specifically: how much of the SV-class variance
+  does the ARG random component pick up?).
+- Wall time.
+
+### Deliverables
+
+- [ ] Method-comparison harness (`test/eval/sv_sweep.sh`) — Phase 6b
+  follow-up to extend.
+- [ ] Aggregator script (`overnight_aggregate.py` equivalent for
+  Phase 6c outputs).
+- [ ] One-page summary (`test/eval/phase6c_summary.md`) with the
+  comparison plot.
 
 ### Success criterion
 
-At the parameter combination "small h²_S, large h²_U, dense SNPs",
-SARGENT should beat both BayesR and ARG-BLUP-uniform.  If it doesn't,
-that's a signal that the per-segment $w_s^2$ structure isn't actually
-buying us anything beyond a single ARG-wide variance component, and
-we'd need to rethink the random model.
+SARGENT (sequential or polish) Pareto-dominates the simpler baselines
+on the high-h²_U cases, and matches them on the low-h²_U cases.  If
+it doesn't, this is the empirical falsification of the
+per-segment-weights approach.
 
 ### Dependencies
 
-- Sits after Phase 6 (large-scale validation) in the *committed*
-  ordering, but can be developed earlier as desktop work.
+- Phase 6b simulator (done) + the predict.py / sv_sweep.sh follow-ups
+  listed above.
+
+---
+
+## Phase 6d — Comparison with Nurdan's R implementation
+
+**Goal**: head-to-head benchmark of SARGENT (C) against Nurdan's R
+implementation on the same input cases.  Two axes:
+
+1. **Accuracy**: do the two implementations produce comparable h²
+   estimates and prediction R² on the same input?
+2. **Speed**: SARGENT's wall time is currently slower than expected
+   for a compiled C implementation.  Find out whether it actually
+   beats the R code; if not, why.
+
+### Work items
+
+- [ ] Obtain a runnable copy of Nurdan's R code and its required
+  R packages (likely `phasta` / `tskit-r` / custom).
+- [ ] Identify a small set of canonical test cases that both
+  implementations can run unchanged (likely the existing Nurdan
+  smoke case is the natural starting point).
+- [ ] Run both implementations on each case; record h² values,
+  prediction R² (if applicable), and wall time.
+- [ ] Tabulate side-by-side; document any algorithmic differences
+  that might explain divergence.
+
+### Hypotheses to test
+
+- C should be faster than R for the matvec-dominated cost (chunk 4
+  delivered 2× over Phase 4 baseline; R interpreter overhead per
+  tree-walk should be much larger).
+- If C is NOT faster, suspect: (a) we're doing more iterations than
+  R is, (b) we're doing more probes / matvecs per iteration, (c)
+  the R code has a numerical trick we're missing.
+
+### Deliverables
+
+- [ ] Side-by-side benchmark table in `test/eval/phase6d_r_vs_c.md`.
+- [ ] If C is slower, identify the root cause and either fix it or
+  document it.
 
 ---
 
@@ -680,6 +766,58 @@ cheaper.
 
 ---
 
+## Phase 8 — Manuscript update
+
+**Goal**: bring the manuscript in line with all the features and
+findings from Phases 1-7 once the validation rounds are complete.
+
+### Sections needing attention
+
+- Joint EM mode: document the Phase 4.5 warm-start design, the BayesR
+  mixture-snap diagnosis, and the divergence-revert safety net.  Note
+  the known limitation (cold-start joint EM is unreliable at scale).
+- Identifiability framing: capture the "h²_snp = SNP-prioritised fit,
+  h²_arg = additional ARG-recovered variance" interpretation that
+  Phase 1 settled on.
+- SV-flavoured simulator (Phase 6b) as a test bed for missing-
+  heritability recovery; results from Phase 6c if they support the
+  per-segment-weights design.
+- Method-comparison story from Phase 6c (SARGENT vs BayesR / GBLUP /
+  ARG-BLUP-uniform).
+- Drop the MoM section (module deleted on 2026-05-20; never shipped).
+- Localization section (only after Phase 7).
+
+### Dependencies
+
+- Should follow Phase 6c (method comparison) and Phase 6d (R-vs-C
+  benchmark) so the empirical claims are grounded.
+- Phase 7 (localization) can be a follow-up paper if too much to
+  fit in this revision.
+
+---
+
+## Phase 9 — Cleanup before publication
+
+**Goal**: code quality and reproducibility pass before the manuscript
+goes out / the code goes public.
+
+### Items
+
+- [ ] Documentation: README.md + sargent_help.txt currently fragmented;
+  accumulated flags (`--em`, `--sequential`, `--pheno-col`,
+  `--causal-fraction`, `--h2-unobs`, `--unobs-effect-{dist,scale}`,
+  `--n-unobs-causal`) need a coherent top-level summary.
+- [ ] Automated test / CI: `test/lib/check_tree_matvec` and `smoke.sh`
+  exist but don't run on push.  GitHub Actions workflow that runs at
+  least the smoke harness + a tiny `--sequential` smoke test.
+- [ ] Dead-code / consistency pass: months of fast development have
+  left some dead branches and inconsistent naming.  One careful read
+  to catch them.
+- [ ] Verify Nurdan's pipeline still works end-to-end with
+  `import_nurdan.py` after all the post-Phase-3.5 changes.
+
+---
+
 ## Cross-cutting concerns
 
 ### Manuscript revisions
@@ -688,10 +826,10 @@ In progress (Adam editing manually):
 - [x] Revision 1: Stage 2 algorithm description updated to reflect
   per-segment REML EM (in `main.tex`, uncommitted).
 - [x] Revision 3: PR averaging documented (in `main.tex`, uncommitted).
-- [ ] Add description of the joint-EM mode (if we want to keep it
-  documented).
-- [ ] Add MoM section once Phase 1 is done.
-- [ ] Add localization section once Phase 7 is done.
+- [ ] Joint EM mode (Phase 4.5) — see Phase 8.
+- [ ] MoM section: drop (module deleted 2026-05-20).
+- [ ] Localization section — Phase 7.
+- [ ] SV simulator + method comparison — Phase 8.
 
 ### Test data conventions
 
