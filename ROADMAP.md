@@ -539,17 +539,48 @@ These cost only `if` statements and one extra norm computation per iter.
 
 ### OpenMP over per-sample walks
 
-The per-sample walk-up `for hi in 0..n_haps: ...` in
-`tree_cov_matvec_inc_readout` is embarrassingly parallel — each sample's
-accumulation is independent.  At n_haps=2000 (medium) or biobank scale,
-this is 4–8× on a multicore laptop, more on a workstation.
+**Current state (Phase 5.5, shipped 2026-05-21):** A `#pragma omp parallel for`
+is already in `tree_cov_matvec_inc_readout`, gated on `n_hap > 1000`.
+Measured speedup on n=1000 (n_hap=2000): ~1.1–1.3× end-to-end with default
+threads (observed via `top`: processes barely exceed 100% CPU even with 4+
+threads set).
 
-- Requires no new state; OpenMP `#pragma omp parallel for` over the
-  outer loop, `reduction(+:out[:n_indiv])` for the accumulator.
-- Build already links libomp.dylib on macOS.
+**Why so little gain — two structural problems:**
 
-This is the biggest theoretical multiplier currently sitting unused.
-Worth doing *after* the re-profile if matvec stays in the top three.
+1. **Per-tree fork-join overhead.**  The parallel region is entered once per
+   tree per matvec call (~2946 trees × ~50–200 CG iterations = millions of
+   spawns).  Each spawn costs ~1–10 µs; the work per thread is comparable
+   (~250 haps × depth-10 = 2500 multiply-adds).  Overhead dominates.
+
+2. **Only readout is parallelised; advance is serial.**  `_advance` (edge-diff
+   S[u] updates) has chained pointer dependencies through `our_parent[]` and
+   cannot be trivially parallelised.  It accounts for a non-trivial fraction
+   of walker time at low per-tree readout work.
+
+**Correct fix:** hoist the `omp parallel` to `tree_walker_run_inc` so the
+thread team is created **once per matvec call**, then reuse it across all
+trees with `#pragma omp for` inside readout:
+
+```c
+#pragma omp parallel  /* once per matvec — keep team alive across trees */
+{
+    while (advance tree) {
+        #pragma omp single  /* serial advance; team waits */
+        tree_cov_matvec_inc_advance(inc, &tree);
+        #pragma omp for     /* parallel readout; reuses team */
+        for (hi = 0; hi < n_hap; hi++) { ... }
+        #pragma omp single  /* serial visit callback */
+        visit(gv, n, ...);
+    }
+}
+```
+
+Expected gain from eliminating per-tree fork overhead: approach the 1.83×
+(8-thread) speedup on readout that was measured in Phase 5.5 benchmarks.
+End-to-end gain still limited by the serial advance fraction, but
+likely 1.4–1.7× realistically.
+
+Worth doing after Phase 6 validation is complete.
 
 ---
 
