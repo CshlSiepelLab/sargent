@@ -126,7 +126,15 @@ def main():
     ap.add_argument("--Ne",          type=float, default=1e4,  help="effective population size")
     ap.add_argument("--h2-snp",    type=float, default=0.3,  help="target fixed-effect heritability")
     ap.add_argument("--h2-arg",   type=float, default=0.3,  help="target random-effect heritability")
-    ap.add_argument("--n-causal",    type=int,   default=20,   help="number of causal SNPs (fixed effects)")
+    ap.add_argument("--n-causal",    type=int,   default=None,
+                    help="number of causal SNPs (fixed effects).  If unset, defaults to "
+                         "max(20, int(--causal-fraction * n_variants)).  An explicit value "
+                         "takes priority over --causal-fraction.")
+    ap.add_argument("--causal-fraction", type=float, default=0.01,
+                    help="fraction of polymorphic variants that are causal SNPs "
+                         "(default 0.01 = 1%%, matches SBayesR's canonical scenario for human "
+                         "polygenic traits; typical GWAS-polygenic range is 0.01-0.10).  "
+                         "Overridden by an explicit --n-causal.")
     ap.add_argument("--bed-coverage", type=float, default=1.0,
                     help="fraction of polymorphic SNPs to keep in the BED file (0 < f <= 1). "
                          "Hidden SNPs still contribute to y via their true β and remain in the "
@@ -167,6 +175,8 @@ def main():
     elif args.tau2_frac is None or args.phi_mix is None:
         sys.exit("ERROR: --tau2-frac and --phi-mix must be given together")
 
+    if not (0.0 < args.causal_fraction <= 1.0):
+        sys.exit("ERROR: --causal-fraction must satisfy 0 < f <= 1")
     if args.h2_snp + args.h2_arg > 1.0:
         sys.exit("ERROR: h2_snp + h2_arg must be ≤ 1")
     if args.h2_snp < 0 or args.h2_arg < 0:
@@ -267,7 +277,13 @@ def main():
         sys.exit(f"ERROR: pi_mix length {len(pi_mix)} != sigma2_mix length {K}")
     pi_mix /= pi_mix.sum()
 
-    n_causal = min(args.n_causal, p)
+    # Resolve n_causal: explicit --n-causal wins; otherwise derive from
+    # --causal-fraction.  Floor at 20 SNPs so very small simulations
+    # don't get pathologically few causal variants.
+    if args.n_causal is not None:
+        n_causal = min(args.n_causal, p)
+    else:
+        n_causal = min(max(20, int(args.causal_fraction * p)), p)
     causal_idx = rng.choice(p, size=n_causal, replace=False)
     causal_idx.sort()
 
