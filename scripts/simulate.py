@@ -141,6 +141,23 @@ def main():
                          "ARG/.trees output. Default: 1.0 (no hiding).")
     ap.add_argument("--seed",        type=int,   default=42,   help="random seed")
     ap.add_argument("--out",         type=str,   default="sim", help="output prefix")
+    # Phase 6b: SV-flavoured unobserved-variants class.  Variants are sampled
+    # from the polymorphic-variant pool and EXCLUDED from the BED, then assigned
+    # effect sizes from a heavier-tailed distribution.  Their contribution to y
+    # is missing heritability that SARGENT's ARG random component should recover
+    # but the SNP fit cannot.
+    ap.add_argument("--h2-unobs",    type=float, default=0.0,
+                    help="target heritability for unobserved (SV-style) variants "
+                         "(default 0 = disabled)")
+    ap.add_argument("--n-unobs-causal", type=int, default=10,
+                    help="number of unobserved-class causal variants (only used "
+                         "when --h2-unobs > 0)")
+    ap.add_argument("--unobs-effect-dist", type=str, default="gaussian",
+                    choices=["gaussian", "laplace"],
+                    help="effect-size distribution for unobserved variants (default: gaussian)")
+    ap.add_argument("--unobs-effect-scale", type=float, default=5.0,
+                    help="effect-size SD multiplier (relative to BayesR slab) for "
+                         "unobserved variants -- larger = more SV-like (default: 5.0)")
     # BayesR-style mixture for fixed effects (sigma² relative to var_pheno=1)
     ap.add_argument("--sigma2-mix",  type=float, nargs="+",
                     default=[0.0, 1e-4, 1e-3, 1e-2],
@@ -177,12 +194,14 @@ def main():
 
     if not (0.0 < args.causal_fraction <= 1.0):
         sys.exit("ERROR: --causal-fraction must satisfy 0 < f <= 1")
-    if args.h2_snp + args.h2_arg > 1.0:
-        sys.exit("ERROR: h2_snp + h2_arg must be ≤ 1")
-    if args.h2_snp < 0 or args.h2_arg < 0:
+    if args.h2_snp + args.h2_arg + args.h2_unobs > 1.0:
+        sys.exit("ERROR: h2_snp + h2_arg + h2_unobs must be ≤ 1")
+    if args.h2_snp < 0 or args.h2_arg < 0 or args.h2_unobs < 0:
         sys.exit("ERROR: heritabilities must be non-negative")
     if not (0.0 < args.bed_coverage <= 1.0):
         sys.exit("ERROR: --bed-coverage must satisfy 0 < f <= 1")
+    if args.h2_unobs > 0 and args.n_unobs_causal <= 0:
+        sys.exit("ERROR: --h2-unobs > 0 requires --n-unobs-causal > 0")
 
     rng = np.random.default_rng(args.seed)
 
@@ -248,16 +267,37 @@ def main():
     # so the bed-coverage draw does not perturb the phenotype-generation rng state.
     # This guarantees that fixing --seed produces identical β, ws², and y across
     # different --bed-coverage values — only the BED panel itself changes.
+    # Phase 6b: when h2_unobs > 0, carve out unobserved-causal variants FIRST so
+    # they are guaranteed disjoint from the SNP causal set and force-excluded
+    # from the BED below.  Done here (before bed_mask) so the bed_mask draw
+    # can exclude them.  Default (h2_unobs=0) keeps the legacy behaviour.
+    if args.h2_unobs > 0:
+        n_unobs_causal = min(args.n_unobs_causal, p)
+        unobs_idx = rng.choice(p, size=n_unobs_causal, replace=False)
+        unobs_idx.sort()
+        unobs_set = set(unobs_idx.tolist())
+        remaining = np.array([j for j in range(p) if j not in unobs_set])
+    else:
+        n_unobs_causal = 0
+        unobs_idx = np.zeros(0, dtype=int)
+        remaining = np.arange(p)
+
     if args.bed_coverage < 1.0:
         bed_rng = np.random.default_rng(args.seed + 1_000_003)
         bed_mask = bed_rng.random(p) < args.bed_coverage
-        if not bed_mask.any():
-            sys.exit("ERROR: bed-coverage produced an empty BED panel; raise f")
-        n_bed = int(bed_mask.sum())
-        print(f"  Keeping {n_bed}/{p} variants in BED ({100*n_bed/p:.1f}%)", flush=True)
     else:
         bed_mask = np.ones(p, dtype=bool)
-        n_bed = p
+
+    # Phase 6b: unobserved-class variants are never in the BED, regardless of
+    # coverage f.  Force-exclude them after the f-coverage draw.
+    if args.h2_unobs > 0:
+        bed_mask[unobs_idx] = False
+
+    if not bed_mask.any():
+        sys.exit("ERROR: bed mask produced an empty BED panel; raise --bed-coverage")
+    n_bed = int(bed_mask.sum())
+    if args.bed_coverage < 1.0 or args.h2_unobs > 0:
+        print(f"  Keeping {n_bed}/{p} variants in BED ({100*n_bed/p:.1f}%)", flush=True)
 
     # Standardize dosage to match SARGENT's GENO_STANDARDIZE (zero-mean, unit-variance).
     # betas are therefore in units of per-s.d. of genotype, consistent with inference.
@@ -279,12 +319,15 @@ def main():
 
     # Resolve n_causal: explicit --n-causal wins; otherwise derive from
     # --causal-fraction.  Floor at 20 SNPs so very small simulations
-    # don't get pathologically few causal variants.
+    # don't get pathologically few causal variants.  unobs_idx / remaining
+    # are computed above (before bed_mask) so the SV-class carve-out is
+    # disjoint from the SNP causal set.
     if args.n_causal is not None:
-        n_causal = min(args.n_causal, p)
+        n_causal_target = min(args.n_causal, len(remaining))
     else:
-        n_causal = min(max(20, int(args.causal_fraction * p)), p)
-    causal_idx = rng.choice(p, size=n_causal, replace=False)
+        n_causal_target = min(max(20, int(args.causal_fraction * p)), len(remaining))
+    n_causal = n_causal_target
+    causal_idx = rng.choice(remaining, size=n_causal, replace=False)
     causal_idx.sort()
 
     beta = np.zeros(p)
@@ -334,14 +377,41 @@ def main():
         y_random[:] = 0.0
         ws2_vec[:]  = 0.0
 
+    # ---- 4b. Unobserved (SV-style) class (Phase 6b; default off) ----------
+    # Variants are carved out of the BED and contribute to y via heavier-tail
+    # effect sizes (gaussian or laplace scaled by --unobs-effect-scale).  The
+    # contribution looks like missing heritability to SARGENT's SNP fit but
+    # should be at least partially recoverable by the ARG random component
+    # via the linkage structure shared between unobs variants and BED variants.
+    y_unobs   = np.zeros(n_indiv)
+    beta_unobs = np.zeros(p)
+    if args.h2_unobs > 0 and n_unobs_causal > 0:
+        # Scale relative to the BayesR-slab SD (= sqrt of largest sigma2_mix).
+        slab_sd = math.sqrt(max(sigma2_mix))
+        scale   = args.unobs_effect_scale * slab_sd
+        if args.unobs_effect_dist == "gaussian":
+            eff = rng.normal(0.0, scale, size=n_unobs_causal)
+        else:  # laplace
+            # Laplace(0, b) has var = 2b² ⇒ b = scale/sqrt(2) to match Gaussian variance.
+            eff = rng.laplace(0.0, scale / math.sqrt(2), size=n_unobs_causal)
+        beta_unobs[unobs_idx] = eff
+        y_unobs = dosage_std.T @ beta_unobs
+
+        var_unobs = float(np.var(y_unobs))
+        if var_unobs > 0:
+            scale_u = math.sqrt(args.h2_unobs / var_unobs)
+            beta_unobs *= scale_u
+            y_unobs    *= scale_u
+
     # ---- 5. Residual noise and final phenotype ----------------------------
-    sigma2 = max(0.0, 1.0 - args.h2_snp - args.h2_arg)
+    sigma2 = max(0.0, 1.0 - args.h2_snp - args.h2_arg - args.h2_unobs)
     y_noise = rng.normal(0.0, math.sqrt(sigma2) if sigma2 > 0 else 0.0, size=n_indiv)
-    y = y_fixed + y_random + y_noise
+    y = y_fixed + y_random + y_unobs + y_noise
 
     # Realised heritabilities (from rescaled components, before noise is added)
-    h2_snp_realised  = float(np.var(y_fixed)  / np.var(y)) if np.var(y) > 0 else 0.0
-    h2_arg_realised = float(np.var(y_random) / np.var(y)) if np.var(y) > 0 else 0.0
+    h2_snp_realised   = float(np.var(y_fixed)  / np.var(y)) if np.var(y) > 0 else 0.0
+    h2_arg_realised   = float(np.var(y_random) / np.var(y)) if np.var(y) > 0 else 0.0
+    h2_unobs_realised = float(np.var(y_unobs)  / np.var(y)) if np.var(y) > 0 else 0.0
 
     # ---- 6. Write outputs -------------------------------------------------
     print(f"Writing outputs with prefix '{args.out}' ...", flush=True)
@@ -436,10 +506,15 @@ def main():
         "mut_rate":        args.mut_rate,
         "Ne":              args.Ne,
         "seed":            args.seed,
-        "h2_snp_target":  args.h2_snp,
-        "h2_arg_target": args.h2_arg,
-        "h2_snp_realised":  h2_snp_realised,
-        "h2_arg_realised": h2_arg_realised,
+        "h2_snp_target":   args.h2_snp,
+        "h2_arg_target":   args.h2_arg,
+        "h2_unobs_target": args.h2_unobs,
+        "h2_snp_realised":   h2_snp_realised,
+        "h2_arg_realised":   h2_arg_realised,
+        "h2_unobs_realised": h2_unobs_realised,
+        "n_unobs_causal":    n_unobs_causal,
+        "unobs_effect_dist":  args.unobs_effect_dist if args.h2_unobs > 0 else None,
+        "unobs_effect_scale": args.unobs_effect_scale if args.h2_unobs > 0 else None,
         "sigma2":          sigma2,
         "regime":          args.regime,
         "sigma2_mix":      list(sigma2_mix),
@@ -462,7 +537,11 @@ def main():
     print(f"  n_variants       : {p}")
     print(f"  n_causal (fixed) : {n_causal}")
     print(f"  h2_snp  target / realised : {args.h2_snp:.3f} / {h2_snp_realised:.4f}")
-    print(f"  h2_arg target / realised : {args.h2_arg:.3f} / {h2_arg_realised:.4f}")
+    print(f"  h2_arg  target / realised : {args.h2_arg:.3f} / {h2_arg_realised:.4f}")
+    if args.h2_unobs > 0:
+        print(f"  h2_unobs target / realised : {args.h2_unobs:.3f} / {h2_unobs_realised:.4f}  "
+              f"(n_unobs_causal={n_unobs_causal}, dist={args.unobs_effect_dist}, "
+              f"scale={args.unobs_effect_scale})")
     print(f"  sigma2           : {sigma2:.4f}")
 
 
