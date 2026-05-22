@@ -298,10 +298,17 @@ void var_fixed(sargent_t *sg, int silent)
                 beta_new     += gamma[k] * mu_jk;
             }
 
-            sg->beta[j] = beta_new;
+            /* Damped update: β ← ½β_old + ½β_posterior.
+             * Prevents the BayesR mixture-snap cascade (same root cause as
+             * var_joint Phase 4.5 fix, commit bdce0e6): a SNP flipping
+             * components makes a discontinuous residual jump that destabilises
+             * σ².  Half-stepping makes each transition gradual; convergence
+             * takes more iterations but stays stable when p >> n.           */
+            double beta_damped = 0.5 * beta_old + 0.5 * beta_new;
+            sg->beta[j] = beta_damped;
 
-            /* Update residual: subtract new contribution */
-            for (int i = 0; i < n; i++) r[i] -= beta_new * g[i];
+            /* Update residual using the damped beta actually committed */
+            for (int i = 0; i < n; i++) r[i] -= beta_damped * g[i];
 
             /* Accumulate responsibilities for π update */
             for (int k = 0; k < K; k++) gamma_sum[k] += gamma[k];
@@ -316,12 +323,20 @@ void var_fixed(sargent_t *sg, int silent)
                 sg->pi_mix[k] = gamma_sum[k] / n_read;
         }
 
-        /* Update residual variance: σ² = r^T r / n */
+        /* Update residual variance: σ² = r^T r / n, with damped upward moves.
+         * Downward moves are accepted in full (they represent genuine descent).
+         * Upward moves are half-stepped: σ²_new ← ½σ²_old + ½(rr/n).
+         * Without this, a mixture-snap that zeroes several betas can double
+         * σ² in one iteration, driving the cascade that Phase 4.5 (bdce0e6)
+         * diagnosed for var_joint — the same instability affects var_fixed at
+         * moderate n (observed: n=1000, p=3340 diverges without the cap).   */
         double rr = 0.0;
         for (int i = 0; i < n; i++) rr += r[i] * r[i];
-        sg->sigma2 = rr / n;
-        if (sg->sigma2 < 1e-10 * var_y)
-            sg->sigma2 = 1e-10 * var_y;  /* floor to avoid u_bar → ∞ */
+        double sigma2_raw = rr / n;
+        if (sigma2_raw < 1e-10 * var_y) sigma2_raw = 1e-10 * var_y;
+        sg->sigma2 = (sigma2_raw < sg->sigma2)
+                     ? sigma2_raw                             /* downward: full step */
+                     : 0.5 * sg->sigma2 + 0.5 * sigma2_raw; /* upward:   half step */
 
         /* Update h2_snp: fraction of phenotypic variance explained by X β̂ */
         sg->h2_snp  = (var_y > 0.0) ? 1.0 - sg->sigma2 / var_y : 0.0;
