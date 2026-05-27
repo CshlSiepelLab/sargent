@@ -1,11 +1,20 @@
 # SARGENT — Development Roadmap
 
-Last updated: 2026-05-19.
+Last updated: 2026-05-27.
 
 This document captures the agreed plan for finalising SARGENT. The
 priority order is **correctness first, scale later**. We finish each
 algorithmic mode at small scale, validate it, then tackle the engineering
 optimisations needed for biobank scale.
+
+> **2026-05-27 strategic re-evaluation.** A full review of code, results,
+> and manuscript concluded that the distinctive per-segment `ws²` machinery
+> has not yet beaten ARG-BLUP-uniform on *any* experiment, and that the
+> fixed/random decomposition and fine-scale localization claims are not
+> supported. The two concrete follow-ups agreed are **Phase 10 (oracle
+> diagnostic)** and **Phase 11 (hierarchical-centering + sparse-fused-lasso
+> `ws²` redesign)** — see the new sections at the end of this file. These
+> now take priority over the open items in Phases 6b/6c/7.
 
 If this session is interrupted, restart from the next un-checked item.
 
@@ -919,3 +928,226 @@ In progress (Adam editing manually):
   want a different default than the iterative algorithms.
 - How to handle missing genotypes (currently the BED reader expects
   complete data).
+
+---
+
+## Phase 10 — Oracle diagnostic: is per-segment `ws²` worth rescuing? (NEXT)
+
+**Goal**: settle, cheaply and decisively, *before* any new modeling, whether
+heterogeneous per-segment weights can ever beat ARG-BLUP-uniform — and if so,
+whether the gap is a *ceiling* problem (the truth is flat) or an *estimation*
+problem (the truth is heterogeneous but we can't recover it).
+
+### Why (diagnosis from the 2026-05-27 re-evaluation)
+
+In every experiment to date, SARGENT ≈ ARG-BLUP-uniform. The corrected
+explanation is **information starvation, not collinearity**: each local tree
+spans a tiny slice of the genome and carries ~`h²/S` of trait variance, so
+the per-segment Fisher information is `~1/S²` (the manuscript's `O(n²/S²)`
+score), while the phenotype supplies only ~`n` independent constraints to
+split across `S` weights → `~n/S` of information per weight, hopeless when
+`S ≫ n`. This holds *whether or not* the `Gₛ` are collinear — individual
+`Gₛ` are in fact rich and distinct (only adjacent trees are strongly
+correlated, decaying over a few recombinations); it is the *aggregate*
+kinship that is near-rank-1, not each `Gₛ`.
+
+Two independent reasons SARGENT ≈ uniform, which this phase separates:
+1. **Estimation starvation** — per-tree `ws²` is unrecoverable → fitted
+   weights collapse to uniform-plus-noise.
+2. **Architecture flatness** — we have only ever simulated *diffuse*
+   architectures, for which the *true* `ws²` is ~constant and even an oracle
+   ties uniform. The favorable regime (sparse large-effect regions in a
+   large-Nₑ, weakly-structured ARG) has never been tested.
+
+### Experiment
+
+Simulate in a **large-Nₑ, weakly-structured** coalescent (rich, distinct
+local trees). Two architectures:
+- **(i) diffuse** — effects spread ~uniformly across segments (current default).
+- **(ii) sparse large-effect** — a handful of contiguous regions carry most
+  of `h²_arg`; rest ~null. This is the regime the method *should* favour.
+
+For each, compare prediction (OOS R²) **and** local-`h²` recovery under:
+- **oracle** `ws²` (the true per-segment weights from the simulation),
+- **uniform** `ws²` (ARG-BLUP-uniform),
+- **estimated** `ws²` (current per-tree REML EM).
+
+### Decision rule
+
+- **oracle ≈ uniform even on (ii)** → per-segment idea is *fundamentally*
+  limited for prediction; retire it for prediction, keep only as coarse
+  local-`h²` inference. Pivot the paper to the transfer/kinship story.
+- **oracle ≫ uniform on (ii) but estimated ≈ uniform** → it is an
+  *estimation* problem with a real ceiling to chase → proceed to Phase 11.
+
+### Deliverables
+
+- [ ] `scripts/simulate.py`: a `--ws2-architecture {diffuse,sparse}` knob (or
+      reuse the SV/unobserved machinery) that emits the **true per-segment
+      `ws²`** to `params.json` for oracle scoring.
+- [ ] `test/eval/oracle_ws2.{sh,py}` — runs oracle / uniform / estimated and
+      tabulates OOS R² + local-`h²` recovery for both architectures.
+- [ ] `test/eval/phase10_oracle.md` — the ceiling-vs-estimation verdict.
+
+> Shares scaffolding with the cross-distance "linchpin" simulation
+> (two-population coalescent, tunable split time) used to test whether the
+> SNP+ARG hybrid beats plain ARG-BLUP *in transfer* — build them together.
+
+---
+
+## Phase 11 — `ws²` redesign: hierarchical centering + sparse fused lasso
+
+**Goal**: if Phase 10 shows a real estimation gap, replace the per-tree REML
+EM with a parameterization + prior that (a) degrades *exactly* to ARG-BLUP-
+uniform when no heterogeneity is supported, and (b) concentrates the limited
+information budget on the few segments/regions where signal actually exists.
+Gated on Phase 10's verdict.
+
+### Model
+
+Multiplicative hierarchical centering (well-identified global scale + local
+deviation), in log space for positivity:
+
+```
+log wₛ² = μ + θₛ ,        wₛ² = w̄² · exp(θₛ) ,   w̄² = exp(μ)
+```
+
+Prior: a **sparse fused lasso** on the deviation track θ along the genome:
+
+```
+-log p(θ) = λ₁ Σ_s |θₛ|  +  λ₂ Σ_s c_s |θₛ − θ_{s−1}|
+```
+
+- `λ₁` (sparsity on levels) pins most `θₛ` to exactly 0 → those segments sit
+  at the global scale `w̄²`; also anchors θ at 0 so μ is identified.
+- `λ₂` (sparsity on differences) makes nonzero deviations form a few
+  contiguous blocks with sharp change-points.
+- **ARG-aware fusion weights** `c_s ∝ ⟨Gₛ, G_{s−1}⟩` (or shared-edge count /
+  1 − SPR-distance): fuse hard where adjacent trees are nearly identical,
+  let θ jump cheaply *exactly* where the genealogy changes (recombination
+  boundaries). The segmentation is emergent, not chosen.
+
+Net prior shape: "genome-wide ARG variance `w̄²`, plus a handful of
+contiguous regions of elevated/depressed local heritability" — exactly the
+sparse-large-effect regime Phase 10 tests.
+
+### Self-certifying property
+
+`λ₁,λ₂ → ∞` gives `θ ≡ 0` = ARG-BLUP-uniform exactly. So the model is a
+strict generalization that cannot lose to uniform under CV-tuned penalties,
+and **the fitted number of nonzero blocks is itself the answer** to "does
+per-segment weighting buy anything?" (0 blocks ⇒ uniform was right.)
+
+### Inference (reuses existing Stage 2 machinery)
+
+Per outer iteration, the expensive quantities are unchanged — one CG solve
+for `r̃ = V⁻¹r` and Hutchinson for `Bₛ = tr(V⁻¹Gₛ)`:
+1. **Global scale** μ: the existing `--uniform-arg` update
+   `w̄² ← w̄²·(Σ Aₛ)/(Σ Bₛ)`.
+2. **Deviations** θ: a proximal-gradient step
+   `θ ← prox_{η Ω}(θ + η g)`, where `gₛ = (wₛ²/2)(Aₛ − Bₛ)` (the old REML
+   score rescaled to log space) and `Ω` is the sparse-fused-lasso penalty.
+   The prox has an exact `O(S)` 1-D solution (Condat / taut-string DP) —
+   pure scalar work, no linear algebra. (MM alternative: reweighted-ℓ₂ on
+   differences → a tridiagonal `O(S)` solve, approximate zeros.)
+3. Recompute `wₛ² = w̄²·exp(θₛ)`; next CG/Hutchinson pass.
+
+Per-iteration cost ≈ current Stage 2; only the cheap score→weights map
+changes. Generalized MM (stochastic REML score, non-convex likelihood) —
+same character as the current algorithm.
+
+### Hyperparameters & output
+
+- `λ₁, λ₂`: CV on OOS R², or — cleaner — choose so the **df = number of
+  nonzero blocks** stays `≪ n`, directly enforcing the "`≲ n` estimable
+  targets" requirement.
+- Output: piecewise-constant `log wₛ²` track = a data-driven local-`h²`
+  Manhattan plot whose blocks respect recombination boundaries (the
+  manuscript `localh` figure in an *estimable* form), plus
+  `K = Σ wₛ² Gₛ` for BLUP prediction that reduces to ARG-BLUP when no blocks
+  are found.
+- **Bonus (complexity):** operating on a few effective blocks instead of `S`
+  segments also trims the per-iteration trace/score work — ties into the
+  Phase 5.5 efficiency thread.
+
+### Deliverables
+
+- [ ] `--ws2-prior {reml,sparse-fused}` in `sargent`; the sparse-fused path
+      with `--lambda1 --lambda2` (or a single strength + ratio).
+- [ ] Sparse-fused-lasso prox (1-D, `O(S)`) in `src/lib/`.
+- [ ] ARG-aware fusion weights `c_s` from the tree sequence.
+- [ ] Validate against Phase 10 oracle on the sparse architecture:
+      does sparse-fused recover most of the oracle gap, and collapse to
+      uniform on the diffuse architecture?
+- [ ] `test/eval/phase11_sparse_fused.md`.
+
+### Future extension
+
+Fully-Bayesian sibling: spike-and-slab on `θₛ` with a Markov (Potts) prior on
+the indicators — the fused lasso is its convex, fast relaxation. Build only
+if posterior uncertainty on the blocks is wanted.
+
+---
+
+## Phase 12 — Complexity recovery: the CG cost is O(n³)
+
+**Goal**: restore near-quadratic (ideally near-linear) scaling of the full-`V`
+inference path (Stage 2 / joint EM).
+
+### Diagnosis (2026-05-27)
+
+The cubic is **not** a dense solve and **not** a solver regression — there is
+no Cholesky/inverse/eigendecomposition anywhere, and `conjgrad.c` has had
+`max_iter = n` with no preconditioner since the first commit. The cube is the
+product of three separately-linear factors that all scale with sample size.
+Per Stage-2 / joint-EM iteration:
+
+```
+(nprobe + 1) CG solves  ×  (CG iterations)  ×  (one V·x matvec)
+```
+
+| Factor | Scaling | Why |
+|---|---|---|
+| CG iterations | ~O(n) | `max_iter = n`, **no preconditioner**; unpreconditioned CG on an ill-conditioned `V` (small-σ² regime) drifts toward the cap. |
+| matvec walks all samples | O(n) | `tree_walker_run_inc` per-sample walk-up (83–91% of wall time in Phase 5 profiling). |
+| number of local trees S | ~O(n) | S grows ~linearly with n (772 @ n=300, ~3000 @ n=1000); matvec sums over all S. |
+
+`CG_iters(n) × matvec(n·S) = n·n·n` → **O(n³)**. (Phase 6's observed ~40×
+slowdown 300→1000 decomposed as `n_hap × n_trees × (CG/n) ≈ 43×` — that *is*
+the cube.) Stage 1 (BayesR, `V = σ²I`) is genuinely linear with no CG; the
+cube only appears once the full-`V` CG path is exercised. The profiler
+attributing 83–91% to the matvec is misleading: the matvec is cheap *per
+call* but is called `(nprobe+1) × CG_iters ≈ n·nprobe` times — cut the call
+count and you cut the cube.
+
+### Near-term (do these — recovers ~O(n²))
+
+- [ ] **Verify first**: `cg_state_t.last_iters` already exists; log CG
+      iteration counts at n=200 vs n=1000 to confirm they grow ~linearly
+      (expected) vs stay flat. Tells us whether the preconditioner or the
+      matvec is the bigger win.
+- [ ] **Preconditioner** (highest leverage; the hook already exists, just
+      `NULL`). Jacobi (diagonal of `V`) first; consider a low-rank /
+      Nyström / deflation preconditioner if Jacobi is weak. Bounds CG
+      iterations to O(1)–O(√κ) *independent of n* → removes a factor of n.
+      (Supersedes the "Preconditioned CG" bullet under Phase 5.5.)
+- [ ] **Warm-start CG** from the previous EM iteration's `r̃`. The solution
+      moves slowly across EM iterations → far fewer iterations. Trivial;
+      stacks with the preconditioner.
+
+### Later (captured; recovers further toward near-linear)
+
+- [ ] **Cap `max_iter` sub-linearly** (e.g. O(√n)) with the already-relaxed
+      Hutchinson tolerance — cheap safety net once the preconditioner lands.
+- [ ] **Sub-quadratic matvec**: `n·S ≈ n²` is intrinsic to an *exact*
+      V-matvec; the Lee 2025 / Zhu 2026 fast tree-sequence matvec algorithms
+      (the Phase 5 direction) get below `O(n·S)` via edge-diff structure →
+      push the remaining factor toward near-linear.
+- [ ] **Reduce CG-solve count / smarter trace estimation**: `nprobe` is a
+      direct multiplier on Hutchinson; variance-reduced or low-rank trace
+      estimators cut it (ties to the Phase 5.5 "Smarter Hutchinson" item).
+- [ ] **Coarsening payoff**: the Phase 11 sparse-fused-lasso reduces `S` to a
+      few effective blocks, trimming the per-iteration trace/score work — an
+      incidental complexity win from the modeling redesign.
+- [ ] **OpenMP over the per-sample walk** (Phase 5.5 item; was not delivering
+      a real speedup — revisit after the preconditioner changes the profile).
