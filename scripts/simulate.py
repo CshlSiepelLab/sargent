@@ -158,6 +158,13 @@ def main():
     ap.add_argument("--unobs-effect-scale", type=float, default=5.0,
                     help="effect-size SD multiplier (relative to BayesR slab) for "
                          "unobserved variants -- larger = more SV-like (default: 5.0)")
+    ap.add_argument("--unobs-maf-min", type=float, default=0.0,
+                    help="minimum MAF for SV-class carve-out (default 0.0 = no lower filter). "
+                         "Restricting to rare variants weakens LD with common BED SNPs and "
+                         "makes SV variance genuinely 'missing' from BayesR.")
+    ap.add_argument("--unobs-maf-max", type=float, default=0.5,
+                    help="maximum MAF for SV-class carve-out (default 0.5 = no upper filter). "
+                         "Set e.g. 0.05 to restrict to rare-variant SV class.")
     # BayesR-style mixture for fixed effects (sigma² relative to var_pheno=1)
     ap.add_argument("--sigma2-mix",  type=float, nargs="+",
                     default=[0.0, 1e-4, 1e-3, 1e-2],
@@ -202,6 +209,8 @@ def main():
         sys.exit("ERROR: --bed-coverage must satisfy 0 < f <= 1")
     if args.h2_unobs > 0 and args.n_unobs_causal <= 0:
         sys.exit("ERROR: --h2-unobs > 0 requires --n-unobs-causal > 0")
+    if not (0.0 <= args.unobs_maf_min <= args.unobs_maf_max <= 0.5):
+        sys.exit("ERROR: require 0 <= --unobs-maf-min <= --unobs-maf-max <= 0.5")
 
     rng = np.random.default_rng(args.seed)
 
@@ -271,9 +280,23 @@ def main():
     # they are guaranteed disjoint from the SNP causal set and force-excluded
     # from the BED below.  Done here (before bed_mask) so the bed_mask draw
     # can exclude them.  Default (h2_unobs=0) keeps the legacy behaviour.
+    #
+    # MAF-conditional sampling: when --unobs-maf-max < 0.5, restrict the SV
+    # pool to rare variants.  Rare SVs have weak LD with common BED SNPs,
+    # so the carved-out variance is genuinely "missing" from BayesR rather
+    # than leaked back through tag-SNP LD.  Default range [0, 0.5] keeps
+    # legacy behaviour (no MAF filter).
     if args.h2_unobs > 0:
         n_unobs_causal = min(args.n_unobs_causal, p)
-        unobs_idx = rng.choice(p, size=n_unobs_causal, replace=False)
+        freq = dosage.mean(axis=1) / 2.0
+        maf  = np.minimum(freq, 1.0 - freq)
+        eligible = np.where((maf >= args.unobs_maf_min) &
+                            (maf <= args.unobs_maf_max))[0]
+        if len(eligible) < n_unobs_causal:
+            sys.exit(f"ERROR: only {len(eligible)} variants in MAF "
+                     f"[{args.unobs_maf_min}, {args.unobs_maf_max}], need "
+                     f"{n_unobs_causal}.  Lengthen --length or widen MAF range.")
+        unobs_idx = rng.choice(eligible, size=n_unobs_causal, replace=False)
         unobs_idx.sort()
         unobs_set = set(unobs_idx.tolist())
         remaining = np.array([j for j in range(p) if j not in unobs_set])
@@ -515,6 +538,8 @@ def main():
         "n_unobs_causal":    n_unobs_causal,
         "unobs_effect_dist":  args.unobs_effect_dist if args.h2_unobs > 0 else None,
         "unobs_effect_scale": args.unobs_effect_scale if args.h2_unobs > 0 else None,
+        "unobs_maf_min":      args.unobs_maf_min      if args.h2_unobs > 0 else None,
+        "unobs_maf_max":      args.unobs_maf_max      if args.h2_unobs > 0 else None,
         "sigma2":          sigma2,
         "regime":          args.regime,
         "sigma2_mix":      list(sigma2_mix),
@@ -541,7 +566,8 @@ def main():
     if args.h2_unobs > 0:
         print(f"  h2_unobs target / realised : {args.h2_unobs:.3f} / {h2_unobs_realised:.4f}  "
               f"(n_unobs_causal={n_unobs_causal}, dist={args.unobs_effect_dist}, "
-              f"scale={args.unobs_effect_scale})")
+              f"scale={args.unobs_effect_scale}, "
+              f"MAF=[{args.unobs_maf_min}, {args.unobs_maf_max}])")
     print(f"  sigma2           : {sigma2:.4f}")
 
 
