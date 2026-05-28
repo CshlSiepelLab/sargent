@@ -924,6 +924,35 @@ In progress (Adam editing manually):
 - [ ] Localization section — Phase 7.
 - [ ] SV simulator + method comparison — Phase 8.
 
+### predict.py `fit_blup` upward h² bias — audit (queued 2026-05-28)
+
+Phase 10 surfaced that `predict.py`'s `fit_blup` (single-component multiplicative-
+EM REML used for GBLUP / ARG-BLUP-uniform / SARGENT evaluation) systematically
+**over-estimates `h²` by ~+0.25** on the n=300 admixed cases (truth ≈ 0.50, fits
+0.75–0.81). The bias is independent of kinship choice (uniform ≈ oracle ≈
+estimated) — so it is a `fit_blup` problem, not a per-segment-weights problem.
+
+This contaminates every prediction-eval h² number we have ever reported
+(Phase 3 overnight, Phase 6 medium-scale, Phase 6b/6c). SARGENT's own
+`--arg-only` `h²_arg` is much less biased (~+0.06 to +0.10), suggesting the
+C code's per-tree EM + PR averaging is doing something better — leading
+candidates for the cause are (a) ML- vs REML-style score (no projection P
+to remove the fixed-effects subspace beyond y-centering), (b) the
+dominant rank-1 component of the aggregate ARG kinship interacting poorly
+with the single-K parameterisation, (c) too few EM iterations (`max_iter=50`)
+under bad conditioning.
+
+- [ ] Reproduce on a clean known-truth case (simple GRM from random
+      genotypes, no admixture) — does the bias persist?
+- [ ] Implement the proper REML projection `P = V⁻¹ − V⁻¹X(X'V⁻¹X)⁻¹X'V⁻¹`
+      (with X = intercept), compare against the current centred-`y` ML-style.
+- [ ] Sweep `h2_init` and `max_iter` — fixed-point vs convergence?
+- [ ] Cross-check against a reference REML (e.g., `gcta --reml` on the same
+      kinship + phenotype).
+- [ ] Annotate the historical eval write-ups with the bias direction once
+      understood, and fix `fit_blup` (or replace) before any new prediction
+      tables go into the manuscript.
+
 ### Test data conventions
 
 - `~/test-sargent/` is the data directory (gitignored, separate from

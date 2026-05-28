@@ -105,6 +105,49 @@ demography (transfer / admixture / Neandertal), where ARG-BLUP-uniform is
 the workhorse. The *localization* / partitioned-`h²` story is where the
 per-segment-weights contribution earns its keep.
 
+## Estimated `h²_arg` across arms (addendum)
+
+Both the BLUP-fitted `h²_fit = σ_u²/(σ_u²+σ²)` from each oracle/uniform/
+estimated arm (with `K` normalised to mean diag = 1, so the ratio is
+comparable) and SARGENT's own `h²_arg` from `est.summary.json`
+(`--arg-only`). True realised `h²_arg` ≈ 0.50 by design.
+
+Per-arm means over the 5 seeds:
+
+|  | diffuse mean | bias | sparse mean | bias |
+|---|---|---|---|---|
+| truth (realised) | 0.491 | — | 0.506 | — |
+| **BLUP uniform**   | 0.780 | **+0.29** | 0.746 | **+0.24** |
+| **BLUP oracle**    | 0.780 | **+0.29** | 0.751 | **+0.25** |
+| **BLUP estimated** | 0.805 | **+0.31** | 0.745 | **+0.24** |
+| **sargent `--arg-only` `h²_arg`** | 0.588 | **+0.10** | 0.568 | **+0.06** |
+
+Three takeaways:
+
+1. **Kinship choice barely changes the fitted `h²`.** uniform ≈ oracle ≈
+   estimated within each architecture. The BLUP absorbs the kinship into
+   `σ_u²` and the ratio `σ_u²/(σ_u²+σ²)` is invariant — so even on the
+   sparse + admixed regime where oracle gives the +0.023 R² prediction
+   edge, oracle and uniform give the same `h²` estimate. **Per-segment
+   weights do not improve `h²` recovery either** — same conclusion as the
+   prediction story, same root cause (BLUP smoothing).
+2. **All three BLUP arms over-estimate `h²` by ~+0.25.** Truth ≈ 0.50,
+   fits ≈ 0.75–0.80. This is a *substantial systematic upward bias of
+   `predict.py:fit_blup`* — the single-component multiplicative-EM REML
+   used in production for GBLUP / ARG-BLUP-uniform / SARGENT evaluation
+   across the whole eval pipeline. **It is independent of the
+   per-segment-weights question** and likely contaminates the historical
+   Phase 3 / Phase 6 prediction tables too. Queued as a "predict.py
+   `fit_blup` bias audit" item under cross-cutting concerns in the
+   ROADMAP.
+3. **SARGENT's own `--arg-only` `h²_arg` is much closer to truth**
+   (bias +0.06 sparse, +0.10 diffuse). The per-tree REML EM + PR averaging
+   in the C code produces a less biased estimate than the eval script's
+   single-component fit. Likely reasons: more flexible parameterisation
+   (S weights + σ²) and the per-tree score may de-bias against the
+   dominant rank-1 component of the aggregate ARG kinship. Pending the
+   audit for confirmation.
+
 ## Caveats and what was not tested
 
 - 5 seeds is modest. CIs are wide but the all-positive, tightly-clustered
