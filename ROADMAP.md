@@ -1,6 +1,6 @@
 # SARGENT — Development Roadmap
 
-Last updated: 2026-05-27.
+Last updated: 2026-05-29.
 
 This document captures the agreed plan for finalising SARGENT. The
 priority order is **correctness first, scale later**. We finish each
@@ -30,8 +30,155 @@ optimisations needed for biobank scale.
 > belongs to the ARG kinship + structure-aware demography (transfer /
 > admixture / Neandertal), not to weight heterogeneity. See
 > `test/eval/phase10_oracle.md` and the updated Phase 11 below.
+>
+> **2026-05-29 — reorganisation.** Replaced the old chronological phase
+> list with a goal-driven **Active plan: Blocks 0–5** below. Priority is
+> now (1) home in on a defensible "what the method provides vs. does
+> not" — see `CLAIMS.md`; (2) run the minimum experiments to back that
+> story; (3) rework the manuscript (next week, Adam-led). Lower-priority
+> items from the old phases have been moved to **Parking lot — deferred
+> items** at the end of the active plan, not deleted. The completed and
+> retired phases remain in place below for historical reference.
 
-If this session is interrupted, restart from the next un-checked item.
+If this session is interrupted, restart from the next un-checked item
+in **Block 0 / Block 1** in the Active plan immediately below.
+
+---
+
+## Active plan (2026-05-29 onward): Blocks 0–5
+
+### Block 0 — Claims table (immediate, lightweight)
+
+**Goal**: a triage of every claim the manuscript might make, bucketed into
+*held / plausible-untested / falsified-weak / out-of-scope*, with the
+evidence we hold and the gap each one creates. The exercise sets the
+experimental agenda for Block 1 by exposing exactly which untested claims
+we want to support.
+
+- [x] Draft `CLAIMS.md` (claims A1–H6 + I; tallies: HELD 13, plausible 12,
+      falsified 11). 2026-05-29.
+- [ ] Adam reviews and edits buckets / claims; we converge on the final
+      set of "plausible / untested" claims that drive Block 1.
+
+### Block 1 — Critical experiments to back the tight story
+
+#### Block 1.1 — PRS portability / cross-ancestry transfer
+
+**Goal**: the prediction headline. Train in pop A, predict in pop B (and
+mixed-train, predict in A and B separately) across a range of split times
+/ genetic distances. Backs claims B4, B7, E1, E2, H6.
+
+- [ ] Extend `scripts/simulate.py` to allow sampling *separately* from
+      the two source populations (`--demography admixed` currently
+      samples only from ADM). Add `--sample-from {ADM,A,B,mixed}` or
+      equivalent.
+- [ ] Driver `test/eval/portability_sweep.sh`: simulate (sweep split time
+      ∈ {1k, 2k, 4k, 8k} gen) × (train: pop A; test: pop A, B, mixed)
+      × seeds.
+- [ ] Score BayesR, GBLUP, ARG-BLUP-uniform, sequential SARGENT, joint-EM
+      SARGENT. Per-arm OOS R² with paired CIs across seeds.
+- [ ] Write-up `test/eval/portability.md` with the verdict on whether the
+      hybrid distinguishes itself in transfer (the linchpin claim).
+
+#### Block 1.2 — Localization robustness sweep
+
+**Goal**: extend Phase 10's single architecture to a grid so the
+localization claim is robust, not anecdotal. Backs claims A4, C1, C4
+(and gates Block 2).
+
+- [ ] Sweep grid: demography ∈ {panmictic, admixed (split 6k)} × sparsity
+      ∈ {1%, 5%, 20% of trees active} × contrast ∈ {10, 100, 1000} × ≥5
+      seeds. (Reuse `oracle_ws2.{py,sh}`.)
+- [ ] Report estimator AUC vs Phase 10's localization ceiling across the
+      grid (one heatmap).
+- [ ] Add per-region `h²` recovery metric: regress the truth-per-block
+      `h²` on the estimator's local-`h²` track and report `R²` + slope.
+      (Backs A4.)
+- [ ] Write-up `test/eval/localization_sweep.md` with the verdict on
+      whether the current per-tree REML is good enough across
+      architectures, or whether Phase 11 is needed.
+
+#### Block 1.3 — `predict.py:fit_blup` h² bias audit
+
+**Goal**: explain and ideally fix the +0.25 h² over-estimation surfaced by
+Phase 10. Prerequisite for any absolute h² number in the manuscript. Backs
+honest reporting of A1, and (re-)validates Phase 3 / Phase 6 / Phase 6b
+tables. Details already drafted under **Cross-cutting concerns →
+`predict.py fit_blup` upward h² bias audit**.
+
+- [ ] Reproduce the bias on a clean GRM from random genotypes (no admixture).
+- [ ] Implement and test the proper REML projection
+      `P = V⁻¹ − V⁻¹X(X'V⁻¹X)⁻¹X'V⁻¹`.
+- [ ] Sweep `h2_init` / `max_iter`; cross-check against `gcta --reml`.
+- [ ] Annotate or correct historical eval write-ups once root cause is in
+      hand.
+
+### Block 2 — Phase 11 (sparse fused lasso) — **gated on Block 1.2**
+
+**Goal**: only build if Block 1.2 shows the current estimator's
+localization is inadequate under realistic / weaker / diffuse architectures.
+If the current method is robust enough across the grid, defer Phase 11.
+
+Detailed design lives at `## Phase 11 — ws² redesign…` below; if Block 1.2
+triggers it, that section becomes the implementation plan. Success
+criterion: closes ≥ 50 % of the estimator→ceiling AUC gap, no prediction
+regression, diffuse-control selects zero blocks.
+
+### Block 3 — Manuscript rework (next week, Adam-led)
+
+**Goal**: triggered once Blocks 0 + 1 are far enough along to know what's
+defensible. Major restructure, not incremental edit.
+
+- [ ] Skeleton + figure plan + drop-list / rebuild-list (from `CLAIMS.md`).
+- [ ] **Methods**: fix the manuscript ↔ code mismatch on the `wₛ²` update
+      (paper still derives a mixture update; code uses point-estimate
+      REML + post-hoc ρ).  Document the sequential strategy as an
+      operational choice for prioritisation, not a true decomposition.
+- [ ] Comparison-table triage: of the 9 baselines currently listed,
+      decide which 2–3 are essential to implement, drop the rest.
+- [ ] New figures: region-scale local-`h²` Manhattan; cross-ancestry
+      portability; possibly a reframed conceptual figure that emphasizes
+      the localization story.
+
+### Block 4 — Computational efficiency (deferred until story is locked)
+
+**Goal**: only needed if the manuscript makes biobank-scale claims; if the
+contribution is framed methodologically with scale-up as follow-up work,
+this stays deferred. Was Phase 12.
+
+- [ ] Verify (instrument `cg_state_t.last_iters`) that CG iterations
+      grow ~linearly in n.
+- [ ] Jacobi (then low-rank/Nyström if needed) preconditioner.
+- [ ] Warm-start CG from previous EM iteration's `r̃`.
+- [ ] Sub-linear `max_iter` cap; smarter Hutchinson; sub-quadratic ARG matvec
+      (Lee 2025 / Zhu 2026 direction); revisit Phase 5.5 OpenMP after
+      preconditioner reshapes the profile.
+
+### Block 5 — Publication readiness (last)
+
+Was old Phase 9; unchanged.
+
+- [ ] Documentation: README + `sargent_help.txt` consolidation.
+- [ ] Automated tests / CI for `test/lib/check_tree_matvec`, `smoke.sh`.
+- [ ] Dead-code / consistency pass.
+- [ ] Final Nurdan-pipeline end-to-end check.
+
+### Parking lot — deferred items (still relevant, not now)
+
+Items from retired phases preserved for future revisit. Each links to
+where the original detail lives (below in this doc).
+
+| Item | What it is | Why deferred | Revisit when |
+|---|---|---|---|
+| **Phase 6b open follow-ups** (unobs-MAF-conditional already done; remaining: `predict.py` h²_unobs reporting, `sv_sweep.sh` aggregator, scaled-t SV, per-effect-scale variation) | Refinements of the SV-flavoured simulator | Phase 10 verdict made the SV/missing-h² story a *localization* story, not a *recovery* story; the original SV-sweep design is partly superseded. | If localization claim broadens to specifically "ungenotyped-SV regions" and we need richer SV simulations to back it. |
+| **Phase 6c — methods comparison on SV sims** (`sv_sweep.sh`, aggregator) | A within-pop methods comparison on the SV grid | Superseded; merged into the broader claim-driven comparison in Block 1.1 / 3. | If reviewers ask for an SV-specific comparison panel. |
+| **Phase 6d — Nurdan R comparison** | Side-by-side benchmark of SARGENT (C) vs Nurdan's R implementation | Lower priority than the methodological story; depends on availability of Nurdan's code. | If accuracy parity needs to be demonstrated (e.g. for the manuscript appendix). |
+| **Phase 7 — per-window localization (MoM-based)** | Was the localization plan; partly merged into Phase 10 / Block 1.2; the MoM module was deleted (2026-05-20). | Phase 10 supersedes; per-tree resolution is structurally limited (claim C2 falsified). | Unlikely to revisit; absorbed into Block 1.2 + Phase 11 if triggered. |
+| **D2 (CLAIMS) — distinguishing polygenicity regimes** | A 2–3-regime polygenicity inference test | Low priority; π_k is biased (D1) so this would be a downstream test of a biased estimator. | After Block 1.3 fixes the absolute calibration. |
+| **G4 (CLAIMS) — robustness to inferred ARGs** | Sensitivity test under `tsinfer`/`tsdate`-inferred ARGs | Manuscript heuristic claim that we'd want to back empirically eventually | Before any real-data run that uses inferred ARGs. |
+| **H4 (CLAIMS) — extra comparison baselines** (mkLMM, LMM-winGRM, hapla) | Manuscript currently lists 9 comparators; only 3–4 are essential | Implementation effort high; story can be made with 2–3 baselines (BayesR, GBLUP, ARG-BLUP-uniform plus one external). | If reviewers ask for a specific comparator. |
+| **Phase 5.5 leftovers** — smarter Hutchinson trace; OpenMP follow-up | Performance refinements after the preconditioner | Lower priority than the preconditioner pair (in Block 4). | Once Block 4 lands and the profile is re-shot. |
+| **B5 (CLAIMS) — Neandertal/archaic prediction** | Striking but un-validatable application | Validation is fundamentally hard (no Neandertal phenotypes); paper's rigor lives in Blocks 1.1 + 1.2. | If the rest of the paper holds and we want a capstone application. |
 
 ---
 
@@ -679,6 +826,13 @@ For each (case × mode × threads):
 
 ## Phase 6b — SV-flavoured unobserved-variants simulation (simulator done 2026-05-21)
 
+> **Status 2026-05-29: PARTIALLY ABSORBED.** Core simulator done (PRs #12,
+> #13, plus MAF-conditional carve-out in #17). Remaining open follow-ups
+> (h²_unobs reporting in predict.py, sv_sweep aggregator, scaled-t SV,
+> per-effect-scale variation) are moved to the **Parking lot** above —
+> Phase 10's verdict (`ws²` as localization, not SV recovery) made these
+> lower priority. Revisit if Block 1.2 motivates richer SV simulations.
+
 **Goal**: missing-heritability simulation in which typed SNPs are
 present at reasonable density *and* a separate class of unobserved
 variants is generated with larger / more variable effect sizes
@@ -729,6 +883,12 @@ ARG-wide variance component.
 
 ## Phase 6c — Method comparison on Phase 6b SV simulations
 
+> **Status 2026-05-29: RETIRED (merged into Block 1.1 / Block 3).** The
+> within-population SV methods comparison is superseded by the broader
+> claim-driven comparison structure: Block 1.1 (PRS portability) covers
+> the prediction comparison, Block 3 / `CLAIMS.md` H4 covers the
+> manuscript-table baseline triage. Section retained below for context.
+
 **Goal**: systematic comparison of SARGENT vs baseline methods on
 the SV-flavoured simulator, to demonstrate (or refute) the polygenic
 recovery story.
@@ -776,6 +936,10 @@ per-segment-weights approach.
 
 ## Phase 6d — Comparison with Nurdan's R implementation
 
+> **Status 2026-05-29: DEFERRED to parking lot.** Lower priority than the
+> methodological story (Block 0 / 1) and depends on availability of
+> Nurdan's code. Revisit if reviewer parity demonstration is needed.
+
 **Goal**: head-to-head benchmark of SARGENT (C) against Nurdan's R
 implementation on the same input cases.  Two axes:
 
@@ -815,6 +979,12 @@ implementation on the same input cases.  Two axes:
 ---
 
 ## Phase 7 — Localization of missing heritability
+
+> **Status 2026-05-29: RETIRED — superseded by Phase 10 verdict + Block
+> 1.2.** The per-tree resolution claim is structurally limited (CLAIMS
+> C2 falsified); region-scale localization is held (C1) and now lives in
+> Block 1.2 (robustness sweep) ± Block 2 (Phase 11). The MoM module this
+> phase originally relied on was already deleted 2026-05-20.
 
 **Goal**: per-window estimates of h²_random vs h²_fixed across the
 genome, highlighting regions where the ARG captures variance the BED
@@ -861,6 +1031,12 @@ cheaper.
 
 ## Phase 8 — Manuscript update
 
+> **Status 2026-05-29: REPLACED by Block 3.** The original "bring the
+> manuscript in line with Phases 1–7" framing presumed incremental
+> updates; the Phase 10 verdict + CLAIMS table audit require major
+> restructure (drop claims A2/A3/B2/C2/G1; reframe around localization +
+> portability). Block 3 is the active version.
+
 **Goal**: bring the manuscript in line with all the features and
 findings from Phases 1-7 once the validation rounds are complete.
 
@@ -890,6 +1066,9 @@ findings from Phases 1-7 once the validation rounds are complete.
 ---
 
 ## Phase 9 — Cleanup before publication
+
+> **Status 2026-05-29: still applies; renumbered as Block 5.** Content
+> below remains the working checklist.
 
 **Goal**: code quality and reproducibility pass before the manuscript
 goes out / the code goes public.
@@ -1065,6 +1244,12 @@ For each, compare prediction (OOS R²) **and** local-`h²` recovery under:
 
 ## Phase 11 — `ws²` redesign as a **localization** tool: hierarchical centering + sparse fused lasso
 
+> **Status 2026-05-29: gated on Block 1.2 outcome (now Block 2 in the
+> Active plan).** Build only if Block 1.2's robustness sweep shows the
+> current per-tree REML estimator's localization is inadequate under
+> realistic / weak / diffuse architectures. Detailed design below remains
+> the implementation plan if triggered.
+
 **Goal (reframed by Phase 10).** Replace the per-tree REML EM with a
 parameterization + prior whose purpose is **local-`h²` localization, not
 prediction enhancement**. Concretely: close the ~0.10 AUC gap between the
@@ -1176,6 +1361,11 @@ if posterior uncertainty on the blocks is wanted.
 ---
 
 ## Phase 12 — Complexity recovery: the CG cost is O(n³)
+
+> **Status 2026-05-29: renumbered as Block 4 in the Active plan; deferred
+> until story is locked.** Required only if the manuscript makes
+> biobank-scale claims. Diagnosis and implementation plan below remain
+> current.
 
 **Goal**: restore near-quadratic (ideally near-linear) scaling of the full-`V`
 inference path (Stage 2 / joint EM).
