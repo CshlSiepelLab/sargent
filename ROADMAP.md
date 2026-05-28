@@ -15,6 +15,21 @@ optimisations needed for biobank scale.
 > diagnostic)** and **Phase 11 (hierarchical-centering + sparse-fused-lasso
 > `ws²` redesign)** — see the new sections at the end of this file. These
 > now take priority over the open items in Phases 6b/6c/7.
+>
+> **2026-05-28 — Phase 10 verdict.** Under genuinely optimistic conditions
+> (admixed demography F_ST≈0.26, sparse 5%-active concentrated blocks,
+> contrast 1000, 5 seeds at n=300+100), the oracle diagnostic gives a sharp
+> answer: prediction ceiling oracle−uniform = **+0.023 ± 0.013 R²** (small
+> but reliably positive; estimator gap −0.008, i.e. current per-tree REML
+> captures *none* of it), while the localization ceiling = **0.844 AUC**
+> with the current estimator at **0.74** (clear ~0.10 AUC headroom). The
+> reframe this forces: **per-segment `ws²` is a localization tool, not a
+> prediction tool.** Phase 11 (sparse fused lasso) is worth building, but
+> as a *localization / local-`h²`* method, with prediction held at
+> uniform-equivalent as a safety floor. The manuscript's prediction story
+> belongs to the ARG kinship + structure-aware demography (transfer /
+> admixture / Neandertal), not to weight heterogeneity. See
+> `test/eval/phase10_oracle.md` and the updated Phase 11 below.
 
 If this session is interrupted, restart from the next un-checked item.
 
@@ -931,12 +946,33 @@ In progress (Adam editing manually):
 
 ---
 
-## Phase 10 — Oracle diagnostic: is per-segment `ws²` worth rescuing? (NEXT)
+## Phase 10 — Oracle diagnostic: is per-segment `ws²` worth rescuing? — DONE 2026-05-28
 
-**Goal**: settle, cheaply and decisively, *before* any new modeling, whether
-heterogeneous per-segment weights can ever beat ARG-BLUP-uniform — and if so,
-whether the gap is a *ceiling* problem (the truth is flat) or an *estimation*
-problem (the truth is heterogeneous but we can't recover it).
+**Outcome.** Two ceilings measured in the optimistic regime (admixed,
+F_ST≈0.26, sparse 5%-active concentrated blocks, 5 seeds at n=300+100):
+
+- **Prediction ceiling** (oracle − uniform R²) = **+0.023 ± 0.013**
+  (paired SE 0.006; all 5 sparse seeds positive). Estimator gap = −0.008.
+  → Per-segment weights are *not* a meaningful prediction lever even with
+  a perfect estimator. Bounded headroom ≈ +0.02 R² total.
+- **Localization ceiling** (idealized AUC at uniform-null V) = **0.844**
+  (range 0.78–0.90). Current per-tree REML estimator = **0.74** mean
+  (range 0.59–0.90). → Active blocks *are* identifiable under structure,
+  and there is ~0.10 AUC of headroom for a better estimator.
+
+Diffuse control: oracle = uniform to the digit on all 5 seeds. ✓
+
+**Verdict (forces the Phase 11 reframe below):**
+
+> **Per-segment `ws²` is a localization tool, not a prediction tool.**
+
+Detail and discussion: `test/eval/phase10_oracle.md`.
+
+**Goal (as completed)**: settle, cheaply and decisively, *before* any new
+modeling, whether heterogeneous per-segment weights can ever beat ARG-BLUP-
+uniform — and if so, whether the gap is a *ceiling* problem (the truth is
+flat) or an *estimation* problem (the truth is heterogeneous but we can't
+recover it).
 
 ### Why (diagnosis from the 2026-05-27 re-evaluation)
 
@@ -982,12 +1018,15 @@ For each, compare prediction (OOS R²) **and** local-`h²` recovery under:
 
 ### Deliverables
 
-- [ ] `scripts/simulate.py`: a `--ws2-architecture {diffuse,sparse}` knob (or
-      reuse the SV/unobserved machinery) that emits the **true per-segment
-      `ws²`** to `params.json` for oracle scoring.
-- [ ] `test/eval/oracle_ws2.{sh,py}` — runs oracle / uniform / estimated and
-      tabulates OOS R² + local-`h²` recovery for both architectures.
-- [ ] `test/eval/phase10_oracle.md` — the ceiling-vs-estimation verdict.
+- [x] `scripts/simulate.py`: `--ws2-architecture {diffuse,sparse}` knob
+      (+ block params); also `--demography {panmictic,admixed}` for the
+      optimistic regime. Emits true per-tree `ws²` to `.full.true_ws2.tsv`.
+- [x] `test/eval/oracle_ws2.{sh,py}` — runs uniform / oracle / estimated
+      paired ARG-BLUP via a single-pass multi-weighting kinship; reports
+      OOS R², local-`h²` recovery, **and the localization ceiling**
+      (idealized per-tree score `Aₛ/tr(Gₛ)` at the homogeneous-null V,
+      `idealized_loc_auc`).
+- [x] `test/eval/phase10_oracle.md` — ceiling table + verdict.
 
 > Shares scaffolding with the cross-distance "linchpin" simulation
 > (two-population coalescent, tunable split time) used to test whether the
@@ -995,13 +1034,19 @@ For each, compare prediction (OOS R²) **and** local-`h²` recovery under:
 
 ---
 
-## Phase 11 — `ws²` redesign: hierarchical centering + sparse fused lasso
+## Phase 11 — `ws²` redesign as a **localization** tool: hierarchical centering + sparse fused lasso
 
-**Goal**: if Phase 10 shows a real estimation gap, replace the per-tree REML
-EM with a parameterization + prior that (a) degrades *exactly* to ARG-BLUP-
-uniform when no heterogeneity is supported, and (b) concentrates the limited
-information budget on the few segments/regions where signal actually exists.
-Gated on Phase 10's verdict.
+**Goal (reframed by Phase 10).** Replace the per-tree REML EM with a
+parameterization + prior whose purpose is **local-`h²` localization, not
+prediction enhancement**. Concretely: close the ~0.10 AUC gap between the
+current estimator (0.74) and the localization ceiling (0.84) on the sparse
+admixed regime, while degrading *exactly* to ARG-BLUP-uniform when no
+heterogeneity is supported — so prediction stays at the uniform baseline
+(which Phase 10 showed is already near the +0.023 R² ceiling).
+
+The prediction ceiling itself (≤ ~+0.02 R²) is not the target: chasing it
+gains little. The product of Phase 11 is a data-driven local-`h²` track
+(piecewise-constant, recombination-respecting), not a prediction PRS.
 
 ### Model
 
@@ -1076,10 +1121,22 @@ same character as the current algorithm.
       with `--lambda1 --lambda2` (or a single strength + ratio).
 - [ ] Sparse-fused-lasso prox (1-D, `O(S)`) in `src/lib/`.
 - [ ] ARG-aware fusion weights `c_s` from the tree sequence.
-- [ ] Validate against Phase 10 oracle on the sparse architecture:
-      does sparse-fused recover most of the oracle gap, and collapse to
-      uniform on the diffuse architecture?
-- [ ] `test/eval/phase11_sparse_fused.md`.
+- [ ] **Validate against Phase 10 ceilings on the sparse + admixed regime**:
+      does sparse-fused close the localization AUC gap 0.74 → 0.84+ (the
+      primary target), while staying at or above ARG-BLUP-uniform R² on
+      both sparse and diffuse architectures (the safety floor)?
+- [ ] `test/eval/phase11_sparse_fused.md` reporting:
+      (i) localization AUC vs the Phase 10 ceiling, per seed;
+      (ii) prediction R² vs uniform (must not regress);
+      (iii) the fitted block track on a representative seed.
+
+### Success criterion
+
+- Primary: localization AUC closes ≥ 50 % of the estimator–ceiling gap
+  (0.74 → ≥ 0.79 mean over 5 sparse + admixed seeds) **without** dropping
+  prediction R² below ARG-BLUP-uniform.
+- Secondary: on the diffuse control, the fused-lasso fit selects zero
+  blocks (`λ`-tuned) and reproduces ARG-BLUP-uniform exactly.
 
 ### Future extension
 

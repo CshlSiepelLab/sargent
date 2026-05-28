@@ -111,6 +111,39 @@ def sim_random_effect(ts, hap_ranks, n_indiv, ws2_vec, rng):
     return u
 
 
+def build_ws2_architecture(kind, n_trees, n_blocks, block_frac, contrast):
+    """Phase 10: directly construct a per-tree ws² profile (pre-normalisation).
+
+    'diffuse' : constant ws² across all trees (flat landscape).  Oracle K is then
+                proportional to the uniform K, so the oracle BLUP coincides with
+                ARG-BLUP-uniform — the control that should show no advantage.
+    'sparse'  : a small floor everywhere plus `n_blocks` evenly-spaced, contiguous
+                runs of trees set high.  `block_frac` of all trees are active;
+                block:floor ratio is `contrast` (large ⇒ nearly all variance in
+                the blocks).  This is the large-effect-region regime that should
+                favour per-segment weights if anything does.
+
+    Absolute scale is arbitrary — the caller renormalises ws2_vec so that the
+    realised var(u) matches h2_arg, and the BLUP re-fits the overall variance
+    scale, so only the *relative* profile matters downstream.
+    """
+    if n_trees <= 0:
+        return np.zeros(0, dtype=float)
+    if kind == "diffuse":
+        return np.ones(n_trees, dtype=float)
+    # sparse
+    floor = 1.0 / max(contrast, 1.0)
+    ws2 = np.full(n_trees, floor, dtype=float)
+    n_active = max(n_blocks, int(round(block_frac * n_trees)))
+    width = max(1, n_active // max(n_blocks, 1))
+    centres = np.linspace(0, n_trees, n_blocks + 2)[1:-1]   # avoid genome edges
+    for c in centres:
+        lo = int(round(c - width / 2.0))
+        lo = min(max(lo, 0), n_trees - width)
+        ws2[lo:lo + width] = 1.0
+    return ws2
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -124,6 +157,20 @@ def main():
     ap.add_argument("--recomb-rate", type=float, default=1e-8, help="recombination rate per bp per gen")
     ap.add_argument("--mut-rate",    type=float, default=1e-8, help="mutation rate per bp per gen")
     ap.add_argument("--Ne",          type=float, default=1e4,  help="effective population size")
+    ap.add_argument("--demography",  type=str,   default="panmictic",
+                    choices=["panmictic", "admixed"],
+                    help="population model. 'panmictic' = single constant-size pop; "
+                         "'admixed' = two diverged sources + recent admixture pulse, "
+                         "giving local-ancestry heterogeneity along the genome (the "
+                         "Phase 10 optimistic regime, where different regions carry "
+                         "genuinely different relatedness so per-segment ws² can help).")
+    ap.add_argument("--admix-split-time", type=float, default=4000.0,
+                    help="generations since the two source pops split (--demography admixed; "
+                         "larger ⇒ stronger structure, F_ST ≈ 1-exp(-T/2Ne))")
+    ap.add_argument("--admix-time",  type=float, default=20.0,
+                    help="generations since the admixture pulse (--demography admixed)")
+    ap.add_argument("--admix-alpha", type=float, default=0.5,
+                    help="ancestry fraction from source A (--demography admixed)")
     ap.add_argument("--h2-snp",    type=float, default=0.3,  help="target fixed-effect heritability")
     ap.add_argument("--h2-arg",   type=float, default=0.3,  help="target random-effect heritability")
     ap.add_argument("--n-causal",    type=int,   default=None,
@@ -182,6 +229,22 @@ def main():
                     help="segment-weight fractions relative to var_pheno/S (first must be 0; overrides --regime)")
     ap.add_argument("--phi-mix",     type=float, nargs="+", default=None,
                     help="segment-weight mixture proportions (overrides --regime)")
+    # Phase 10 oracle diagnostic: directly construct the per-tree ws² profile,
+    # overriding the --regime mixture draw.  Lets us contrast a flat landscape
+    # (control: oracle ≈ uniform) with a sparse contiguous large-effect landscape
+    # (the regime that should favour per-segment weights, if anything does).
+    ap.add_argument("--ws2-architecture", type=str, default=None,
+                    choices=["diffuse", "sparse"],
+                    help="directly build the per-tree ws² profile (Phase 10), overriding "
+                         "the --regime mixture draw. 'diffuse' = flat constant ws²; "
+                         "'sparse' = floor + contiguous large-effect blocks.")
+    ap.add_argument("--ws2-n-blocks", type=int, default=3,
+                    help="number of contiguous large-effect blocks (--ws2-architecture sparse)")
+    ap.add_argument("--ws2-block-frac", type=float, default=0.05,
+                    help="fraction of trees that are active/in-blocks (--ws2-architecture sparse)")
+    ap.add_argument("--ws2-block-contrast", type=float, default=1000.0,
+                    help="block:floor ws² ratio (--ws2-architecture sparse; large ⇒ "
+                         "nearly all variance in the blocks)")
     args = ap.parse_args()
 
     # Apply --regime presets if mixture not given explicitly.
@@ -218,13 +281,32 @@ def main():
     n_total = args.n_indiv + args.n_test
     print(f"Simulating ARG: n_train={args.n_indiv} + n_test={args.n_test} "
           f"= {n_total} individuals, L={args.length:.0f} bp ...", flush=True)
-    ts = msprime.sim_ancestry(
-        samples=n_total,
-        sequence_length=args.length,
-        recombination_rate=args.recomb_rate,
-        population_size=args.Ne,
-        random_seed=args.seed,
-    )
+    if args.demography == "admixed":
+        dem = msprime.Demography()
+        dem.add_population(name="ANC", initial_size=args.Ne)
+        dem.add_population(name="A",   initial_size=args.Ne)
+        dem.add_population(name="B",   initial_size=args.Ne)
+        dem.add_population(name="ADM", initial_size=args.Ne)
+        dem.add_admixture(time=args.admix_time, derived="ADM",
+                          ancestral=["A", "B"],
+                          proportions=[args.admix_alpha, 1.0 - args.admix_alpha])
+        dem.add_population_split(time=args.admix_split_time,
+                                 derived=["A", "B"], ancestral="ANC")
+        ts = msprime.sim_ancestry(
+            samples={"ADM": n_total},
+            sequence_length=args.length,
+            recombination_rate=args.recomb_rate,
+            demography=dem,
+            random_seed=args.seed,
+        )
+    else:
+        ts = msprime.sim_ancestry(
+            samples=n_total,
+            sequence_length=args.length,
+            recombination_rate=args.recomb_rate,
+            population_size=args.Ne,
+            random_seed=args.seed,
+        )
     ts = msprime.sim_mutations(ts, rate=args.mut_rate, random_seed=args.seed + 1)
     print(f"  {ts.num_individuals} individuals, {ts.num_trees} trees, "
           f"{ts.num_sites} sites", flush=True)
@@ -384,9 +466,15 @@ def main():
         sys.exit(f"ERROR: phi_mix length {len(phi_mix)} != tau2_frac length {M}")
     phi_mix /= phi_mix.sum()
 
-    # Draw ws² for every tree from the discrete mixture
-    mix_draw = rng.choice(M, size=n_trees, p=phi_mix)
-    ws2_vec  = tau2_mix[mix_draw]       # shape (n_trees,)
+    # Per-tree ws²: either a directly-constructed architecture (Phase 10) or the
+    # discrete-mixture draw (legacy / --regime).
+    if args.ws2_architecture is not None:
+        ws2_vec = build_ws2_architecture(
+            args.ws2_architecture, n_trees, args.ws2_n_blocks,
+            args.ws2_block_frac, args.ws2_block_contrast)
+    else:
+        mix_draw = rng.choice(M, size=n_trees, p=phi_mix)
+        ws2_vec  = tau2_mix[mix_draw]       # shape (n_trees,)
 
     print("Simulating random effects ...", flush=True)
     y_random = sim_random_effect(ts, hap_ranks, n_indiv, ws2_vec, rng)
@@ -528,6 +616,10 @@ def main():
         "recomb_rate":     args.recomb_rate,
         "mut_rate":        args.mut_rate,
         "Ne":              args.Ne,
+        "demography":      args.demography,
+        "admix_split_time": args.admix_split_time if args.demography == "admixed" else None,
+        "admix_time":       args.admix_time       if args.demography == "admixed" else None,
+        "admix_alpha":      args.admix_alpha      if args.demography == "admixed" else None,
         "seed":            args.seed,
         "h2_snp_target":   args.h2_snp,
         "h2_arg_target":   args.h2_arg,
@@ -542,6 +634,10 @@ def main():
         "unobs_maf_max":      args.unobs_maf_max      if args.h2_unobs > 0 else None,
         "sigma2":          sigma2,
         "regime":          args.regime,
+        "ws2_architecture":   args.ws2_architecture,
+        "ws2_n_blocks":       args.ws2_n_blocks       if args.ws2_architecture == "sparse" else None,
+        "ws2_block_frac":     args.ws2_block_frac     if args.ws2_architecture == "sparse" else None,
+        "ws2_block_contrast": args.ws2_block_contrast if args.ws2_architecture == "sparse" else None,
         "sigma2_mix":      list(sigma2_mix),
         "pi_mix":          list(pi_mix),
         "tau2_frac":       list(tau2_frac),
