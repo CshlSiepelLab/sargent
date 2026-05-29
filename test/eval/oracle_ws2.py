@@ -35,7 +35,8 @@ import tskit
 # Reuse the tested predict.py machinery (same directory).
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from predict import (read_phen, load_ws2, hap_to_indiv_2d, fit_blup,
-                     predict_blup, metrics, map_train_to_full)
+                     predict_blup, metrics, map_train_to_full,
+                     center_kinship)
 
 
 def streaming_multi_kinship(ts, sample_nodes_a, weight_vectors,
@@ -231,13 +232,11 @@ def main():
             continue
         K_tr = hap_to_indiv_2d(K_train_hap[name], n_train)
         K_cr = hap_to_indiv_2d(K_cross_hap[name], n_test, n_train)
-        # Normalise so mean diag(K_tr) = 1.  Makes h2_fit comparable across arms
-        # (uniform vs oracle K differ in absolute scale); R² is invariant since
-        # sigma_u2 rescales inversely.
-        d = float(np.mean(np.diag(K_tr)))
-        if d > 0:
-            K_tr = K_tr / d
-            K_cr = K_cr / d
+        # Double-center to absorb the deep-coalescent constant offset (Block 1.3
+        # audit; previously this was just mean-diag normalisation, which fit_blup
+        # then biased h² upward by ~+0.25). Same centering applied to K_cr so
+        # the BLUP prediction stays calibrated.
+        K_tr, K_cr = center_kinship(K_tr, K_cr)
         s2, su2, alpha, mean_y = fit_blup(y_train, K_tr)
         y_hat = predict_blup(K_cr, alpha, mean_y)
         m = metrics(y_hat, y_test)

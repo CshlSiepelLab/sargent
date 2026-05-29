@@ -141,6 +141,45 @@ def hap_to_indiv_2d(K_hap, n_a, n_b=None):
     return K_hap.reshape(n_a, 2, n_b, 2).sum(axis=(1, 3)) * 0.5
 
 
+def center_kinship(K_train, K_cross=None):
+    """Double-center K_train (H K H, H = I − 11ᵀ/n) and apply the consistent
+    centering to K_cross if supplied. Then mean-diag = 1 normalisation.
+
+    Why: the aggregate ARG kinship has a rank-1 constant offset
+    (deep-coalescent shared-branch baseline; |cos(v₁,1)|=0.998 and λ₁/tr ≈ 0.65
+    on test cases) that fit_blup otherwise absorbs into σ_u², inflating h̅²_fit
+    by ≈+0.25. Removing the all-ones eigenmode brings the bias to ≈+0.05, the
+    same floor as SARGENT's per-tree C-code estimator and as fit_blup on a
+    SNP-GRM. See test/eval/fit_blup_audit.md.
+
+    Args:
+        K_train: (n_train × n_train) symmetric train block.
+        K_cross: (n_cross × n_train) optional cross block (test → train).
+
+    Returns:
+        K_train_centered, K_cross_centered (None if K_cross is None).
+        The same row/column statistics are used for both, so the cross
+        block is on the same scale as the train block — required for
+        BLUP prediction.
+    """
+    K_train = np.asarray(K_train, float)
+    row_mean_train  = K_train.mean(axis=1, keepdims=True)   # (n_train, 1)
+    col_mean_train  = K_train.mean(axis=0, keepdims=True)   # (1, n_train)
+    grand_mean_train = float(K_train.mean())
+    K_train_c = K_train - row_mean_train - col_mean_train + grand_mean_train
+    d = float(np.mean(np.diag(K_train_c)))
+    if d > 0:
+        K_train_c = K_train_c / d
+    if K_cross is None:
+        return K_train_c, None
+    K_cross = np.asarray(K_cross, float)
+    row_mean_cross = K_cross.mean(axis=1, keepdims=True)    # (n_cross, 1)
+    K_cross_c = K_cross - row_mean_cross - col_mean_train + grand_mean_train
+    if d > 0:
+        K_cross_c = K_cross_c / d
+    return K_train_c, K_cross_c
+
+
 # ---------------------------------------------------------------------------
 # Predictors
 # ---------------------------------------------------------------------------
@@ -213,11 +252,15 @@ def predict_sargent(X_test, beta, K_train, K_cross,
     GBLUP / ARG-BLUP-uniform) so that prediction quality across methods is
     comparable on equal footing — only the kinship matrix differs.
 
+    Centers K (and the cross block consistently) before fitting; see
+    `center_kinship` for rationale.
+
     y_test_hat = X_test β̂ + mean_r + K_cross · α,  α = (K_train + λI)^{-1} (r − mean_r)
     """
     r = y_train - X_train.T @ beta
-    sigma2, _sigma_u2, alpha, mean_r = fit_blup(r, K_train)
-    u_test = K_cross @ alpha
+    K_train_c, K_cross_c = center_kinship(K_train, K_cross)
+    sigma2, _sigma_u2, alpha, mean_r = fit_blup(r, K_train_c)
+    u_test = K_cross_c @ alpha
     y_test_hat = X_test.T @ beta + mean_r + u_test
     return y_test_hat, sigma2
 
@@ -387,15 +430,17 @@ def main():
     print("Predicting: GBLUP ...", flush=True)
     K_g_train = (X_train.T @ X_train) / p          # (n_train, n_train)
     K_g_cross = (X_test.T  @ X_train) / p          # (n_test, n_train)
-    s2, su2, alpha, mean_y = fit_blup(y_train, K_g_train)
-    y_hat_g = predict_blup(K_g_cross, alpha, mean_y)
+    K_g_train_c, K_g_cross_c = center_kinship(K_g_train, K_g_cross)
+    s2, su2, alpha, mean_y = fit_blup(y_train, K_g_train_c)
+    y_hat_g = predict_blup(K_g_cross_c, alpha, mean_y)
     results["gblup"] = metrics(y_hat_g, y_true_test)
     results["gblup_h2"] = su2 / (su2 + s2)
 
     # (c) ARG-BLUP uniform — average of per-tree kinship
     print("Predicting: ARG-BLUP-uniform ...", flush=True)
-    s2, su2, alpha, mean_y = fit_blup(y_train, K_uni_train)
-    y_hat_a = predict_blup(K_uni_cross, alpha, mean_y)
+    K_uni_train_c, K_uni_cross_c = center_kinship(K_uni_train, K_uni_cross)
+    s2, su2, alpha, mean_y = fit_blup(y_train, K_uni_train_c)
+    y_hat_a = predict_blup(K_uni_cross_c, alpha, mean_y)
     results["arg_blup_uniform"] = metrics(y_hat_a, y_true_test)
     results["arg_blup_uniform_h2"] = su2 / (su2 + s2)
 
