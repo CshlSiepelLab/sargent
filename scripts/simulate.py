@@ -158,12 +158,15 @@ def main():
     ap.add_argument("--mut-rate",    type=float, default=1e-8, help="mutation rate per bp per gen")
     ap.add_argument("--Ne",          type=float, default=1e4,  help="effective population size")
     ap.add_argument("--demography",  type=str,   default="panmictic",
-                    choices=["panmictic", "admixed"],
+                    choices=["panmictic", "admixed", "transfer"],
                     help="population model. 'panmictic' = single constant-size pop; "
                          "'admixed' = two diverged sources + recent admixture pulse, "
                          "giving local-ancestry heterogeneity along the genome (the "
                          "Phase 10 optimistic regime, where different regions carry "
-                         "genuinely different relatedness so per-segment ws² can help).")
+                         "genuinely different relatedness so per-segment ws² can help); "
+                         "'transfer' = two diverged pops A and B (no admixture pulse) "
+                         "with training drawn from A + optional B fraction (--mix-fraction-B) "
+                         "and test drawn entirely from B (Block 1.1 cross-ancestry PRS).")
     ap.add_argument("--admix-split-time", type=float, default=4000.0,
                     help="generations since the two source pops split (--demography admixed; "
                          "larger ⇒ stronger structure, F_ST ≈ 1-exp(-T/2Ne))")
@@ -171,6 +174,13 @@ def main():
                     help="generations since the admixture pulse (--demography admixed)")
     ap.add_argument("--admix-alpha", type=float, default=0.5,
                     help="ancestry fraction from source A (--demography admixed)")
+    ap.add_argument("--transfer-split-time", type=float, default=3500.0,
+                    help="generations since A and B split (--demography transfer; "
+                         "3500 gen with Ne=1e4 gives F_ST ≈ 0.15, the EUR-vs-EAS regime).")
+    ap.add_argument("--mix-fraction-B", type=float, default=0.0,
+                    help="fraction of TRAIN sampled from population B in --demography transfer "
+                         "(test is always 100%% B). 0.0 = pure A→B transfer; 0.05 = trace mix; "
+                         "0.20 = moderate mix. Block 1.1 ladder = 0/0.05/0.20.")
     ap.add_argument("--h2-snp",    type=float, default=0.3,  help="target fixed-effect heritability")
     ap.add_argument("--h2-arg",   type=float, default=0.3,  help="target random-effect heritability")
     ap.add_argument("--n-causal",    type=int,   default=None,
@@ -279,6 +289,15 @@ def main():
 
     # ---- 1. Simulate ARG and mutations -------------------------------------
     n_total = args.n_indiv + args.n_test
+    # Transfer demography: split n_train between A and B; n_test is all B.
+    # Layout in the sampled ts: [n_train_A A indivs, n_train_B B indivs, n_test B indivs],
+    # which preserves the existing convention that train = ts[:n_train], test = ts[n_train:].
+    n_train_A = args.n_indiv
+    n_train_B = 0
+    if args.demography == "transfer":
+        n_train_B = int(round(args.mix_fraction_B * args.n_indiv))
+        n_train_A = args.n_indiv - n_train_B
+
     print(f"Simulating ARG: n_train={args.n_indiv} + n_test={args.n_test} "
           f"= {n_total} individuals, L={args.length:.0f} bp ...", flush=True)
     if args.demography == "admixed":
@@ -299,6 +318,27 @@ def main():
             demography=dem,
             random_seed=args.seed,
         )
+    elif args.demography == "transfer":
+        dem = msprime.Demography()
+        dem.add_population(name="ANC", initial_size=args.Ne)
+        dem.add_population(name="A",   initial_size=args.Ne)
+        dem.add_population(name="B",   initial_size=args.Ne)
+        dem.add_population_split(time=args.transfer_split_time,
+                                 derived=["A", "B"], ancestral="ANC")
+        # msprime returns samples in population-dict order: A first, then B.
+        # Sampling A=n_train_A, B=n_train_B+n_test gives the layout above.
+        sample_spec = {"A": n_train_A, "B": n_train_B + args.n_test}
+        # Drop pops with zero samples (msprime rejects 0-count entries on some versions)
+        sample_spec = {p: n for p, n in sample_spec.items() if n > 0}
+        ts = msprime.sim_ancestry(
+            samples=sample_spec,
+            sequence_length=args.length,
+            recombination_rate=args.recomb_rate,
+            demography=dem,
+            random_seed=args.seed,
+        )
+        print(f"  transfer composition: train A={n_train_A} B={n_train_B}, "
+              f"test B={args.n_test}", flush=True)
     else:
         ts = msprime.sim_ancestry(
             samples=n_total,
@@ -563,6 +603,21 @@ def main():
             for i in range(n_test):
                 gi = n_train + i
                 f.write(f"{i}\t{y_fixed[gi]:.8g}\t{y_random[gi]:.8g}\t{y[gi]:.8g}\n")
+
+        # Per-individual ancestry labels (Block 1.1 transfer demography).
+        # For 'transfer': first n_train_A train indivs are A, remaining n_train_B
+        # train indivs are B, all n_test indivs are B. For other demographies,
+        # all indivs share the same population label.
+        if args.demography == "transfer":
+            with open(args.out + ".train.anc.tsv", "w") as f:
+                f.write("idx\tpop\n")
+                for i in range(n_train):
+                    pop = "A" if i < n_train_A else "B"
+                    f.write(f"{i}\t{pop}\n")
+            with open(args.out + ".test.anc.tsv", "w") as f:
+                f.write("idx\tpop\n")
+                for i in range(n_test):
+                    f.write(f"{i}\tB\n")
     else:
         ts.dump(args.out + ".trees")
         np.savetxt(args.out + ".phen", y, fmt="%.8g")
@@ -620,6 +675,10 @@ def main():
         "admix_split_time": args.admix_split_time if args.demography == "admixed" else None,
         "admix_time":       args.admix_time       if args.demography == "admixed" else None,
         "admix_alpha":      args.admix_alpha      if args.demography == "admixed" else None,
+        "transfer_split_time": args.transfer_split_time if args.demography == "transfer" else None,
+        "mix_fraction_B":     args.mix_fraction_B     if args.demography == "transfer" else None,
+        "n_train_A":          n_train_A               if args.demography == "transfer" else None,
+        "n_train_B":          n_train_B               if args.demography == "transfer" else None,
         "seed":            args.seed,
         "h2_snp_target":   args.h2_snp,
         "h2_arg_target":   args.h2_arg,
