@@ -27,23 +27,33 @@ The current methodological focus and remaining open questions live in:
   an agent in the macOS-side session — check whether the file exists
   before assuming the audit is pending.
 
-## Current state (as of 2026-05-29)
+## Current state (as of 2026-05-29, late)
 
-Most recent merge: `ead724d` — Block 1.1 scaffolding (transfer demography
-in `simulate.py`, `test/eval/portability.sh` driver, design doc).
+Most recent merge: `f0ee0b9` — `phase10_oracle.md` h² addendum refreshed
+with patched (centered) numbers.
 
 Active work blocks:
 
-- **Block 1.1**: cross-ancestry PRS portability. Pipeline complete and
-  smoke-tested. v1 sweep (120 cells) **not yet launched** — awaiting Adam's
-  go on a workstation/cluster. This is the prediction headline experiment.
-- **Block 1.3**: `fit_blup` h² bias audit. Running on the macOS-side
-  session as of the last commit. May or may not be done when you see this.
-- **Block 0** (claims review): in progress. Adam is reviewing `CLAIMS.md`
-  bucket assignments; expect follow-up edits.
+- **Block 1.1** (prediction headline): cross-ancestry PRS portability.
+  Pipeline complete (`portability.sh`); v1 launched on Adam's Linux
+  server (evolgen). 120 cells in flight. Plotting helper at
+  `test/eval/plot_portability.py` writes the headline curve + per-arm bars
+  when results land.
+- **Block 1.2** (localization robustness sweep): scaffolding complete
+  (`localization_sweep.sh`); v1 may be running on the laptop in parallel
+  (30 cells, ~2 h wall) — check `~/test-sargent/block1_2_v1/run.log`.
+  Design doc: `test/eval/block1_2_design.md`.
+- **Block 1.3** (`fit_blup` h² bias): **audit done + patch applied**.
+  `test/eval/predict.py` now double-centers K (see `center_kinship`);
+  fit_blup h² bias dropped from +0.26 → +0.05 (audit's predicted floor)
+  on all 10 Phase 10 sims. R² unchanged. Audit: `test/eval/fit_blup_audit.md`.
+  Patch commit: `ebf757c`.
+- **Block 0** (claims triage): Adam signed off (2026-05-29). `CLAIMS.md`
+  is current; bucket reassignments only if further evidence comes in.
 
-Other blocks (1.2 localization sweep, 2 sparse fused lasso, 3 manuscript,
-4 efficiency, 5 publication readiness) are deferred until 1.1 reports.
+Deferred: Block 2 (sparse fused lasso, gated on Block 1.2 outcome),
+Block 3 (manuscript, Adam-led, next week), Block 4 (efficiency),
+Block 5 (publication readiness).
 
 ## Build / environment
 
