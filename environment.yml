@@ -1,0 +1,23 @@
+# SARGENT development / eval environment.
+#
+# Usage:
+#     mamba env create -f environment.yml      # or `conda env create -f ...`
+#     mamba activate sargent
+#     cmake -B build -S . && cmake --build build -j
+#
+# Verified on Linux (Rocky/RHEL 8, gcc 8.5) and macOS (Apple Clang).
+# Add packages below as new evaluation tooling needs them; keep them
+# conda-forge whenever possible to avoid mixed-channel resolution.
+name: sargent
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  # C build toolchain for the bundled tskit submodule and the sargent C core
+  - cmake>=3.16
+  - meson
+  - ninja
+  # Python deps for scripts/ and test/eval/
+  - msprime
+  - tskit
+  - numpy

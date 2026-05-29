@@ -14,7 +14,10 @@ include(ExternalProject)
 set(TSKIT_SOURCE_DIR  "${CMAKE_SOURCE_DIR}/third_party/tskit/c")
 set(TSKIT_BINARY_DIR  "${CMAKE_BINARY_DIR}/tskit-build")
 set(TSKIT_INSTALL_DIR "${CMAKE_BINARY_DIR}/tskit-install")
-set(TSKIT_LIB         "${TSKIT_INSTALL_DIR}/lib/libtskit.dylib")
+# Platform-appropriate shared-library suffix (.dylib on macOS, .so on Linux,
+# .dll on Windows) -- CMAKE_SHARED_LIBRARY_SUFFIX is set automatically.
+set(TSKIT_LIB_NAME    "libtskit${CMAKE_SHARED_LIBRARY_SUFFIX}")
+set(TSKIT_LIB         "${TSKIT_INSTALL_DIR}/lib/${TSKIT_LIB_NAME}")
 
 find_program(MESON_EXECUTABLE meson REQUIRED)
 find_program(NINJA_EXECUTABLE ninja REQUIRED)
@@ -37,7 +40,7 @@ ExternalProject_Add(tskit_external
       -Dbuild_tests=false
       -Dbuild_examples=false
   BUILD_COMMAND
-    ${NINJA_EXECUTABLE} -C ${TSKIT_BINARY_DIR} libtskit.dylib
+    ${NINJA_EXECUTABLE} -C ${TSKIT_BINARY_DIR} ${TSKIT_LIB_NAME}
   INSTALL_COMMAND
     ${NINJA_EXECUTABLE} -C ${TSKIT_BINARY_DIR} install
     COMMAND ${CMAKE_COMMAND} -E copy
