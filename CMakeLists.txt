@@ -36,6 +36,7 @@ ExternalProject_Add(tskit_external
   CONFIGURE_COMMAND
     ${MESON_EXECUTABLE} setup ${TSKIT_BINARY_DIR} ${TSKIT_SOURCE_DIR}
       --prefix=${TSKIT_INSTALL_DIR}
+      --libdir=lib
       --wipe
       -Dbuild_tests=false
       -Dbuild_examples=false
