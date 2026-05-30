@@ -224,3 +224,93 @@ BASE=$HOME/test-sargent/block1_1_pilot \
 
 If the pilot produces a sensible `portability_table.md`, fire the full v1
 with the default env vars (3 mix × 2 typed × 5 seeds = 120 cells).
+
+## Interpretation (v1, 2026-05-30) — PROVISIONAL (26/30 cells)
+
+Status: 26 of 30 cells complete. The 4 missing cells (mostly `mix=0.20
+typed=0.70`) were lost to an out-of-memory event on the shared workstation
+(another user's ~150 GB jobs), not to the run itself; they are re-running
+behind a memory guard. The trend below is consistent across all six (mix ×
+typed) cells, so the 4 missing cells are very unlikely to change the call,
+but treat the exact numbers as provisional until 30/30.
+
+**Metric note.** Read these on `r2_calib` (squared Pearson correlation), not
+raw R². In the cross-ancestry regime raw R² is destroyed by *calibration*,
+not discrimination: a SNP rare in train (pop A) but common in test (pop B),
+standardised by train mean/std, blows up the fixed-effect prediction variance
+and sends raw R² to −3 even when the prediction is positively correlated with
+the phenotype. `r2_calib` (= R² after the optimal linear recalibration)
+isolates discrimination and is the fair cross-method metric. See the
+`predict.py` / `portability.sh` patch (PR #21).
+
+### Result
+
+Mean `r2_calib` by training-set target-mix (collapsed over typed × seeds):
+
+| mix_B | GBLUP | ARG-BLUP-uni | SARGENT | **SARGENT − ARG-BLUP-uni** |
+|---|---|---|---|---|
+| 0.00 (n=10) | 0.048 | **0.069** | 0.053 | **−0.016** |
+| 0.05 (n=9)  | 0.038 | **0.096** | 0.047 | **−0.048** |
+| 0.20 (n=7)  | 0.171 | **0.221** | 0.141 | **−0.080** |
+
+Two facts: (1) prediction transfers and scales sensibly — `r2_calib` rises
+with target-population training fraction (sanity ✓); (2) **SARGENT does not
+beat ARG-BLUP-uniform — it is consistently slightly below, and the gap widens
+(more negative) with f_B.** ARG-BLUP-uniform is the best arm at every level,
+beating both the SNP-GRM (GBLUP) and SARGENT's per-segment-weighted variant.
+
+The verdict rule required SARGENT **>** ARG-BLUP-uniform with the gap widening
+**in SARGENT's favour**. We observe the opposite ⇒ **null (mildly negative)
+prediction verdict.**
+
+### Why this is a robust null, not a wrong-regime artifact
+
+The architecture actually simulated in v1 (driver passes neither `--regime`
+nor `--ws2-architecture`, so both default): the ARG random effect is
+`regime=sparse` — a spike-and-slab draw (95% null / 4% medium / 1% large ⇒
+~5% of trees active), **scattered i.i.d.**, with `ws2_architecture=null` (no
+contiguous large-effect blocks). NB this is a discrepancy with the design
+text above, which described the prediction architecture as "diffuse": the
+runs were sparse-*scattered*, not diffuse. Either way, v1 did **not** simulate
+the *contiguous large-effect-block* landscape (`--ws2-architecture sparse`,
+the case `build_ws2_architecture` calls "the regime that should favour
+per-segment weights if anything does").
+
+That favourable regime, however, was already tested in **Phase 10** with the
+**oracle** (true) `ws²` (see `phase10_oracle.md`): 3 contiguous blocks, 5%
+active, deep admixture (F_ST≈0.26). Even with *perfect knowledge* of the
+weights, the prediction ceiling over uniform was only **+0.023 R²**
+(95% CI +0.01…+0.04, n=5), and the *estimated*-weight arm fell **below**
+uniform (−0.008). So:
+
+- v1 here: estimated weights, scattered-sparse, **cross-ancestry** ⇒ SARGENT
+  ≤ uniform, gap widening with f_B.
+- Phase 10: oracle weights, contiguous-block, **admixed** ⇒ ceiling +0.023,
+  estimated < uniform.
+
+Both regimes agree. The prediction lever is **structurally small even with a
+perfect estimator**, and the per-tree REML does not reach it. This confirms
+the Phase 10 verdict cross-ancestry:
+
+> **Per-segment `ws²` is a localization tool, not a prediction tool.**
+
+### Consequence
+
+The prediction half of the manuscript does not gain from per-segment weights;
+ARG-BLUP-uniform is the prediction workhorse (with the right demography). The
+per-segment-weights contribution earns its keep in **localization / partitioned
+`h²`** (Phase 10: idealized AUC 0.84 vs estimator 0.74 — real headroom), which
+is where the Block 2 fused-lasso should aim. Per the design's own decision rule,
+this **redirects cycles from the prediction sweep to Block 2.**
+
+### Caveats / what would still be genuinely new
+
+- 26/30 cells; the capped re-run cell `mix0.20_typed0.10_s5` carries a Stage-1
+  `h2_snp=−0.12` anomaly (fixed/random identifiability for `typed=0.10`),
+  unrelated to the CG-cap fix; it does not drive the verdict (excluding it,
+  the headline is unchanged: −0.016 / −0.048 / −0.071).
+- Not excluded by either v1 or Phase 10: a *higher-contrast* contiguous-block
+  architecture, or **ancestry-divergent effects** (ρ_β < 1, where some segments
+  transfer better across ancestry than others). That is the one mechanism that
+  could in principle give per-segment weighting a portability edge, and it is a
+  v2 / Block 1.2 question — but Phase 10's tight CI makes a large swing unlikely.
