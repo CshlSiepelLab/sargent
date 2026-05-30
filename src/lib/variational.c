@@ -25,6 +25,19 @@
 #define VAR_DEFAULT_M        2       /* spike-and-slab for random effects: null + slab */
 #define VAR_FIXED_MAX_ITER   500
 #define VAR_RANDOM_MAX_ITER  100     /* total EM iterations (burn-in + averaging) */
+/* Iteration cap for the Stage-2 V-solves (probe + main CG). The ARG covariance
+ * V = sigma2 I + sum_s ws2[s] G_s is ill-conditioned for diverged-ancestry
+ * cells (population-structure block of clustered small eigenvalues; tree
+ * kinship has a CONSTANT diagonal, so Jacobi preconditioning gives no help).
+ * Uncapped (limit = n), each probe CG solve runs the full n iterations on such
+ * cells and one EM iteration takes ~100 s, so Stage 2 ran ~4 h (and got killed)
+ * on cells whose well-conditioned siblings finished in ~2.5 h. The Hutchinson
+ * trace estimator tolerates inexact solves (it already uses probe tol 1e-3, and
+ * its statistical error is O(1/sqrt(nprobe))); capping at this value reproduces
+ * the uncapped h2_arg / h2_snp / sigma2 / ws2 to 5 significant figures on
+ * validation cells while bounding per-iteration cost. Overridable per run via
+ * the SARGENT_CG_MAXIT environment variable. */
+#define VAR_RANDOM_CG_MAXIT   64
 #define VAR_RANDOM_BURN_IN   40      /* iterations before Polyak-Ruppert averaging starts */
 #define VAR_FIXED_TOL        1e-4
 #define PI_FLOOR             1e-10   /* lower bound on pi/phi_mix to avoid log(0) */
@@ -481,7 +494,17 @@ void var_random(sargent_t *sg, int silent)
 
     double    *gv        = malloc((size_t)n * sizeof(double));
 
-    cg_state_t *cg = cg_state_new(n, NULL);
+    /* Bound the Stage-2 CG work (see VAR_RANDOM_CG_MAXIT above). Cap at the
+     * smaller of n and the default; SARGENT_CG_MAXIT overrides for tuning. */
+    int cg_cap = (n < VAR_RANDOM_CG_MAXIT) ? n : VAR_RANDOM_CG_MAXIT;
+    { const char *e = getenv("SARGENT_CG_MAXIT"); if (e && atoi(e) > 0) cg_cap = atoi(e); }
+    cg_opts_t main_cg_opts = {
+        .max_iter     = cg_cap,
+        .tol          = 1e-6,
+        .abs_tol      = 0.0,
+        .diag_precond = NULL,
+    };
+    cg_state_t *cg = cg_state_new(n, &main_cg_opts);
 
     tree_cov_matvec_inc_state_t inc;
     int inc_ok = (tree_cov_matvec_inc_state_init(&inc, sg->ts, n, sg->hap_to_indiv) == 0);
@@ -516,6 +539,8 @@ void var_random(sargent_t *sg, int silent)
     };
     hutch_opts_t hopts = {
         .nprobe = nprobe, .batch_size = 0, .use_gaussian = 0, .seed = 0,
+        .probe_cg_tol = 0.0,        /* keep default 1e-3 */
+        .probe_cg_max = cg_cap,     /* same bound as the main solve */
     };
 
     int uniform   = sg->uniform_arg;
