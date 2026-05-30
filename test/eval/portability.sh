@@ -167,6 +167,16 @@ for jf in sorted(glob.glob(os.path.join(base, "mix*_typed*_s*", "est.predict.jso
     # try to recover realised h2 / composition from params
     pjf = os.path.join(os.path.dirname(jf), "case.params.json")
     params = json.load(open(pjf)) if os.path.exists(pjf) else {}
+    def r2c(arm):
+        """Calibration-invariant R² = squared Pearson r. Robust to the
+        cross-ancestry scale blowup that makes raw r2 misleading for the
+        fixed-effect arm. Uses stored r2_calib (new predict.py) when present,
+        else derives r² from the stored r (older JSONs)."""
+        a = d.get(arm, {})
+        if isinstance(a.get("r2_calib"), (int, float)):
+            return a["r2_calib"]
+        rr = a.get("r")
+        return rr * rr if isinstance(rr, (int, float)) else None
     rows.append({
         "cell": cell, "mix": mix, "typed": typed, "seed": seed,
         "n_train_A": params.get("n_train_A"), "n_train_B": params.get("n_train_B"),
@@ -177,6 +187,8 @@ for jf in sorted(glob.glob(os.path.join(base, "mix*_typed*_s*", "est.predict.jso
         "argunif_r2":  d.get("arg_blup_uniform", {}).get("r2"),
         "sargent_r2":  d.get("sargent", {}).get("r2"),
         "sargent_u_r": d.get("sargent_u_r"),
+        "argunif_r2c": r2c("arg_blup_uniform"),
+        "sargent_r2c": r2c("sargent"),
     })
 
 print("# Block 1.1 — cross-ancestry PRS portability\n")
@@ -222,12 +234,27 @@ for (mix, typed) in keys:
           f"| {stat('argunif_r2')} | {stat('sargent_r2')} | {gap_str} |")
 
 # Headline portability curve: how does SARGENT−uniform gap scale with mix_B?
-print("\n## Portability story\n")
+print("\n## Portability story (raw R²)\n")
 print("SARGENT − ARG-BLUP-uni paired gap by mix fraction (averaged over typed × seeds):")
 for mix in sorted({r["mix"] for r in rows}):
     pairs = [(r["sargent_r2"], r["argunif_r2"]) for r in rows
              if r["mix"] == mix and isinstance(r["sargent_r2"], (int, float))
              and isinstance(r["argunif_r2"], (int, float))]
+    if not pairs:
+        continue
+    diffs = np.array([s - u for (s, u) in pairs])
+    print(f"  mix_B = {mix:.2f}:  {diffs.mean():+.4f}  (n={len(diffs)}, sd={diffs.std(ddof=1) if len(diffs)>1 else 0:.4f})")
+
+# Calibration-invariant headline: raw R² is destroyed by the cross-ancestry
+# scale blowup of the fixed-effect arm (a single rare-in-train/common-in-test
+# SNP can send BayesR/SARGENT R² to −3); the squared-correlation gap is the
+# fair discrimination comparison. Prefer this for the verdict.
+print("\n## Portability story — CALIBRATION-INVARIANT (squared correlation r²)\n")
+print("SARGENT − ARG-BLUP-uni paired gap on r²_calib by mix fraction:")
+for mix in sorted({r["mix"] for r in rows}):
+    pairs = [(r["sargent_r2c"], r["argunif_r2c"]) for r in rows
+             if r["mix"] == mix and isinstance(r["sargent_r2c"], (int, float))
+             and isinstance(r["argunif_r2c"], (int, float))]
     if not pairs:
         continue
     diffs = np.array([s - u for (s, u) in pairs])

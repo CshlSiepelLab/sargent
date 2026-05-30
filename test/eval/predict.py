@@ -270,6 +270,27 @@ def predict_sargent(X_test, beta, K_train, K_cross,
 # ---------------------------------------------------------------------------
 
 def metrics(y_hat, y_true):
+    """Out-of-sample prediction metrics.
+
+    Reports two R² flavours because they answer different questions, and they
+    diverge sharply in the cross-ancestry regime:
+
+      r2       — raw coefficient of determination, 1 − SS_res/SS_tot. NOT
+                 scale-invariant: it penalises any mean/variance miscalibration
+                 of ŷ. The fixed-effect (BayesR) PRS has no built-in calibration,
+                 so when a SNP is rare in the training population but common in
+                 the test population, standardising test dosages by *train*
+                 mean/std inflates ŷ's variance and r2 can go sharply negative
+                 (observed down to −3 in Block 1.1) even when ŷ is positively
+                 correlated with y. The BLUP arms self-calibrate via shrinkage,
+                 so this asymmetry makes raw r2 an unfair cross-method metric.
+
+      r2_calib — scale-invariant R² = squared Pearson correlation = the r2 you
+                 would obtain after the optimal linear recalibration ŷ → a+bŷ.
+                 This isolates *discrimination* from *calibration* and is the
+                 field-standard cross-ancestry PRS metric. Use this for the
+                 SARGENT-vs-baseline comparison; keep raw r2 for transparency.
+    """
     y_hat, y_true = np.asarray(y_hat, float), np.asarray(y_true, float)
     ss_res = np.sum((y_true - y_hat) ** 2)
     ss_tot = np.sum((y_true - y_true.mean()) ** 2)
@@ -278,7 +299,8 @@ def metrics(y_hat, y_true):
         r = float(np.corrcoef(y_hat, y_true)[0, 1])
     else:
         r = float("nan")
-    return {"r": r, "r2": r2, "mse": ss_res / len(y_true)}
+    r2_calib = r * r if r == r else float("nan")   # r==r guards against NaN
+    return {"r": r, "r2": r2, "r2_calib": r2_calib, "mse": ss_res / len(y_true)}
 
 
 # ---------------------------------------------------------------------------
