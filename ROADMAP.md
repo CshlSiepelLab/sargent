@@ -1,6 +1,6 @@
 # SARGENT — Development Roadmap
 
-Last updated: 2026-05-29.
+Last updated: 2026-05-30.
 
 This document captures the agreed plan for finalising SARGENT. The
 priority order is **correctness first, scale later**. We finish each
@@ -39,6 +39,22 @@ optimisations needed for biobank scale.
 > items from the old phases have been moved to **Parking lot — deferred
 > items** at the end of the active plan, not deleted. The completed and
 > retired phases remain in place below for historical reference.
+>
+> **2026-05-30 — Block 1.2 verdict + applications re-direction.** The
+> localization sweep (30 cells, 3 contrast × 2 demog × 5 seeds) shows the
+> per-tree REML estimator is **above chance in 5/6 cells** (admixed AUC
+> 0.68–0.81, panmictic 0.51–0.71 across contrast 1000/100/10) and the
+> estimator–ceiling gap is **small everywhere (0.04–0.11)**. C1
+> region-scale localization is HELD across architectures; C4 [MINOR]
+> estimator robustness becomes HELD [MINOR]; **C5 (sparse fused lasso
+> closes the gap) weakens to WEAK** — the gap that the sparse-fused-lasso
+> redesign was built to close is small. The original Block 2 (Phase 11)
+> is **demoted to the parking lot.** In its place, **Block 2 becomes the
+> Applications arc**: now that localization is the demonstrated SARGENT
+> strength, focus on applications that the per-tree variance primitive
+> uniquely enables — allele-age decomposition, ARG-derived annotation
+> enrichment, ARG-aware fine-mapping. See `test/eval/block1_2_design.md`
+> § "v1 results" and the restructured Block 2 below.
 
 If this session is interrupted, restart from the next un-checked item
 in **Block 0 / Block 1** in the Active plan immediately below.
@@ -47,7 +63,7 @@ in **Block 0 / Block 1** in the Active plan immediately below.
 
 ## Active plan (2026-05-29 onward): Blocks 0–5
 
-### Block 0 — Claims table (immediate, lightweight)
+### Block 0 — Claims table (immediate, lightweight) — ✅ CLOSED
 
 **Goal**: a triage of every claim the manuscript might make, bucketed into
 *held / plausible-untested / falsified-weak / out-of-scope*, with the
@@ -56,9 +72,13 @@ experimental agenda for Block 1 by exposing exactly which untested claims
 we want to support.
 
 - [x] Draft `CLAIMS.md` (claims A1–H6 + I; tallies: HELD 13, plausible 12,
-      falsified 11). 2026-05-29.
-- [ ] Adam reviews and edits buckets / claims; we converge on the final
-      set of "plausible / untested" claims that drive Block 1.
+      falsified 11, OOS 2). 2026-05-29.
+- [x] `[MINOR]` markers added for non-load-bearing FALSIFIED/WEAK claims
+      (A2, B3, C2, C4, F2). 2026-05-29.
+- [x] Adam signed off on bucket assignments. 2026-05-29.
+- [ ] Block 1.2 evidence triggers proposed bucket moves (C1 → HELD;
+      C4 → HELD [MINOR]; C5 → WEAK). Awaiting Adam's sign-off; once
+      approved, `CLAIMS.md` patch lands.
 
 ### Block 1 — Critical experiments to back the tight story
 
@@ -80,65 +100,175 @@ mixed-train, predict in A and B separately) across a range of split times
 - [ ] Write-up `test/eval/portability.md` with the verdict on whether the
       hybrid distinguishes itself in transfer (the linchpin claim).
 
-#### Block 1.2 — Localization robustness sweep
+#### Block 1.2 — Localization robustness sweep — ✅ DONE 2026-05-30
 
 **Goal**: extend Phase 10's single architecture to a grid so the
 localization claim is robust, not anecdotal. Backs claims A4, C1, C4
-(and gates Block 2).
+(and gated original Block 2).
 
-- [ ] Sweep grid: demography ∈ {panmictic, admixed (split 6k)} × sparsity
-      ∈ {1%, 5%, 20% of trees active} × contrast ∈ {10, 100, 1000} × ≥5
-      seeds. (Reuse `oracle_ws2.{py,sh}`.)
-- [ ] Report estimator AUC vs Phase 10's localization ceiling across the
-      grid (one heatmap).
-- [ ] Add per-region `h²` recovery metric: regress the truth-per-block
-      `h²` on the estimator's local-`h²` track and report `R²` + slope.
-      (Backs A4.)
-- [ ] Write-up `test/eval/localization_sweep.md` with the verdict on
-      whether the current per-tree REML is good enough across
-      architectures, or whether Phase 11 is needed.
+- [x] Scaffolding: `test/eval/block1_2_design.md`,
+      `test/eval/localization_sweep.sh` (commit `fac503c`).
+- [x] v1 sweep: 30 cells (3 contrast × 2 demog × 5 seeds) at n=300, L=300kb;
+      laptop run, 593 min wall (commit `2c19ba3` writeup).
+- [x] Verdict: estimator above chance in 5/6 cells; estimator–ceiling gap
+      0.04–0.11 across the grid; AUC drops monotonically with contrast and
+      panmictic. **C1 HELD, C5 weakened**, original Block 2 → parking lot.
+- [ ] v2 (deprioritized): sparsity ladder, n_train ladder, NBLOCKS
+      variation. Run only if a reviewer asks for breadth at a specific
+      missing knob.
+- [ ] Per-region `h²` recovery metric (regress truth-block `h²` on
+      estimator local-`h²` track). Still useful for backing **A4** and for
+      manuscript figure prep. Small follow-up; ~half-day.
+- [ ] Plot helper `test/eval/plot_localization.py` (AUC vs contrast by
+      demog; ceiling overlay). Pending Adam's go.
 
-#### Block 1.3 — `predict.py:fit_blup` h² bias audit
+#### Block 1.3 — `predict.py:fit_blup` h² bias audit — ✅ DONE 2026-05-29
 
 **Goal**: explain and ideally fix the +0.25 h² over-estimation surfaced by
 Phase 10. Prerequisite for any absolute h² number in the manuscript. Backs
-honest reporting of A1, and (re-)validates Phase 3 / Phase 6 / Phase 6b
-tables. Details already drafted under **Cross-cutting concerns →
-`predict.py fit_blup` upward h² bias audit**.
+honest reporting of A1.
 
-- [ ] Reproduce the bias on a clean GRM from random genotypes (no admixture).
-- [ ] Implement and test the proper REML projection
-      `P = V⁻¹ − V⁻¹X(X'V⁻¹X)⁻¹X'V⁻¹`.
-- [ ] Sweep `h2_init` / `max_iter`; cross-check against `gcta --reml`.
-- [ ] Annotate or correct historical eval write-ups once root cause is in
-      hand.
+- [x] Audit: `test/eval/fit_blup_audit.md` (commit `53af237`). Dominant
+      cause **(b) rank-1 dominance** of the aggregate ARG kinship (~65% of
+      tr(K), `|cos(v₁,1)|=0.998`). Hypotheses (a) ML vs REML, (c) normalisation,
+      (d) EM convergence all rejected.
+- [x] Patch: `center_kinship(K_train, K_cross)` helper added to
+      `test/eval/predict.py`; wired into all three K-based arms; applied
+      to `oracle_ws2.py` (commit `ebf757c`). Bias **+0.26 → +0.05** on the
+      10 Phase 10 sims; R² unchanged.
+- [x] `test/eval/phase10_oracle.md` § h² addendum refreshed with patched
+      numbers; raw table preserved for historical record (commit `f0ee0b9`).
+- [x] Historical Phase 3 / Phase 6 R² tables: validated unchanged under
+      the centering (R² is BLUP-shrinkage-invariant; the bias was in h²
+      reporting only). No further action.
 
-### Block 2 — Phase 11 (sparse fused lasso) — **gated on Block 1.2**
+### Block 2 — Applications arc (the new methodological direction)
 
-**Goal**: only build if Block 1.2 shows the current estimator's
-localization is inadequate under realistic / weaker / diffuse architectures.
-If the current method is robust enough across the grid, defer Phase 11.
+**Goal**: capitalise on the *demonstrated* SARGENT strength — region-scale
+localization via the per-tree ws² primitive — by building the applications
+that LDSC and other prediction/variance-decomposition methods cannot do.
+Block 1.2 verdict (small estimator–ceiling gap) tells us the current
+estimator is good enough; the question is now "what to *do* with it".
 
-Detailed design lives at `## Phase 11 — ws² redesign…` below; if Block 1.2
-triggers it, that section becomes the implementation plan. Success
-criterion: closes ≥ 50 % of the estimator→ceiling AUC gap, no prediction
-regression, diffuse-control selects zero blocks.
+Strategic frame (2026-05-30 brainstorm):
+
+> The per-tree ws² estimate is a phenotype-importance score indexed by a
+> genealogical segment. Anything attached to a tree or branch (position,
+> allele age, coalescent rate, branch length) becomes a partitioning axis.
+
+Ordered by SARGENT-native differentiation:
+
+#### Block 2.1 — Allele-age decomposition (highest priority)
+
+**Goal**: partition h² by causal-variant age, using per-branch ages from
+the ARG. No existing method does this cleanly (MAF-stratified GREML / GREML-LDMS
+use MAF as a noisy *proxy*; ARG gives age directly). Biologically relevant for
+the polygenic-architecture question (rare-variant burden vs common-variant
+infinitesimal; Wainschtein / O'Connor framing).
+
+- [ ] Extend `simulate.py` to assign causal variants effect-sizes drawn from
+      an age × effect-size joint distribution (e.g. larger effects on
+      younger variants, or vice versa).
+- [ ] Compute per-branch contribution from per-tree ws² weighted by branch
+      length (already in oracle_ws2.py's idealized-loc score machinery).
+- [ ] Aggregate to age bins ({recent, intermediate, ancient}) and recover
+      the simulated age-by-h² distribution.
+- [ ] Baseline: MAF-stratified GREML on the same data.
+- [ ] Write-up `test/eval/allele_age.md` with the comparison.
+
+Estimated: 1-2 weeks. Reuses Block 1.2 infrastructure.
+
+#### Block 2.2 — ARG-derived annotation enrichment (LDSC-complement)
+
+**Goal**: partition h² by **any tree-derivable annotation**, including
+ones LDSC cannot handle (recombination-boundary-respecting, rare-variant-
+inclusive, structured-pop-aware, or *non-positional* like "trees with
+TMRCA > T_threshold"). Allele age (2.1) becomes the first example;
+generalise to a framework.
+
+- [ ] API: a python helper that takes a per-tree annotation function
+      `f(tree) -> [0, 1]` and returns the partitioned-h² estimate from
+      SARGENT's ŵ².
+- [ ] Two reference annotations:
+      (a) positional (e.g. promoter / intronic / intergenic from a simulated
+      annotation track) — for LDSC-comparable analysis.
+      (b) non-positional (e.g. TMRCA > T or coalescent-rate-variance > V) —
+      to demonstrate the LDSC-impossible regime.
+- [ ] Comparison vs LDSC on (a); demonstration only on (b).
+- [ ] Write-up `test/eval/annotation_enrichment.md`.
+
+Estimated: 1-2 weeks after Block 2.1 lands (significant infrastructure
+overlap).
+
+#### Block 2.3 — ARG-aware fine-mapping (likely a separate paper)
+
+**Goal**: at a single GWAS locus, use SARGENT on a tightly-windowed ARG to
+produce **credible sets that respect recombination boundaries**, competing
+with SuSiE / FINEMAP / CAVIAR. Block 1.2's region-scale AUC 0.7–0.8 at
+n=300 suggests this works at locus scale with more trees per Mb.
+
+- [ ] Simulate a single causal locus in a narrow window with high tree
+      resolution.
+- [ ] Build a credible-set construction algorithm from per-tree ws²
+      posteriors.
+- [ ] Compare to SuSiE on the same data.
+
+**Status**: very likely a *separate paper*, not part of the current one.
+Mentioned here so it doesn't get lost; not part of the immediate critical
+path. One-figure illustration in the current paper if helpful.
+
+#### Block 2.4 — (manuscript framing, not an experiment)
+
+The "linkage analysis without pedigrees" framing — the cleanest way to
+sell the localization story to a broader audience. Lives in Block 3
+(manuscript), tracked here so it doesn't get lost.
+
+#### Old Block 2 (Phase 11 sparse fused lasso) — moved to parking lot
+
+The hierarchical-centering + sparse-fused-lasso `ws²` redesign was
+motivated by hopes of closing a ~0.10 AUC gap between the per-tree REML
+estimator and the idealized ceiling. Block 1.2 shows the gap is
+0.04–0.11 across the grid (typical 0.05), and the *ceiling itself*
+limits absolute performance much more than estimator quality. The redesign
+would refine an already-near-ceiling estimator. **Parked**; revisit if
+a specific application (e.g., very-low-contrast localization) needs the
+extra 5% AUC and the existing estimator's per-seed scatter is the
+bottleneck. Detailed Phase 11 design preserved at `## Phase 11 — ws²
+redesign…` below.
 
 ### Block 3 — Manuscript rework (next week, Adam-led)
 
 **Goal**: triggered once Blocks 0 + 1 are far enough along to know what's
 defensible. Major restructure, not incremental edit.
 
+**New framing (per 2026-05-30 brainstorm)**: drop the prediction-headline
+emphasis where SARGENT does not differentiate (within-pop B2 falsified);
+keep the cross-ancestry portability case (Block 1.1, pending). Lead with
+**localization as "linkage analysis without pedigrees"** — the per-tree
+ws² primitive identifies trait-relevant genomic regions via the inferred
+genealogy, no family structure required. Use **allele-age decomposition**
+(Block 2.1) as the application that no other method can do directly.
+
 - [ ] Skeleton + figure plan + drop-list / rebuild-list (from `CLAIMS.md`).
+- [ ] **Title / abstract reframe**: linkage-without-pedigrees + allele-age
+      partitioning, not prediction. Hybrid (BayesR + ARG-BLUP) becomes a
+      portability tool (Block 1.1), not a within-pop prediction tool.
 - [ ] **Methods**: fix the manuscript ↔ code mismatch on the `wₛ²` update
       (paper still derives a mixture update; code uses point-estimate
       REML + post-hoc ρ).  Document the sequential strategy as an
       operational choice for prioritisation, not a true decomposition.
-- [ ] Comparison-table triage: of the 9 baselines currently listed,
+      Add the ARG-kinship-centering note (Block 1.3 audit) as a
+      methodological footnote — explains why per-tree REML EM is
+      preferable to BLUP-style single-component fits for ARG kinship.
+- [ ] **Comparison-table triage**: of the 9 baselines currently listed,
       decide which 2–3 are essential to implement, drop the rest.
-- [ ] New figures: region-scale local-`h²` Manhattan; cross-ancestry
-      portability; possibly a reframed conceptual figure that emphasizes
-      the localization story.
+- [ ] **New figures**: region-scale local-`h²` Manhattan (Block 1.2);
+      cross-ancestry portability (Block 1.1, if positive); allele-age
+      partitioning (Block 2.1); possibly a reframed conceptual figure
+      that emphasizes the linkage-style localization story.
+- [ ] **Application bullet (in Discussion)**: ARG-derived annotation
+      enrichment as a generalisation of allele-age (Block 2.2); flag
+      ARG-aware fine-mapping (Block 2.3) as future work.
 
 ### Block 4 — Computational efficiency (deferred until story is locked)
 
@@ -179,6 +309,7 @@ where the original detail lives (below in this doc).
 | **H4 (CLAIMS) — extra comparison baselines** (mkLMM, LMM-winGRM, hapla) | Manuscript currently lists 9 comparators; only 3–4 are essential | Implementation effort high; story can be made with 2–3 baselines (BayesR, GBLUP, ARG-BLUP-uniform plus one external). | If reviewers ask for a specific comparator. |
 | **Phase 5.5 leftovers** — smarter Hutchinson trace; OpenMP follow-up | Performance refinements after the preconditioner | Lower priority than the preconditioner pair (in Block 4). | Once Block 4 lands and the profile is re-shot. |
 | **B5 (CLAIMS) — Neandertal/archaic prediction** | Striking but un-validatable application | Validation is fundamentally hard (no Neandertal phenotypes); paper's rigor lives in Blocks 1.1 + 1.2. | If the rest of the paper holds and we want a capstone application. |
+| **Phase 11 — sparse fused lasso `ws²` redesign** (original Block 2) | Hierarchical centering on log `wₛ²` + sparsity-on-levels + sparsity-on-differences fused lasso; intended to close the ~0.10 estimator→ceiling AUC gap from Phase 10's single cell | Block 1.2 (2026-05-30) showed the gap is 0.04–0.11 across the grid (typical 0.05), and the ceiling itself is what limits AUC in low-contrast / panmictic cells. The redesign would refine an already-near-ceiling estimator. Detailed design preserved at `## Phase 11 — ws² redesign…` below. | If a target application (very-low-contrast localization; per-seed variance reduction for partitioned-h²) makes that 5% AUC worth ~weeks of engineering. |
 
 ---
 
