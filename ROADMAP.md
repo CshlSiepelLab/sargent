@@ -314,6 +314,87 @@ The "linkage analysis without pedigrees" framing — the cleanest way to
 sell the localization story to a broader audience. Lives in Block 3
 (manuscript), tracked here so it doesn't get lost.
 
+#### Block 2.5 — Polygenicity / effect-size architecture (HOW dimension)
+
+**Goal**: a third axis of architecture characterization, complementing
+2.1 (WHEN, allele age) and 2.2 (WHERE, functional annotation), built
+from the same per-tree ŵ²_s primitive. Strengthens **CLAIMS D1** (currently
+WEAK) and **D2** (PLAUSIBLE/UNTESTED).
+
+Existing methods (BayesR π_k, SBayesS, GENESIS, LDSC M_e) all operate on
+the typed-SNP layer with LD corrections and miss the rare-variant
+contribution to polygenicity. SARGENT's tree-level primitive avoids the
+LD-machinery entirely.
+
+**Three metrics:**
+
+1. **Tree-level polygenicity index `M_e,ARG`** — analog of Wray's
+   effective number, computed from per-tree variance:
+   ```
+   M_e,ARG  =  (Σ_s ŵ²_s)²  /  Σ_s (ŵ²_s)²
+   ```
+   Sparse architecture → small `M_e`; diffuse → large. Free from existing
+   SARGENT output, no new fitting.
+
+2. **Variance-capture curve** (Adam's flagged favourite). Fraction of
+   total ARG-variance captured by the top-k trees, plotted against k.
+   Shape characterises the architecture at a glance:
+   - steep early rise → oligogenic ("few big regions")
+   - long tail → polygenic infinitesimal
+   - intermediate → real-trait mixed
+   A one-figure trait summary that no current method produces at
+   recombination-block resolution.
+
+3. **Per-branch effect-size distribution (the untyped piece)**.
+   `bl(b) · ŵ²_s` for branch b in tree s gives effective per-branch
+   variance. Aggregated across the genome → non-parametric effect-size
+   distribution of *untyped* variants. Combined with BayesR's typed
+   effect-size estimates → complete effect-size picture without LDSC
+   approximations. The SARGENT-specific contribution to the rare-variant
+   burden debate (Wainschtein / O'Connor / Zeng).
+
+**Joint distributions — the manuscript-cube material:**
+
+- 2.5 × 2.1 (polygenicity × allele age): does the rare-variant burden
+  scale with allele age? Tests the Eyre-Walker selection-effect model
+  directly.
+- 2.5 × 2.2 (polygenicity × annotation): is coding more sparse than
+  regulatory? Annotation-specific architecture.
+- 2.5 × 2.1 × 2.2: the full architecture cube.
+
+##### Block 2.5.1 — Implement the three metrics
+
+- [ ] `test/eval/arch_metrics.py`: reads `<case>/est.w2.tsv` + the case's
+      tree sequence; computes `M_e,ARG`, variance-capture curve, and the
+      per-branch effect-size histogram. Bootstrap CIs across seeds.
+- [ ] Helper for the variance-capture plot (`plot_arch.py`) that overlays
+      curves for multiple traits / annotations / age bins on one axes.
+
+##### Block 2.5.2 — Validation on controlled polygenicity
+
+- [ ] Simulate traits with **controlled polygenicity**: same h²_arg, same
+      length, varying `n_causal_regions ∈ {10, 100, 1000}`. Hold all
+      other axes constant.
+- [ ] Show `M_e,ARG` and variance-capture curves separate the three
+      regimes cleanly; compare to BayesR π_k (typed-SNP baseline).
+- [ ] **Rare-variant ablation**: hide a controlled fraction of causal
+      SNPs from typing → BayesR's π_k blurs, SARGENT's `M_e,ARG`
+      should hold. The differentiable result.
+
+##### Block 2.5.3 — Joint distributions
+
+- [ ] Combine 2.5.1 with the per-tree allele-age annotation from Block
+      2.1: produce variance-capture curves *per age bin* (separate curves
+      for recent / intermediate / ancient).
+- [ ] Combine 2.5.1 with Block 2.2's annotation overlap matrix: produce
+      variance-capture curves *per functional category* (coding vs
+      regulatory vs unannotated).
+- [ ] Architecture cube: a 3D summary (age × annotation × polygenicity)
+      per trait. Possibly Figure 1 of the manuscript.
+
+Estimated effort: ~2 weeks for 2.5.1 + 2.5.2 (heavy reuse of existing
+infra); ~1-2 weeks for 2.5.3 after Blocks 2.1 and 2.2 land.
+
 #### Old Block 2 (Phase 11 sparse fused lasso) — moved to parking lot
 
 The hierarchical-centering + sparse-fused-lasso `ws²` redesign was
@@ -355,10 +436,14 @@ genealogy, no family structure required. Use **allele-age decomposition**
       decide which 2–3 are essential to implement, drop the rest.
 - [ ] **New figures**: region-scale local-`h²` Manhattan (Block 1.2);
       cross-ancestry portability (Block 1.1, if positive); allele-age
-      partitioning (Block 2.1); possibly a reframed conceptual figure
-      that emphasizes the linkage-style localization story.
-- [ ] **Application bullet (in Discussion)**: ARG-derived annotation
-      enrichment as a generalisation of allele-age (Block 2.2); flag
+      partitioning (Block 2.1); **variance-capture curve per trait /
+      annotation / age bin (Block 2.5)** — strong candidate for Figure 1
+      as a one-glance trait-summary plot; possibly a reframed conceptual
+      figure that emphasizes the linkage-style localization story.
+- [ ] **Application bullet (in Discussion)**: ARG-derived partitioned
+      heritability with three estimators (Block 2.2 (A) typed-only,
+      (B) ARG-only, (C) hybrid typed×untyped); architecture cube
+      (age × annotation × polygenicity, Block 2.5 × 2.1 × 2.2); flag
       ARG-aware fine-mapping (Block 2.3) as future work.
 
 ### Block 4 — Computational efficiency (deferred until story is locked)
