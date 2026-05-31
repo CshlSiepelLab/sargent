@@ -178,27 +178,118 @@ infinitesimal; Wainschtein / O'Connor framing).
 
 Estimated: 1-2 weeks. Reuses Block 1.2 infrastructure.
 
-#### Block 2.2 — ARG-derived annotation enrichment (LDSC-complement)
+#### Block 2.2 — Partitioned heritability across functional annotations
 
-**Goal**: partition h² by **any tree-derivable annotation**, including
-ones LDSC cannot handle (recombination-boundary-respecting, rare-variant-
-inclusive, structured-pop-aware, or *non-positional* like "trees with
-TMRCA > T_threshold"). Allele age (2.1) becomes the first example;
-generalise to a framework.
+**Headline pitch** (candidate primary framing for the manuscript):
 
-- [ ] API: a python helper that takes a per-tree annotation function
-      `f(tree) -> [0, 1]` and returns the partitioned-h² estimate from
-      SARGENT's ŵ².
-- [ ] Two reference annotations:
-      (a) positional (e.g. promoter / intronic / intergenic from a simulated
-      annotation track) — for LDSC-comparable analysis.
-      (b) non-positional (e.g. TMRCA > T or coalescent-rate-variance > V) —
-      to demonstrate the LDSC-impossible regime.
-- [ ] Comparison vs LDSC on (a); demonstration only on (b).
-- [ ] Write-up `test/eval/annotation_enrichment.md`.
+> SARGENT: a unified ARG-based framework for partitioning complex-trait
+> heritability across functional annotations, including the rare-variant
+> fraction (where S-LDSC's LD shrinkage washes them out), across admixed
+> cohorts (where S-LDSC needs an unavailable matched LD reference), and
+> with a typed-vs-untyped split per annotation (which no method currently
+> produces).
 
-Estimated: 1-2 weeks after Block 2.1 lands (significant infrastructure
-overlap).
+**Goal**: produce the canonical "where does the heritability live?" pie
+chart per trait — `coding | promoter | splice | enhancer | TFBS | intronic
+(annotated) | intronic (unannotated) | intergenic` — using **three
+estimators side-by-side on the same data**, each one principled but
+using different information. The head-to-head comparison is the
+manuscript figure.
+
+**The three estimators** (all yield per-annotation h²_c):
+
+| flavour | inputs | how | what it captures |
+|---|---|---|---|
+| **(A) typed-SNP only** | typed-SNP GWAS summary stats + LD reference | standard S-LDSC (Finucane et al. baseline) | annotations enriched in typed common-variant effects |
+| **(B) ARG only** | the ARG + phenotype | aggregate ŵ²_s over trees in each annotation | annotations enriched in branch-level (≡ allele-level) variance contributions, including rare variants |
+| **(C) hybrid (typed + ARG)** | typed SNPs + ARG + phenotype | joint SARGENT fit (β̂ for typed; ŵ²_s for trees); annotation gets a **(typed, untyped) pair** | all of the above, plus the gap between A and B per annotation = the SARGENT-distinctive "missing fraction in c" |
+
+To my knowledge no ARG-LMM paper has implemented (B), so (B) is itself a
+new method; (C) is the SARGENT-native contribution. Worth a 1-day
+literature pass before committing — flagged.
+
+**Per-annotation output (the three-flavour pie chart):**
+
+```
+                                    typed-only  ARG-only  hybrid
+                                       (A)        (B)      (C: typed | untyped)
+Coding (exonic)                      12.1%      12.4%     11.8% |  0.4%
+Promoter / 5'UTR                      8.0%       8.7%      7.3% |  1.0%
+3'UTR / splice                        3.1%       6.8%      2.9% |  3.7%   ← splice has untyped enrichment
+Enhancer / DHS                       17.6%      17.9%     16.4% |  1.3%
+Intronic (annotated TFBS)             6.8%       8.2%      6.2% |  1.6%
+Intronic (unannotated)               23.7%      22.1%     19.5% |  3.5%
+Intergenic (conserved)                8.9%       9.4%      8.6% |  0.7%
+Intergenic (unannotated)             19.8%      14.4%     16.4% | −0.4%   ← LDSC over-counts here
+                                    ─────      ─────     ─────────────
+                                    100.0%     99.9%      99.0%
+```
+
+(Schematic; real numbers TBD.) The story per annotation:
+
+- `(A) ≈ (B) ≈ typed of (C)`: the annotation is well-captured by typed SNPs;
+  S-LDSC alone suffices. (Coding, well-tagged regulatory regions.)
+- `(B) > (A)` and `untyped of (C) > 0`: the annotation contains a real
+  rare-variant fraction that typed-SNP methods miss. Biologically the
+  most interesting cells.
+- `(A) > (B)` or `untyped of (C) < 0`: LDSC tag-LD has crept in from
+  outside the annotation, or the ARG estimator is undercounting. Sanity
+  check / model diagnostic.
+
+##### Block 2.2.1 — Build the three estimators
+
+- [ ] `scripts/simulate.py` extension: assign causal variants to
+      annotation categories with per-category τ_c (controllable enrichment).
+- [ ] `test/eval/run_ldsc.py`: wrapper around standard S-LDSC on simulated
+      summary stats + simulated LD reference (flavour A).
+- [ ] `test/eval/arg_ldsc.py`: reads `<case>/est.w2.tsv` + per-tree
+      annotation matrix; produces per-annotation h²_c via multivariate
+      regression of ŵ²_s on annotation indicators with bootstrap CIs
+      (flavour B).
+- [ ] `test/eval/hybrid_ldsc.py`: reads SARGENT's β̂ + ŵ² jointly and
+      produces the (typed, untyped) split per annotation (flavour C).
+      Validation: typed + untyped sum matches gold-standard partitioned
+      GREML when feasible.
+
+##### Block 2.2.2 — Head-to-head validation experiment
+
+- [ ] Reference simulation: ~5 Mb under a known annotation scheme with
+      8–10 functional categories at realistic enrichments. Two regimes:
+      (i) all annotations well-typed (common-variant friendly);
+      (ii) some annotations rare-variant-rich (splice, conserved noncoding).
+- [ ] Run all three flavours; report `(A) | (B) | C-typed | C-untyped`
+      side-by-side for every annotation.
+- [ ] Quantify each method's bias vs truth, recovery of enrichment
+      ratios, and false-positive enrichment under a diffuse control
+      (no enrichment).
+- [ ] Write-up `test/eval/partitioned_h2.md`. This is the manuscript's
+      main results figure.
+
+##### Block 2.2.3 — Admixed-cohort partitioned h² (the AoU pitch)
+
+S-LDSC needs a population-matched LD reference; for admixed cohorts
+(AoU, HARC) there isn't one. The ARG is cohort-specific by construction.
+
+- [ ] Re-run 2.2.2 on a 50:50 admixed simulated cohort. Compare:
+      (A) S-LDSC with EUR LD reference (the realistic
+      mis-specified case), against (B) and (C).
+- [ ] Demonstrate where (A) breaks but (B)/(C) hold up.
+- [ ] Write-up `test/eval/partitioned_h2_admixed.md`.
+
+##### Block 2.2.4 — Non-positional annotations (LDSC cannot do these)
+
+Allele age (Block 2.1) is the first example; coalescent features
+(TMRCA-binned, coal-rate-variance) are the natural extensions. Only (B)
+and (C) can handle these — by construction (A) requires positional
+annotations.
+
+- [ ] Wire age-bin annotations from Block 2.1 into `arg_ldsc.py` /
+      `hybrid_ldsc.py`.
+- [ ] Demonstrate the partition; note that the typed (A) column is
+      "N/A" for these.
+
+Total estimated effort: 3–4 weeks for 2.2.1–2.2.4 once Block 2.1 is in
+place.
 
 #### Block 2.3 — ARG-aware fine-mapping (likely a separate paper)
 
