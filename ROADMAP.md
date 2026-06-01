@@ -1,6 +1,6 @@
 # SARGENT — Development Roadmap
 
-Last updated: 2026-05-31.
+Last updated: 2026-06-01.
 
 This document captures the agreed plan for finalising SARGENT. The
 priority order is **correctness first, scale later**. We finish each
@@ -76,6 +76,31 @@ optimisations needed for biobank scale.
 > and (b) CG-iteration cap in `var_random` to fix the Stage-2 hang on
 > ill-conditioned cells. Branches consolidated: merge commit
 > `6061f57` brings Block 1.2 + ROADMAP Applications arc into PR #21.
+>
+> **2026-06-01 — Block 2.5.2 verdict: fused-lasso (Phase 11) un-parks.**
+> The controlled-polygenicity sweep (3 block_frac × 2 demog × 5 seeds at
+> n=300, L=300kb; 381 min wall on the laptop) shows the truth-side
+> `M_e,ARG` separates the three regimes by ~100× (4.7 → 603) but the
+> **estimated `M_e,ARG` is flat at 12–20 across all six cells**. The
+> current per-tree REML EM cannot recover polygenicity at this n; the
+> variance-capture curve from the estimator is uninformative regardless
+> of true architecture. This triggers the pre-registered "estimator
+> inadequate" outcome from `block2_5_2.md`'s decision rule.
+>
+> **Phase 11 (sparse fused lasso, hierarchical centering on `log ws²`)**
+> moves off the parking lot. Acceptance criterion: estimated `M_e,ARG`
+> distinguishes the three Block 2.5.2 regimes by ≥ 10×, variance-capture
+> curves are visibly different at bf=0.005 vs bf=0.5 on the estimator
+> side, no Block 1.2 localization-AUC regression, diffuse-control selects
+> ~zero blocks. Block 2.6 below. CLAIMS: D1 stays WEAK pending fix;
+> **D2 demotes to FALSIFIED at current estimator**. See
+> `test/eval/block2_5_2.md`.
+>
+> Also landed 2026-05-31 / 06-01: Block 2.1 (allele-age architecture in
+> `simulate.py` + `age_partition.py`), Block 2.5.1 (architecture metrics
+> + qualitative validation), Block 2.5.3 prep (per-tree mean-branch-age
+> + age-binned variance-capture wiring in `arch_metrics.py` /
+> `plot_arch.py`).
 
 If this session is interrupted, restart from the next un-checked item
 in **Block 0 / Block 1** in the Active plan immediately below.
@@ -472,18 +497,65 @@ LD-machinery entirely.
 Estimated effort: ~2 weeks for 2.5.1 + 2.5.2 (heavy reuse of existing
 infra); ~1-2 weeks for 2.5.3 after Blocks 2.1 and 2.2 land.
 
-#### Old Block 2 (Phase 11 sparse fused lasso) — moved to parking lot
+#### Block 2.6 — Phase 11 fused lasso (REACTIVATED 2026-06-01)
 
-The hierarchical-centering + sparse-fused-lasso `ws²` redesign was
-motivated by hopes of closing a ~0.10 AUC gap between the per-tree REML
-estimator and the idealized ceiling. Block 1.2 shows the gap is
-0.04–0.11 across the grid (typical 0.05), and the *ceiling itself*
-limits absolute performance much more than estimator quality. The redesign
-would refine an already-near-ceiling estimator. **Parked**; revisit if
-a specific application (e.g., very-low-contrast localization) needs the
-extra 5% AUC and the existing estimator's per-seed scatter is the
-bottleneck. Detailed Phase 11 design preserved at `## Phase 11 — ws²
-redesign…` below.
+**Goal**: replace the current per-tree multiplicative-EM REML with a
+hierarchical-centering + sparse-fused-lasso prior on `log ws²` so that
+the *amplitude* of `ŵ²_s` (not just the *localization* of active
+trees) recovers the truth. The previous decision to park this redesign
+was based on Block 1.2's small estimator→ceiling AUC gap (0.04–0.11);
+Block 2.5.2 surfaces a separate failure that the parking-lot entry did
+not anticipate: at typical n the estimated `M_e,ARG` is flat at 12–20
+*regardless* of true polygenicity ranging from 5 to 600 trees. This
+defeats the polygenicity / variance-capture story (Block 2.5).
+
+**Why fused lasso specifically addresses this failure:**
+
+- Sparsity-on-levels (`λ₁ ||θ||_1`, θ = log `ws²`): allows `ws²` = 0
+  outside active regions — eliminates the ~12-tree noise-floor mass that
+  currently contaminates diffuse-architecture estimates.
+- Sparsity-on-differences (`λ₂ Σ_s |θ_s − θ_{s-1}|`) with ARG-aware
+  fusion weights `c_s ∝ ⟨G_s, G_{s−1}⟩`: smooths within active regions
+  → reduces the per-seed scatter (current CV ~35 % on est M_e) that
+  washes out architecture signal.
+- Self-certifying safety: at `λ₁, λ₂ → ∞`, `ws²` collapses to uniform
+  → ARG-BLUP-uniform → guaranteed no prediction regression.
+
+Detailed design preserved at `## Phase 11 — ws² redesign …` below in
+this document.
+
+**Acceptance criteria (pre-registered):**
+
+1. Estimated `M_e,ARG` separates the three Block 2.5.2 regimes (bf =
+   0.005 / 0.05 / 0.5) by ≥ 10× (vs 1.4× currently).
+2. Variance-capture curve at bf = 0.005 is visibly different from bf =
+   0.5 on the estimator side (currently they overlap).
+3. No regression on the Block 1.2 localization AUC (estimator AUC ≥
+   current 0.74 mean in the admixed-c1000 cell).
+4. Diffuse-control sim (uniform true ws²) selects ~zero blocks
+   post-thresholding.
+5. Cross-validated `λ₁`, `λ₂` are stable across seeds (CV bands narrow).
+
+**Sub-blocks (proposed order):**
+
+- [ ] 2.6.1 — implement hierarchical centering `log ws² = μ + θ_s` in
+      the C variational solver; verify identity behaviour at λ = 0.
+- [ ] 2.6.2 — add fused-lasso proximal step on θ (cyclic coordinate or
+      ADMM); start with positional fusion weights, upgrade to ARG-aware.
+- [ ] 2.6.3 — cross-validation grid for `(λ₁, λ₂)`.
+- [ ] 2.6.4 — re-run Block 2.5.2 sweep with the new estimator; check
+      acceptance criteria #1, #2.
+- [ ] 2.6.5 — re-run Block 1.2 localization sweep with the new
+      estimator; check #3.
+- [ ] 2.6.6 — diffuse-control sanity check (#4).
+- [ ] 2.6.7 — write-up `test/eval/phase11_fused_lasso.md`.
+
+**Effort estimate**: 2–4 weeks. Mostly C work in `src/lib/variational.c`
+on top of the existing var_random infrastructure.
+
+**Parking-lot entry replaced** by this block. Previous version preserved
+in git history (`56f6a3a`, parking-lot row "Phase 11 — sparse fused
+lasso `ws²` redesign").
 
 ### Block 3 — Manuscript rework (next week, Adam-led)
 
@@ -562,7 +634,7 @@ where the original detail lives (below in this doc).
 | **H4 (CLAIMS) — extra comparison baselines** (mkLMM, LMM-winGRM, hapla) | Manuscript currently lists 9 comparators; only 3–4 are essential | Implementation effort high; story can be made with 2–3 baselines (BayesR, GBLUP, ARG-BLUP-uniform plus one external). | If reviewers ask for a specific comparator. |
 | **Phase 5.5 leftovers** — smarter Hutchinson trace; OpenMP follow-up | Performance refinements after the preconditioner | Lower priority than the preconditioner pair (in Block 4). | Once Block 4 lands and the profile is re-shot. |
 | **B5 (CLAIMS) — Neandertal/archaic prediction** | Striking but un-validatable application | Validation is fundamentally hard (no Neandertal phenotypes); paper's rigor lives in Blocks 1.1 + 1.2. | If the rest of the paper holds and we want a capstone application. |
-| **Phase 11 — sparse fused lasso `ws²` redesign** (original Block 2) | Hierarchical centering on log `wₛ²` + sparsity-on-levels + sparsity-on-differences fused lasso; intended to close the ~0.10 estimator→ceiling AUC gap from Phase 10's single cell | Block 1.2 (2026-05-30) showed the gap is 0.04–0.11 across the grid (typical 0.05), and the ceiling itself is what limits AUC in low-contrast / panmictic cells. The redesign would refine an already-near-ceiling estimator. Detailed design preserved at `## Phase 11 — ws² redesign…` below. | If a target application (very-low-contrast localization; per-seed variance reduction for partitioned-h²) makes that 5% AUC worth ~weeks of engineering. |
+| ~~Phase 11 — sparse fused lasso `ws²` redesign~~ | **REACTIVATED 2026-06-01 as Block 2.6.** Parked on 2026-05-30 based on Block 1.2's small AUC gap; unparked on 2026-06-01 after Block 2.5.2 showed the same estimator fails to recover *amplitude* (M_e is flat at 12–20 regardless of true polygenicity 5→600). See Block 2.6 above. | n/a — moved out of parking lot. |
 
 ---
 
