@@ -111,6 +111,61 @@ def fig_me_arg(rows, group_key, out_paths):
     plt.close(fig)
 
 
+def fig_age_bin_curves(rows, out_paths):
+    """Variance-capture curves stratified by per-tree-age bin.
+
+    Expects --age-bins arch_metrics output. Plots one panel per group
+    (e.g., per architecture); within each panel, one curve per age bin.
+
+    Returns True if anything was plotted, False otherwise.
+    """
+    # collect groups
+    grouped = defaultdict(list)
+    for r in rows:
+        if r.get("truth", {}).get("age_bin_curves") or r.get("est", {}).get("age_bin_curves"):
+            grouped[r.get("ws2_architecture", "?")].append(r)
+    if not grouped:
+        return False
+
+    n_panels = len(grouped)
+    fig, axes = plt.subplots(1, n_panels, figsize=(5.0 * n_panels, 4.0),
+                             sharey=True)
+    if n_panels == 1:
+        axes = [axes]
+    cmap = plt.get_cmap("plasma")
+
+    for ax, (arch, rs) in zip(axes, grouped.items()):
+        # Collect all unique age-bin labels (one per case, may differ)
+        # Plot each case's curves with a colour per bin.
+        for r in rs:
+            ab = r.get("truth", {}).get("age_bin_curves") or r.get("est", {}).get("age_bin_curves")
+            if not ab:
+                continue
+            for i, (lbl, c) in enumerate(ab.items()):
+                k = np.array(c["k"], dtype=float)
+                f = np.array(c["f"], dtype=float)
+                S = c["S_bin"]
+                col = cmap(i / max(1, len(ab) - 1))
+                ax.plot(k / S, f, color=col, alpha=0.6, lw=1.0,
+                        label=lbl if rs.index(r) == 0 else None)
+        ax.set_xscale("log")
+        ax.set_xlim(1e-3, 1.0)
+        ax.set_ylim(0, 1.02)
+        ax.grid(True, alpha=0.3)
+        ax.set_xlabel("Top-k trees, fraction of bin total (k/S_bin)")
+        if ax is axes[0]:
+            ax.set_ylabel("Captured fraction of in-bin variance")
+        ax.set_title(f"arch = {arch}")
+        ax.legend(title="age bin (gen)", loc="lower right", fontsize=8, frameon=False)
+
+    fig.suptitle("Variance-capture curve by tree-age tercile (Block 2.5.3)", y=1.02)
+    fig.tight_layout()
+    for p in out_paths:
+        fig.savefig(p, dpi=160, bbox_inches="tight")
+    plt.close(fig)
+    return True
+
+
 def fig_branches_hist(rows, group_key, out_paths):
     """Histogram of per-branch variance contributions per group."""
     by_group = defaultdict(list)
@@ -176,6 +231,8 @@ def main():
     fig_variance_capture(rows, args.group_key, out_vcap)
     fig_me_arg(rows, args.group_key, out_me)
     had_branches = fig_branches_hist(rows, args.group_key, out_br)
+    out_age = [f"{pref}age_bins.{f}" for f in fmts]
+    had_age = fig_age_bin_curves(rows, out_age)
 
     for p in out_vcap + out_me:
         print(f"Wrote {p}")
@@ -184,6 +241,11 @@ def main():
             print(f"Wrote {p}")
     else:
         print("(no branches in input — skipped branches_hist; rerun arch_metrics without --no-branches)")
+    if had_age:
+        for p in out_age:
+            print(f"Wrote {p}")
+    else:
+        print("(no age-bin curves in input — skipped; rerun arch_metrics with --age-bins)")
 
 
 if __name__ == "__main__":
