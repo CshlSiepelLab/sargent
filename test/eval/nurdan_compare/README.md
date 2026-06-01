@@ -169,6 +169,83 @@ result confirmed.
 
 ---
 
+## SARGENT on Figure 2 data
+
+### Setup
+
+```bash
+REPO=/path/to/sargent
+SIM=~/test-sargent/nurdan-all/Simulations/Figure2_MissingData/\
+Simulation_350_0.1_8890_1Mb
+OUT=~/test-sargent/nurdan_compare
+
+# Import: symlinks bed/bim/fam/trees/phen + writes params.json
+python $REPO/scripts/import_nurdan_fig2.py \
+  --src $SIM \
+  --pheno 1 --pheno-col 3 \
+  --ds-factor 0 \
+  --h2-truth 0.8 \
+  --out $OUT/fig2_case
+
+# Run SARGENT (all 350 individuals, no held-out test set)
+time $REPO/build/src/progs/sargent \
+  --pheno-col 3 \
+  -o $OUT/sargent_fig2_ds0 \
+  $OUT/fig2_case.phen \
+  $OUT/fig2_case.trees \
+  $OUT/fig2_case
+```
+
+For downsampled SNPs, change `--ds-factor` and pass the matching BED prefix;
+the tree sequence is always the full `all.ts`.
+
+### Three-way comparison (Seed8890, all SNPs, truth h²_SNP≈0.80, h²_ARG≈0)
+
+| Method | h²_SNP | h²_ARG | h²_total | σ² | wall (s) |
+|---|---|---|---|---|---|
+| **SARGENT** | **0.725** | **0.106** | **0.831** | **0.175** | **4025\*** |
+| ARG-LMM (MKLMM) | 0.000 | 0.793 | 0.793 | ~0.20 | 99† |
+| ARG-LMM Stage 2 | BayesR | 0.882 | joint | — | 12† |
+| Just-Random | — | 0.638 | 0.638 | — | 93† |
+| GRM-LMM (ARG) | 0.000 | 0.771 | 0.771 | — | 1† |
+| GRM-LMM (SNP) | 0.000 | 0.808 | 0.808 | — | <1† |
+| Just-Fixed | 0.565 | — | — | — | <1† |
+
+\* includes tree traversal over 4869 raw trees; user CPU time 24m49s  
+† excludes kernel pre-computation from tree sequence; only 0.7s RData load counted
+
+### Key finding: SNP–ARG decomposition
+
+**SARGENT correctly separates SNP from ARG variance** (h²_SNP=0.725, h²_ARG=0.106,
+close to truth 0.80/0.00). This is by design: Stage 1 BayesR exhausts typed-SNP
+variance before Stage 2 fits the ARG residual.
+
+**MKLMM (ARG-LMM) cannot make this separation**: its alternating REML absorbs
+essentially all variance into the ARG random effect (h²_SNP=0.000, h²_ARG=0.793)
+because the ARG kernels span the same space as the genotypes. BIC lasso selects
+zero SNP fixed effects when the ARG already explains the data.
+
+This difference is not a bug in either method — it reflects a fundamental model
+choice. For estimating the total genetic variance (h²_total), both agree well
+(SARGENT 0.831, MKLMM 0.793 vs truth ~0.80). For decomposing SNP vs. non-typed
+ARG components, SARGENT's sequential design gives a well-defined answer;
+MKLMM's decomposition is model-dependent and not stable when kernels and
+genotypes are collinear.
+
+### Timing: what is and isn't counted
+
+| Step | SARGENT | MKLMM |
+|---|---|---|
+| Tree sequence → K matrices | included (tree traversal) | **excluded** (pre-computed offline) |
+| Variance component fitting | included | included |
+| Total wall time (this run) | 67 min (4025s) | 99s fit + ~?s pre-comp |
+
+The kernel pre-computation (Python/tskit → .npy → .RData) is the MKLMM step
+equivalent to SARGENT's tree traversal. It was run offline on Nurdan's server and
+is not timed here. Add it to the MKLMM pipeline for a fair end-to-end comparison.
+
+---
+
 ## Implementation notes
 
 ### ic.glmnet patch
