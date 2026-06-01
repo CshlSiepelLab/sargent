@@ -286,7 +286,14 @@ reproduces `h²_snp = −3.13` to the digit; Stage 1 is untouched by PR #21) —
 cap merely let these cells finish and reveal it. It is the fixed-vs-random
 non-identifiability (sargent's own note: "the classical fixed-vs-random
 decomposition is not identifiable") blowing up in the extreme-divergence regime.
-Tracked as a separate issue; diagnosis in `test/eval/h2_decomp_divergence.md`.
+Tracked as a separate issue (#22); diagnosis + fix in
+`test/eval/h2_decomp_divergence.md`. **Update (2026-06-01):** a trust-region
+cap on the Stage-1 fixed-effect variance (`VAR_FIXED_VFCAP=0.6`) recovers these
+cells' h²_snp from ≈−3 to sane near-truth values (harmlessly to good cells), but
+end-to-end validation shows it does **not** recover their prediction (SARGENT
+r²_calib stays ≈0; the bounded betas remain ancestry-confounded). So the cells
+stay excluded from the prediction verdict; robust cross-ancestry prediction on
+them awaits the ancestry-covariate fix.
 
 ### Why this is a robust null, not a wrong-regime artifact
 

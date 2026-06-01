@@ -162,9 +162,51 @@ populations), and the Neanderthal-style demonstration if added.
       (`SARGENT_CG_MAXIT` env override; commit `1fd75ab`).
 - [x] v1 sweep: 120 cells (3 mix × 2 typed × 5 seeds × 4 arms) on the
       Linux server. `test/eval/block1_1_design.md` § "v1 results".
-- [ ] Stage-1 BayesR h²_snp divergence audit (4 affected cells; server
-      ongoing; `test/eval/h2_decomp_divergence.md`). In the same h²
-      family as Block 1.3. Audit-only per the guardrails.
+- [x] Stage-1 BayesR h²_snp divergence audit (4 affected cells;
+      `test/eval/h2_decomp_divergence.md`, issue #22). Root cause:
+      cross-ancestry overfitting — on mixed-ancestry training the BayesR
+      coordinate descent fits allele-frequency-divergent SNPs to separate
+      the populations; betas escape the prior (~40×), σ² inflates to
+      ~4× var_y, h²_snp = 1 − σ²/var_y → ≈ −3. Clamp/damping/joint-EM all
+      fail (clamp is counterproductive). In the same h² family as Block 1.3.
+- [x] **Pragmatic fix (2026-06-01, per Adam's go):** trust-region cap on
+      the Stage-1 fixed-effect variance, `var(Xβ) ≤ 0.6·var_y`
+      (`VAR_FIXED_VFCAP`; env `SARGENT_S2_VFCAP`). Recovers all 4 cells'
+      **h²_snp** from ≈−3 to a sane value near the simulated truth; leaves
+      well-conditioned cells essentially untouched. **But end-to-end
+      validation shows it does NOT recover prediction** — SARGENT's r²_calib
+      on the degenerate cells stays ≈0 (the bounded betas are still
+      ancestry-confounded; a magnitude cap can't fix direction). So it is an
+      honest-h²-reporting fix, not a prediction fix. The 4 cells stay excluded
+      from the prediction verdict. Prediction needs option 1 (below).
+##### Block 1.1a — Ancestry-covariate Stage-1 correction (SCHEDULED 2026-06-01, per Adam)
+
+**Why scheduled now:** the vf-cap (#23) was validated to fix the h²_snp
+*decomposition* but **not** prediction — SARGENT's r²_calib on the degenerate
+cells stays ≈0 because the bounded betas are still ancestry-confounded (a
+magnitude cap can't fix direction). The principled fix — **ancestry covariates
+in Stage 1** — is therefore the prediction fix, and is a **prerequisite for a
+clean Block 1.1 v2** (F_ST=0.25 / Neanderthal deepen the divergence → more cells
+affected). Tracked in issue #22.
+
+- [ ] **Covariate source:** use the ARG kinship's leading eigenvectors (after
+      the rank-1 constant mode — these are the ancestry axes; reuses the GRM
+      SARGENT already computes and ties into Block 1.3 `center_kinship`).
+      Fallback: typed-SNP GRM PCs.
+- [ ] **Mechanism:** project the covariates out of `y` (and implicitly `X`)
+      before the BayesR sweep, or include them as unpenalized fixed effects in
+      `var_fixed`. Re-fit; confirm the betas no longer carry ancestry.
+- [ ] **Design decisions to settle at kickoff (the reason it was deferred):**
+      (a) how many eigenvectors/PCs; (b) ARG-GRM vs typed-GRM source;
+      (c) whether the BayesR/GBLUP comparators also receive the covariates
+      (fairness vs. "framework is more robust" framing).
+- [ ] **Validation:** re-run the 4 degenerate cells (+ well-behaved controls);
+      success = SARGENT r²_calib recovers toward ARG-BLUP-uniform on the
+      degenerate cells **without** degrading the well-behaved cells. Then the 4
+      cells can rejoin the prediction verdict, and the vf-cap can stay as a
+      belt-and-suspenders h²-reporting guard (or be removed if covariates make
+      it redundant).
+- [ ] **Sequencing:** do this *before* Block 1.1 v2 / the Neanderthal demo.
 
 **v2 deliverables (next experiment — keep the prediction story alive):**
 

@@ -27,6 +27,18 @@
 #define VAR_RANDOM_MAX_ITER  100     /* total EM iterations (burn-in + averaging) */
 #define FUSED_LASSO_PROX_MAX  200    /* coord-descent sweeps per prox call */
 #define FUSED_LASSO_PROX_TOL  1e-6   /* sweep-max delta below which prox converges */
+/* Trust-region cap on the Stage-1 fixed-effect variance: var(Xβ) ≤ this × var_y
+ * each sweep. On mixed-ancestry training the BayesR coordinate descent otherwise
+ * fits allele-frequency-divergent SNPs to separate the populations (confounding-
+ * by-ancestry); the betas escape the prior (max|β| ~40× normal), σ² inflates to
+ * ~4× var_y, and h²_snp = 1 − σ²/var_y diverges to ≈ −3. Capping var(Xβ) rescales
+ * the betas back onto the feasible set; it only binds on the pathological
+ * (overfit) cells — well-conditioned cells (var(Xβ) < cap·var_y) are untouched —
+ * and recovers the degenerate cells to a sane h²_snp near the simulated truth.
+ * This is a pragmatic regulariser, NOT a root-cause fix: the principled fix is
+ * ancestry covariates in Stage 1 (see issue #22 / ROADMAP). Env override:
+ * SARGENT_S2_VFCAP (0 disables). */
+#define VAR_FIXED_VFCAP      0.6
 
 /* Block 2.6 — fused-lasso proximal helpers (sparsity-on-levels +
  * sparsity-on-differences on theta = log ws² − mean log ws²).
@@ -338,6 +350,11 @@ void var_fixed(sargent_t *sg, int silent)
     double var_y = vec_var(sg->y, n);
     double old_sigma2 = sg->sigma2;
 
+    /* Fixed-effect variance cap (see VAR_FIXED_VFCAP above). Env override;
+     * SARGENT_S2_VFCAP=0 disables. */
+    double vf_cap = VAR_FIXED_VFCAP;
+    { const char *e = getenv("SARGENT_S2_VFCAP"); if (e) { double v = atof(e); if (v >= 0.0) vf_cap = v; } }
+
     for (int iter = 0; iter < VAR_FIXED_MAX_ITER; iter++) {
 
         /* u_bar = n/σ² is constant across all SNPs for standardised genotypes */
@@ -422,6 +439,22 @@ void var_fixed(sargent_t *sg, int silent)
         if (n_read > 0) {
             for (int k = 0; k < K; k++)
                 sg->pi_mix[k] = gamma_sum[k] / n_read;
+        }
+
+        /* Trust region on the fixed effect: the SNP-explained component
+         * var(Xβ) cannot exceed the total variance for a valid fit; an excess
+         * is the cross-ancestry overfit (betas escaping the prior). Rescale β
+         * (and the residual) onto var(Xβ) ≤ vf_cap·var_y. Since Xβ = y − r,
+         * the rescale needs no genotype pass. */
+        if (vf_cap > 0.0) {
+            double fit_ss = 0.0;
+            for (int i = 0; i < n; i++) { double f = sg->y[i] - r[i]; fit_ss += f * f; }
+            double vf = fit_ss / n, cap = vf_cap * var_y;
+            if (vf > cap && vf > 0.0) {
+                double s = sqrt(cap / vf);
+                for (int j = 0; j < p; j++) sg->beta[j] *= s;
+                for (int i = 0; i < n; i++) r[i] = (1.0 - s) * sg->y[i] + s * r[i];
+            }
         }
 
         /* Update residual variance: σ² = r^T r / n, with damped upward moves.
