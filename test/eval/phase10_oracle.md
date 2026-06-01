@@ -112,41 +112,67 @@ estimated arm (with `K` normalised to mean diag = 1, so the ratio is
 comparable) and SARGENT's own `h²_arg` from `est.summary.json`
 (`--arg-only`). True realised `h²_arg` ≈ 0.50 by design.
 
-Per-arm means over the 5 seeds:
+> **Update 2026-05-29 — Block 1.3 audit + patch landed.** The `+0.25–0.31`
+> bias originally reported below is fully explained by the rank-1 constant
+> offset in the aggregate ARG kinship (audit: `test/eval/fit_blup_audit.md`).
+> `predict.py:fit_blup` and `oracle_ws2.py` now double-center K
+> (commit `ebf757c`). The historical raw-table and patched-table are both
+> shown for the record; **the patched numbers are the ones to cite**.
+
+### Patched (post-`ebf757c`, double-centered K) — current
+
+|  | sparse mean | bias | diffuse mean | bias |
+|---|---|---|---|---|
+| truth (realised) | 0.506 | — | 0.491 | — |
+| **BLUP uniform**   | 0.531 | **+0.025** | 0.570 | **+0.079** |
+| **BLUP oracle**    | 0.541 | +0.035 | 0.570 | +0.079 |
+| **BLUP estimated** | 0.520 | +0.015 | 0.593 | +0.102 |
+| **sargent `--arg-only` `h²_arg`** | 0.568 | +0.062 | 0.588 | +0.098 |
+
+Mean BLUP bias dropped from `+0.27` raw to `+0.055` patched — matches the
+audit's predicted floor. All R² values were unchanged (cross-block
+centering is self-consistent). The remaining ~+0.05–0.10 bias is the
+irreducible finite-sample noise floor, matching SARGENT's C-code estimator
+and `fit_blup` on a SNP-GRM.
+
+### Raw (pre-patch) — historical record
+
+These numbers were reported before the centering patch and should NOT
+be cited:
 
 |  | diffuse mean | bias | sparse mean | bias |
 |---|---|---|---|---|
 | truth (realised) | 0.491 | — | 0.506 | — |
-| **BLUP uniform**   | 0.780 | **+0.29** | 0.746 | **+0.24** |
-| **BLUP oracle**    | 0.780 | **+0.29** | 0.751 | **+0.25** |
-| **BLUP estimated** | 0.805 | **+0.31** | 0.745 | **+0.24** |
-| **sargent `--arg-only` `h²_arg`** | 0.588 | **+0.10** | 0.568 | **+0.06** |
+| BLUP uniform   | 0.780 | +0.29 | 0.746 | +0.24 |
+| BLUP oracle    | 0.780 | +0.29 | 0.751 | +0.25 |
+| BLUP estimated | 0.805 | +0.31 | 0.745 | +0.24 |
+| sargent `--arg-only` `h²_arg` | 0.588 | +0.10 | 0.568 | +0.06 |
 
-Three takeaways:
+### Takeaways (revised)
 
 1. **Kinship choice barely changes the fitted `h²`.** uniform ≈ oracle ≈
-   estimated within each architecture. The BLUP absorbs the kinship into
-   `σ_u²` and the ratio `σ_u²/(σ_u²+σ²)` is invariant — so even on the
-   sparse + admixed regime where oracle gives the +0.023 R² prediction
-   edge, oracle and uniform give the same `h²` estimate. **Per-segment
-   weights do not improve `h²` recovery either** — same conclusion as the
-   prediction story, same root cause (BLUP smoothing).
-2. **All three BLUP arms over-estimate `h²` by ~+0.25.** Truth ≈ 0.50,
-   fits ≈ 0.75–0.80. This is a *substantial systematic upward bias of
-   `predict.py:fit_blup`* — the single-component multiplicative-EM REML
-   used in production for GBLUP / ARG-BLUP-uniform / SARGENT evaluation
-   across the whole eval pipeline. **It is independent of the
-   per-segment-weights question** and likely contaminates the historical
-   Phase 3 / Phase 6 prediction tables too. Queued as a "predict.py
-   `fit_blup` bias audit" item under cross-cutting concerns in the
-   ROADMAP.
-3. **SARGENT's own `--arg-only` `h²_arg` is much closer to truth**
-   (bias +0.06 sparse, +0.10 diffuse). The per-tree REML EM + PR averaging
-   in the C code produces a less biased estimate than the eval script's
-   single-component fit. Likely reasons: more flexible parameterisation
-   (S weights + σ²) and the per-tree score may de-bias against the
-   dominant rank-1 component of the aggregate ARG kinship. Pending the
-   audit for confirmation.
+   estimated within each architecture — now within ~0.02 (sparse) or
+   identical (diffuse) under the patched fit. The BLUP absorbs the
+   kinship into `σ_u²` and the ratio `σ_u²/(σ_u²+σ²)` is invariant.
+   **Per-segment weights do not improve `h²` recovery** — same conclusion
+   as the prediction story, same root cause (BLUP smoothing). Reinforces
+   B2 (FALSIFIED) and A3 (FALSIFIED).
+2. **The +0.25 bias was a `fit_blup` artifact, not a SARGENT property.**
+   Aggregate ARG kinship `K_arg = Σ_s G_s/S` carries a rank-1 constant
+   offset (~65% of trace, |cos(v_1,1)|=0.998) that `fit_blup` lumped into
+   σ_u². Double-centering K (`K ← (I−11ᵀ/n) K (I−11ᵀ/n)`) removes it;
+   the same centering applied to `K_test_train` preserves OOS R²
+   calibration. Audit and patch both committed; details in
+   `test/eval/fit_blup_audit.md`.
+3. **SARGENT's own `--arg-only` `h²_arg` was already at the noise floor.**
+   Bias +0.06 (sparse) / +0.10 (diffuse), unchanged by the patch (it
+   never used `fit_blup`). The per-tree REML EM dodges the rank-1
+   constant by fitting each `G_s` locally against σ². A1 stays HELD,
+   strengthened.
+4. **Historical Phase 3 / Phase 6 prediction R² tables are fine.** R²
+   is preserved under the centering. Any *h²* numbers reported in those
+   contexts that used `fit_blup` are biased upward by ~+0.25 and need a
+   footnote or refresh; the *R²* / portability numbers do not.
 
 ## Caveats and what was not tested
 
