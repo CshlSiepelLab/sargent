@@ -13,7 +13,11 @@
 #   N_TRAIN, N_TEST  = sample sizes per cell                   (500, 200)
 #   LENGTH           = sequence length in bp                   (1000000)
 #   NE               = effective population size               (1e4)
-#   SPLIT            = transfer split time, generations        (3500 → F_ST ≈ 0.15)
+#   SPLIT            = transfer split time, generations (legacy single value;
+#                       overridden by SPLITS if SPLITS is set)
+#   SPLITS           = space-separated split times for F_ST ladder
+#                       (Block 1.1 v2; default "3500", i.e. legacy single-F_ST)
+#                       e.g. "1500 3500 7000" → F_ST ≈ {0.05, 0.15, 0.25}
 #   H2_SNP, H2_ARG   = target heritabilities                   (0.3, 0.3)
 #   CAUSAL_FRAC      = fraction of variants that are causal    (0.01)
 #   MIX_FRAC_B       = space-separated train-B fractions       ("0.00 0.05 0.20")
@@ -44,6 +48,8 @@ N_TEST=${N_TEST:-200}
 LENGTH=${LENGTH:-1000000}
 NE=${NE:-1e4}
 SPLIT=${SPLIT:-3500}
+# Block 1.1 v2 — F_ST ladder. If SPLITS is unset, use the legacy single SPLIT.
+SPLITS=${SPLITS:-"$SPLIT"}
 H2_SNP=${H2_SNP:-0.3}
 H2_ARG=${H2_ARG:-0.3}
 CAUSAL_FRAC=${CAUSAL_FRAC:-0.01}
@@ -67,17 +73,18 @@ fi
 mkdir -p "$BASE"
 
 # Count total cells for progress reporting.
+N_SP=$(echo $SPLITS | wc -w | tr -d ' ')
 N_MIX=$(echo $MIX_FRAC_B | wc -w | tr -d ' ')
 N_TYP=$(echo $TYPED_FRACS | wc -w | tr -d ' ')
 N_SD=$(echo $SEEDS | wc -w | tr -d ' ')
-N_CELLS=$(( N_MIX * N_TYP * N_SD ))
+N_CELLS=$(( N_SP * N_MIX * N_TYP * N_SD ))
 
-echo "Block 1.1 v1: portability driver"
+echo "Block 1.1 portability driver"
 echo "  base   : $BASE"
-echo "  cells  : ${N_MIX} mix × ${N_TYP} typed × ${N_SD} seeds = ${N_CELLS}"
+echo "  cells  : ${N_SP} split × ${N_MIX} mix × ${N_TYP} typed × ${N_SD} seeds = ${N_CELLS}"
 echo "  scale  : n_train=$N_TRAIN n_test=$N_TEST L=$LENGTH Ne=$NE"
 echo "  trait  : h2_snp=$H2_SNP h2_arg=$H2_ARG causal_frac=$CAUSAL_FRAC"
-echo "  demog  : transfer split=$SPLIT gen (F_ST ≈ 0.15 at Ne=1e4)"
+echo "  demog  : transfer SPLITS={$SPLITS} gen"
 echo "  python : $PY"
 echo "  sargent: $SARGENT $SARGENT_EXTRA"
 echo
@@ -93,13 +100,20 @@ t_start=$(date +%s)
 cell=0
 skipped=0
 
-for mix in $MIX_FRAC_B; do
+for split in $SPLITS; do
+ # Cell-name encoding: when only one SPLIT is in play, keep the legacy
+ # name (no sp${split}_ prefix) so v1 outputs remain resumable. When
+ # multiple SPLITS are swept, prefix with sp${split}_ to keep cells
+ # separate per F_ST.
+ sptag_prefix=""
+ if [ "$N_SP" -gt 1 ]; then sptag_prefix="sp${split}_"; fi
+ for mix in $MIX_FRAC_B; do
   mtag=$(printf "%.2f" "$mix")
   for typed in $TYPED_FRACS; do
     ttag=$(printf "%.2f" "$typed")
     for seed in $SEEDS; do
       cell=$((cell + 1))
-      dir="$BASE/mix${mtag}_typed${ttag}_s${seed}"
+      dir="$BASE/${sptag_prefix}mix${mtag}_typed${ttag}_s${seed}"
       mkdir -p "$dir"
 
       # Resumability: skip if the final predict.json is already written.
@@ -114,7 +128,7 @@ for mix in $MIX_FRAC_B; do
 
       # 1. simulate
       $PY "$SIM" \
-          --demography transfer --transfer-split-time "$SPLIT" \
+          --demography transfer --transfer-split-time "$split" \
           --mix-fraction-B "$mix" \
           --n-indiv "$N_TRAIN" --n-test "$N_TEST" \
           --length "$LENGTH" --Ne "$NE" \
@@ -143,6 +157,7 @@ for mix in $MIX_FRAC_B; do
       printf "    done in %ds  (avg %ds/cell, ETA %dm)\n" "$celapsed" "$avg" "$((eta / 60))"
     done
   done
+ done
 done
 
 echo
@@ -156,14 +171,16 @@ import numpy as np
 
 base = sys.argv[1]
 rows = []
-for jf in sorted(glob.glob(os.path.join(base, "mix*_typed*_s*", "est.predict.json"))):
+# Accept both legacy (mix...) and SPLITS-prefixed (sp<split>_mix...) cell names.
+for jf in sorted(glob.glob(os.path.join(base, "*mix*_typed*_s*", "est.predict.json"))):
     d = json.load(open(jf))
     cell = os.path.basename(os.path.dirname(jf))
-    # parse mix/typed/seed from cell name
-    m = re.match(r"mix([\d.]+)_typed([\d.]+)_s(\d+)", cell)
+    # Optional 'sp<split>_' prefix for SPLITS-sweep mode (Block 1.1 v2).
+    m = re.match(r"(?:sp([\d.]+)_)?mix([\d.]+)_typed([\d.]+)_s(\d+)", cell)
     if not m:
         continue
-    mix, typed, seed = float(m.group(1)), float(m.group(2)), int(m.group(3))
+    split = float(m.group(1)) if m.group(1) else None
+    mix, typed, seed = float(m.group(2)), float(m.group(3)), int(m.group(4))
     # try to recover realised h2 / composition from params
     pjf = os.path.join(os.path.dirname(jf), "case.params.json")
     params = json.load(open(pjf)) if os.path.exists(pjf) else {}
@@ -178,7 +195,7 @@ for jf in sorted(glob.glob(os.path.join(base, "mix*_typed*_s*", "est.predict.jso
         rr = a.get("r")
         return rr * rr if isinstance(rr, (int, float)) else None
     rows.append({
-        "cell": cell, "mix": mix, "typed": typed, "seed": seed,
+        "cell": cell, "split": split, "mix": mix, "typed": typed, "seed": seed,
         "n_train_A": params.get("n_train_A"), "n_train_B": params.get("n_train_B"),
         "h2_snp_real": params.get("h2_snp_realised"),
         "h2_arg_real": params.get("h2_arg_realised"),
