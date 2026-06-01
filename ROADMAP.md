@@ -1,6 +1,6 @@
 # SARGENT — Development Roadmap
 
-Last updated: 2026-05-30.
+Last updated: 2026-05-31.
 
 This document captures the agreed plan for finalising SARGENT. The
 priority order is **correctness first, scale later**. We finish each
@@ -55,6 +55,27 @@ optimisations needed for biobank scale.
 > uniquely enables — allele-age decomposition, ARG-derived annotation
 > enrichment, ARG-aware fine-mapping. See `test/eval/block1_2_design.md`
 > § "v1 results" and the restructured Block 2 below.
+>
+> **2026-05-31 — Block 1.1 v1 NULL + reframe; merge consolidation.**
+> Block 1.1 v1 finished on the Linux server (commit `e6d46ee`): SARGENT
+> ≈ ARG-BLUP-uniform across the (mix_B × typed × seed) cross-ancestry
+> grid. **Within-method SARGENT differentiation: null** (extends Phase
+> 10 + Block 1.2 — per-segment ws² is not a prediction primitive).
+> **However**, per Adam's directive: cross-ancestry / Neanderthal
+> prediction has not been explored in the ARG-LMM literature, and the
+> framework's advantage **vs typed-SNP methods (BayesR / GBLUP)** is
+> substantial and novel. **Block 1.1 stays in the manuscript** as a
+> "framework helps where typed-SNP methods structurally fail"
+> demonstration. v2 focuses on F_ST ladder, admixed-cohort, and a
+> Neanderthal-style deep-divergence figure (see updated Block 1.1
+> below). Side-find: a Stage-1 BayesR h²_snp divergence on 4 extreme
+> cells (`test/eval/h2_decomp_divergence.md`); same h² family as
+> Block 1.3, audited only on the server pending Adam's sign-off. PR
+> #21 also lands (a) `r2_calib` calibration-invariant metric — raw R²
+> is destroyed by mis-calibration in extreme cross-ancestry cells —
+> and (b) CG-iteration cap in `var_random` to fix the Stage-2 hang on
+> ill-conditioned cells. Branches consolidated: merge commit
+> `6061f57` brings Block 1.2 + ROADMAP Applications arc into PR #21.
 
 If this session is interrupted, restart from the next un-checked item
 in **Block 0 / Block 1** in the Active plan immediately below.
@@ -82,23 +103,79 @@ we want to support.
 
 ### Block 1 — Critical experiments to back the tight story
 
-#### Block 1.1 — PRS portability / cross-ancestry transfer
+#### Block 1.1 — Cross-ancestry / archaic prediction (paper component, REFRAMED 2026-05-31)
 
-**Goal**: the prediction headline. Train in pop A, predict in pop B (and
-mixed-train, predict in A and B separately) across a range of split times
-/ genetic distances. Backs claims B4, B7, E1, E2, H6.
+**Original goal**: SARGENT > ARG-BLUP-uniform in cross-ancestry transfer.
 
-- [ ] Extend `scripts/simulate.py` to allow sampling *separately* from
-      the two source populations (`--demography admixed` currently
-      samples only from ADM). Add `--sample-from {ADM,A,B,mixed}` or
-      equivalent.
-- [ ] Driver `test/eval/portability_sweep.sh`: simulate (sweep split time
-      ∈ {1k, 2k, 4k, 8k} gen) × (train: pop A; test: pop A, B, mixed)
-      × seeds.
-- [ ] Score BayesR, GBLUP, ARG-BLUP-uniform, sequential SARGENT, joint-EM
-      SARGENT. Per-arm OOS R² with paired CIs across seeds.
-- [ ] Write-up `test/eval/portability.md` with the verdict on whether the
-      hybrid distinguishes itself in transfer (the linchpin claim).
+**v1 verdict (2026-05-31, commit `e6d46ee`)**: **NULL** between SARGENT
+and ARG-BLUP-uniform on the (mix_B × typed × seed) grid. Both arms
+similarly handle the transfer; per-segment ws² adds nothing — consistent
+with Phase 10 + Block 1.2 (ws² is a localization primitive, not a
+prediction primitive).
+
+**Reframed goal (Adam, 2026-05-31)**: cross-ancestry prediction has not
+been explored in the ARG-LMM literature; even with SARGENT ≈
+ARG-BLUP-uniform, demonstrating that **the ARG-based framework
+substantively improves over BayesR / GBLUP under cross-ancestry transfer**
+is a genuine contribution. Block 1.1 stays in the manuscript as a
+"framework helps where typed-SNP methods struggle" demonstration, not as
+a "SARGENT wins over ARG-BLUP-uniform" claim.
+
+Backs claims B1 (low-coverage typed → ARG kinship adds value), B4
+(reframed: ARG framework helps cross-ancestry transfer), E1/E2 (admixed
+populations), and the Neanderthal-style demonstration if added.
+
+**v1 deliverables (done):**
+- [x] `simulate.py`: `--demography transfer` + `--mix-fraction-B`
+      + ancestry labels (commit `ead724d`).
+- [x] `test/eval/portability.sh` driver + aggregator (`ead724d`).
+- [x] `test/eval/predict.py` `r2_calib` metric — calibration-invariant
+      R² required for cross-ancestry comparison; raw R² is destroyed by
+      calibration on extreme cells (commit `b6e3314`).
+- [x] `src/lib/variational.c` CG-iteration cap to fix the
+      ill-conditioned Stage-2 hang on extreme cross-ancestry cells
+      (`SARGENT_CG_MAXIT` env override; commit `1fd75ab`).
+- [x] v1 sweep: 120 cells (3 mix × 2 typed × 5 seeds × 4 arms) on the
+      Linux server. `test/eval/block1_1_design.md` § "v1 results".
+- [ ] Stage-1 BayesR h²_snp divergence audit (4 affected cells; server
+      ongoing; `test/eval/h2_decomp_divergence.md`). In the same h²
+      family as Block 1.3. Audit-only per the guardrails.
+
+**v2 deliverables (next experiment — keep the prediction story alive):**
+
+The 2026-05-31 directive wants Block 1.1 to demonstrate framework value
+over BayesR / GBLUP — not over ARG-BLUP-uniform. v2 focuses on regimes
+where typed-SNP methods are structurally limited and ARG-based methods
+help, regardless of which specific ARG method is used.
+
+- [ ] **F_ST ladder** (split time = 1500 / 3500 / 7000 →
+      F_ST ≈ 0.05 / 0.15 / 0.25): does the ARG framework's advantage
+      over BayesR widen with population distance?
+- [ ] **Admixed scenario** (recent pulse, α = 0.5, train on admixed cohort
+      → predict on admixed individuals): the AoU / HARC realistic
+      deployment regime. ARG-based methods get cohort-specific kinship;
+      BayesR does not.
+- [ ] **Neanderthal-style deep-divergence demonstration**: train on
+      modern, predict on simulated archaic-divergent individuals
+      (T_split ~ 600 kya). Even if the prediction is poor in absolute
+      terms, demonstrate that the ARG-based framework retains some
+      portability where typed-SNP methods collapse entirely. Backs B5.
+- [ ] **Low-typed-coverage ladder** (f_typed = 0.7 / 0.3 / 0.1): does
+      the ARG-framework-over-BayesR gap widen as typing coverage drops?
+      Block 1.1 v1 covered two coverages; expand for the figure.
+- [ ] **eGRM head-to-head**: include eGRM (Fan et al.) as an explicit
+      ARG-LMM baseline so the claim is not "SARGENT vs everything"
+      but "ARG-based vs BayesR / GBLUP".
+
+**Figures for the manuscript** (Block 3):
+
+- [ ] Cross-ancestry portability curve: framework R² vs population
+      distance, with BayesR / GBLUP / ARG-BLUP-uniform / SARGENT lines.
+      Shows the ARG-framework advantage opening up as F_ST grows.
+- [ ] Admixed-cohort prediction figure: per-arm R² in a realistic
+      admixed setting (AoU pitch).
+- [ ] (Stretch) Neanderthal projection figure: ARG-based methods alone
+      retain some predictive power at archaic divergence depths.
 
 #### Block 1.2 — Localization robustness sweep — ✅ DONE 2026-05-30
 

@@ -27,33 +27,52 @@ The current methodological focus and remaining open questions live in:
   an agent in the macOS-side session — check whether the file exists
   before assuming the audit is pending.
 
-## Current state (as of 2026-05-29, late)
+## Current state (as of 2026-05-31)
 
-Most recent merge: `f0ee0b9` — `phase10_oracle.md` h² addendum refreshed
-with patched (centered) numbers.
+Branch context: `fix/cg-hang-and-r2-miscalib` (draft PR #21). This
+branch now has the server-side fixes (CG cap, r2_calib) and the
+laptop-side Block 1.2 + ROADMAP work merged together (merge commit
+`6061f57`, 2026-05-31).
 
 Active work blocks:
 
-- **Block 1.1** (prediction headline): cross-ancestry PRS portability.
-  Pipeline complete (`portability.sh`); v1 launched on Adam's Linux
-  server (evolgen). 120 cells in flight. Plotting helper at
-  `test/eval/plot_portability.py` writes the headline curve + per-arm bars
-  when results land.
-- **Block 1.2** (localization robustness sweep): scaffolding complete
-  (`localization_sweep.sh`); v1 may be running on the laptop in parallel
-  (30 cells, ~2 h wall) — check `~/test-sargent/block1_2_v1/run.log`.
-  Design doc: `test/eval/block1_2_design.md`.
-- **Block 1.3** (`fit_blup` h² bias): **audit done + patch applied**.
-  `test/eval/predict.py` now double-centers K (see `center_kinship`);
-  fit_blup h² bias dropped from +0.26 → +0.05 (audit's predicted floor)
-  on all 10 Phase 10 sims. R² unchanged. Audit: `test/eval/fit_blup_audit.md`.
-  Patch commit: `ebf757c`.
-- **Block 0** (claims triage): Adam signed off (2026-05-29). `CLAIMS.md`
-  is current; bucket reassignments only if further evidence comes in.
+- **Block 1.1** (cross-ancestry PRS portability): v1 done on server
+  (commit `e6d46ee`). **Verdict: NULL within method** — SARGENT ≈
+  ARG-BLUP-uniform on the transfer ladder. See
+  `test/eval/block1_1_design.md`. Adam's 2026-05-31 directive: **keep
+  this as a paper component** — cross-ancestry / Neanderthal prediction
+  is novel for ARG-LMM and shows the framework helps over BayesR even
+  if SARGENT and ARG-BLUP-uniform tie. Plus a Stage-1 BayesR h²_snp
+  divergence audit on 4 extreme cells
+  (`test/eval/h2_decomp_divergence.md`) — server investigating.
+- **Block 1.2** (localization robustness sweep): v1 done on laptop
+  (commit `2c19ba3`). **Verdict: estimator above chance in 5/6 cells**;
+  estimator-ceiling gap small (0.04-0.11) across the grid. C1 HELD;
+  C4 [MINOR] → HELD; C5 weakens. See
+  `test/eval/block1_2_design.md` § "v1 results".
+- **Block 1.3** (`fit_blup` h² bias): **audit + patch done** (commits
+  `53af237`, `ebf757c`). `predict.py` double-centers K
+  (`center_kinship`); h² bias +0.26 → +0.05; R² unchanged.
+- **Block 0** (claims triage): Adam signed off 2026-05-29. Bucket
+  moves proposed by Block 1.2 (C1 → HELD; C4 → HELD [MINOR]; C5 →
+  WEAK) and Block 1.1 NULL verdict pending.
 
-Deferred: Block 2 (sparse fused lasso, gated on Block 1.2 outcome),
+**Block 2 is now the Applications arc** (replaces the deferred sparse
+fused lasso, demoted to parking lot). Localization confirmed as the
+SARGENT-distinctive strength; the applications direction builds on
+the per-tree variance primitive. Sub-blocks:
+
+- **2.1** Allele-age decomposition (highest priority new experiment)
+- **2.2** Partitioned heritability across functional annotations,
+  three-estimator framework: (A) typed-only S-LDSC, (B) ARG-only,
+  (C) hybrid with typed × untyped split per annotation
+- **2.3** ARG-aware fine-mapping (likely separate paper)
+- **2.4** "Linkage without pedigrees" framing for the manuscript
+- **2.5** Polygenicity / effect-size architecture (M_e,ARG,
+  variance-capture curve, per-branch effect-size — the HOW axis)
+
 Block 3 (manuscript, Adam-led, next week), Block 4 (efficiency),
-Block 5 (publication readiness).
+Block 5 (publication readiness) follow.
 
 ## Build / environment
 
