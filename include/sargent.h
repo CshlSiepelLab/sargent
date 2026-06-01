@@ -77,6 +77,15 @@ typedef struct {
      *   descent in var_joint; 0 = no EM (default; sequential SNP then ARG). */
     int uniform_arg;
     int em_iters;
+
+    /* Block 2.6 — sparse fused-lasso prior on log(ws²_s).
+     *   theta_s := log(ws2_s) - mean_log(ws2)
+     *   penalty(theta) = lambda1 * sum_s |theta_s|                  (sparsity-on-levels)
+     *                  + lambda2 * sum_s |theta_s - theta_{s-1}|    (sparsity-on-differences)
+     * Applied as a proximal step at the end of each var_random EM iteration.
+     * Defaults (both 0.0) reproduce the unregularised behaviour exactly. */
+    double fused_lasso_lambda1;
+    double fused_lasso_lambda2;
 } sargent_t;
 
 sargent_t *sargent_new(geno_reader_t *gr, tsk_treeseq_t *ts, double *y);

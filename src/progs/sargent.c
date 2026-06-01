@@ -188,7 +188,8 @@ static void write_summary_json(sargent_t *sg, const char *outroot,
 
 int main(int argc, char *argv[])
 {
-    signed char c;
+    int c;             /* getopt_long return; widened from signed char to int
+                          to support long-only option codes >= 0x100. */
     int opt_idx;
     int silent      = 0;
     int ts_geno     = 0;
@@ -202,6 +203,11 @@ int main(int argc, char *argv[])
     int em_flag_set = 0;     /* tracks whether --em was explicitly passed */
     int pheno_col   = 0;     /* 0 = last whitespace field (legacy); >0 = 1-indexed column */
     double pi0      = -1.0; /* < 0 means unset */
+    /* Block 2.6 — sparse fused-lasso prior on log ws². Both default to 0 (off).
+     * --ws2-l1 LAMBDA   — sparsity-on-levels strength.
+     * --ws2-l2 LAMBDA   — sparsity-on-differences strength. */
+    double ws2_l1   = 0.0;
+    double ws2_l2   = 0.0;
     const char *outroot = "sargent";
     const char *mode_str = "predict";   /* predict | localize (stub) */
 
@@ -218,6 +224,8 @@ int main(int argc, char *argv[])
         {"sequential",     0, 0, 'Q'},
         {"pheno-col",      1, 0, 'C'},
         {"mode",           1, 0, 'M'},
+        {"ws2-l1",         1, 0, 0x100},
+        {"ws2-l2",         1, 0, 0x101},
         {"version",        0, 0, 'v'},
         {"help",           0, 0, 'h'},
         {0, 0, 0, 0}
@@ -238,6 +246,8 @@ int main(int argc, char *argv[])
         case 'P': pi0         = atof(optarg);     break;
         case 'o': outroot     = optarg;           break;
         case 'N': nprobe      = atoi(optarg);     break;
+        case 0x100: ws2_l1    = atof(optarg);     break;
+        case 0x101: ws2_l2    = atof(optarg);     break;
         case 'v': printf("sargent version %s\n", SARGENT_VERSION); exit(0);
         case 'h': printf("%s", HELP); exit(0);
         case '?':
@@ -369,6 +379,8 @@ int main(int argc, char *argv[])
     if (nprobe > 0)  sg->nprobe = nprobe;
     if (uniform_arg) sg->uniform_arg = 1;
     if (em_iters > 0) sg->em_iters = em_iters;
+    if (ws2_l1 > 0.0) sg->fused_lasso_lambda1 = ws2_l1;
+    if (ws2_l2 > 0.0) sg->fused_lasso_lambda2 = ws2_l2;
     if (pi0 > 0.0 && pi0 < 1.0) {
         /* Beta(1, pi0/(1-pi0)) hyperprior: prior mean of phi = 1-pi0.
          * E.g. pi0=0.9 → Beta(1,9), prior mean phi=0.1 (10% active). */

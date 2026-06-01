@@ -25,6 +25,92 @@
 #define VAR_DEFAULT_M        2       /* spike-and-slab for random effects: null + slab */
 #define VAR_FIXED_MAX_ITER   500
 #define VAR_RANDOM_MAX_ITER  100     /* total EM iterations (burn-in + averaging) */
+#define FUSED_LASSO_PROX_MAX  200    /* coord-descent sweeps per prox call */
+#define FUSED_LASSO_PROX_TOL  1e-6   /* sweep-max delta below which prox converges */
+
+/* Block 2.6 — fused-lasso proximal helpers (sparsity-on-levels +
+ * sparsity-on-differences on theta = log ws² − mean log ws²).
+ *
+ * The penalty is
+ *     lambda1 * sum_s |theta_s|
+ *   + lambda2 * sum_{s>0} |theta_s − theta_{s-1}|
+ * (positional fusion weights; ARG-aware weights deferred to 2.6.x).
+ *
+ * The proximal step applied after each var_random EM update is:
+ *     theta ← argmin { 0.5 ||theta − theta_in||² + lambda1·||theta||_1 +
+ *                       lambda2·TV(theta) }
+ * We solve it via sequential application of (TV-prox by cyclic
+ * coordinate descent) then (soft-threshold for L1). This isn't the exact
+ * joint ADMM solution, but the gap is small at typical λ scales and the
+ * v1 implementation can be upgraded if 2.6 acceptance tests demand it. */
+
+static inline double soft_threshold(double x, double lambda)
+{
+    if (x >  lambda) return x - lambda;
+    if (x < -lambda) return x + lambda;
+    return 0.0;
+}
+
+/* Single-coordinate TV update: minimise
+ *     0.5 (x − y)² + lambda·(|x − a| + |x − b|)
+ * with respect to x, given fixed neighbours a, b. */
+static inline double tv_update_internal(double y, double a, double b, double lambda)
+{
+    double lo = a < b ? a : b;
+    double hi = a < b ? b : a;
+    if (y <  lo - 2.0 * lambda) return y + 2.0 * lambda;
+    if (y <  lo)                return lo;
+    if (y <= hi)                return y;
+    if (y <= hi + 2.0 * lambda) return hi;
+    return y - 2.0 * lambda;
+}
+
+/* Single-coordinate TV update at a boundary (only one neighbour a):
+ *     min 0.5 (x − y)² + lambda·|x − a| */
+static inline double tv_update_boundary(double y, double a, double lambda)
+{
+    if (y - a >  lambda) return y - lambda;
+    if (y - a < -lambda) return y + lambda;
+    return a;
+}
+
+/* 1D TV-L1 prox on theta (in-place). theta_in is the prox target;
+ * theta_out receives the solution.  Cyclic coordinate descent with
+ * convergence test, capped at FUSED_LASSO_PROX_MAX sweeps. */
+static void fused_lasso_prox(const double *theta_in, double *theta_out,
+                             int S, double lambda1, double lambda2)
+{
+    for (int s = 0; s < S; s++) theta_out[s] = theta_in[s];
+    if (S < 1) return;
+
+    if (lambda2 > 0.0 && S > 1) {
+        for (int it = 0; it < FUSED_LASSO_PROX_MAX; it++) {
+            double max_delta = 0.0;
+            for (int s = 0; s < S; s++) {
+                double y = theta_in[s];
+                double prev = theta_out[s];
+                double nx;
+                if (s == 0) {
+                    nx = tv_update_boundary(y, theta_out[1], lambda2);
+                } else if (s == S - 1) {
+                    nx = tv_update_boundary(y, theta_out[S - 2], lambda2);
+                } else {
+                    nx = tv_update_internal(y, theta_out[s - 1],
+                                            theta_out[s + 1], lambda2);
+                }
+                theta_out[s] = nx;
+                double d = fabs(nx - prev);
+                if (d > max_delta) max_delta = d;
+            }
+            if (max_delta < FUSED_LASSO_PROX_TOL) break;
+        }
+    }
+
+    if (lambda1 > 0.0) {
+        for (int s = 0; s < S; s++)
+            theta_out[s] = soft_threshold(theta_out[s], lambda1);
+    }
+}
 /* Iteration cap for the Stage-2 V-solves (probe + main CG). The ARG covariance
  * V = sigma2 I + sum_s ws2[s] G_s is ill-conditioned for diverged-ancestry
  * cells (population-structure block of clustered small eigenvalues; tree
@@ -176,6 +262,8 @@ sargent_t *sargent_new(geno_reader_t *gr, tsk_treeseq_t *ts, double *y)
     /* Alternative-mode flags; off by default */
     sg->uniform_arg = 0;
     sg->em_iters       = 0;
+    sg->fused_lasso_lambda1 = 0.0;
+    sg->fused_lasso_lambda2 = 0.0;
 
     return sg;
 }
@@ -492,6 +580,12 @@ void var_random(sargent_t *sg, int silent)
     double   *B          = malloc((size_t)S * sizeof(double));
     double   *ws2_accum  = calloc((size_t)S,  sizeof(double));
 
+    /* Block 2.6 — fused-lasso prox scratch (allocated only when needed). */
+    int use_fl = (sg->fused_lasso_lambda1 > 0.0 || sg->fused_lasso_lambda2 > 0.0);
+    double   *fl_log_ws2   = use_fl ? malloc((size_t)S * sizeof(double)) : NULL;
+    double   *fl_theta_in  = use_fl ? malloc((size_t)S * sizeof(double)) : NULL;
+    double   *fl_theta_out = use_fl ? malloc((size_t)S * sizeof(double)) : NULL;
+
     double    *gv        = malloc((size_t)n * sizeof(double));
 
     /* Bound the Stage-2 CG work (see VAR_RANDOM_CG_MAXIT above). Cap at the
@@ -510,7 +604,8 @@ void var_random(sargent_t *sg, int silent)
     int inc_ok = (tree_cov_matvec_inc_state_init(&inc, sg->ts, n, sg->hap_to_indiv) == 0);
 
     if (!r || !r_tilde || !A || !B || !ws2_accum ||
-        !gv || !cg || !inc_ok) {
+        !gv || !cg || !inc_ok ||
+        (use_fl && (!fl_log_ws2 || !fl_theta_in || !fl_theta_out))) {
         fprintf(stderr, "var_random: out of memory\n");
         goto cleanup;
     }
@@ -601,8 +696,33 @@ void var_random(sargent_t *sg, int silent)
                 if (B[s] > 1e-30)
                     sg->ws2[s] *= A[s] / B[s];
                 sg->ws2[s] = fmax(ws2_floor, fmin(ws2_max, sg->ws2[s]));
-                ws2_mean += sg->ws2[s];
             }
+
+            /* Block 2.6 — fused-lasso prox on log ws² (sparsity-on-levels +
+             * sparsity-on-differences).  At lambda1=lambda2=0 (default) this
+             * branch is skipped and behaviour is identical to the legacy EM. */
+            if ((sg->fused_lasso_lambda1 > 0.0 || sg->fused_lasso_lambda2 > 0.0)
+                && fl_log_ws2 != NULL) {
+                double mu = 0.0;
+                for (int s = 0; s < S; s++) {
+                    fl_log_ws2[s] = log(sg->ws2[s]);
+                    mu += fl_log_ws2[s];
+                }
+                mu /= S;
+                for (int s = 0; s < S; s++)
+                    fl_theta_in[s] = fl_log_ws2[s] - mu;
+
+                fused_lasso_prox(fl_theta_in, fl_theta_out, S,
+                                 sg->fused_lasso_lambda1,
+                                 sg->fused_lasso_lambda2);
+
+                for (int s = 0; s < S; s++) {
+                    double w = exp(mu + fl_theta_out[s]);
+                    sg->ws2[s] = fmax(ws2_floor, fmin(ws2_max, w));
+                }
+            }
+
+            for (int s = 0; s < S; s++) ws2_mean += sg->ws2[s];
             ws2_mean /= S;
         }
 
@@ -686,6 +806,9 @@ cleanup:
     free(B);
     free(ws2_accum);
     free(gv);
+    free(fl_log_ws2);
+    free(fl_theta_in);
+    free(fl_theta_out);
 }
 
 /* =========================================================================
