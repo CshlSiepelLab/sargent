@@ -93,6 +93,66 @@ change behaviour on **all** cells and so are deferred for decision:
 For Block 1.1 the 4 affected cells are excluded from the verdict and the
 conclusion is unchanged. Tracked as GitHub issue #22.
 
+## Fix applied (2026-06-01, per Adam's go): option-2 trust-region cap
+
+Adam chose the contained option 2 over the principled PC route (to avoid the
+"how many PCs" choice and the head-to-head-comparison complication; PCs captured
+in the ROADMAP for future). Implemented as a **trust region on the Stage-1
+fixed-effect variance**: each sweep, if `var(Xβ) > VAR_FIXED_VFCAP·var_y`,
+rescale the betas (and residual) back onto the feasible set
+(`src/lib/variational.c`, default `VAR_FIXED_VFCAP = 0.6`; env override
+`SARGENT_S2_VFCAP`, `0` disables). Since `Xβ = y − r`, the rescale needs no
+genotype pass.
+
+This is fundamentally different from the failed σ²-clamp: it shrinks the *betas*
+directly (which raises σ² and feeds back more shrinkage), rather than holding σ²
+low (which made the betas worse).
+
+**Cap selection (Stage-1-only `--snp-only` sweep, h²_snp; truth ≈ 0.30):**
+
+| cell | baseline | vf0.6 | well-behaved? |
+|---|---|---|---|
+| mix0.20_typed0.70_s1 | −3.13 | **+0.29** | — |
+| mix0.20_typed0.70_s4 | −3.03 | **+0.33** | — |
+| mix0.20_typed0.70_s5 | −3.39 | **+0.10** | — |
+| mix0.05_typed0.10_s4 | −1.16 | **+0.33** | — |
+| mix0.20_typed0.70_s2 | +0.588 | +0.588 | unchanged ✓ |
+| mix0.20_typed0.70_s3 | +0.670 | +0.647 | −0.02 (negligible) |
+
+vf=0.6 is the knee: all 4 degenerate cells recover to a sane h²_snp near the
+truth, `max|β|` drops from ~12 to ~3, and well-conditioned cells are untouched
+(those with `var(Xβ) < 0.6·var_y` never trigger the cap). Looser caps (0.8–1.0)
+leave s5 slightly negative; the π-cap variant does not work (the snap re-forms).
+
+**End-to-end prediction validation (full sargent+predict, cap on; SARGENT
+r²_calib new vs old, vs ARG-BLUP-uniform):**
+
+| cell | SARGENT old | SARGENT new | ARG-BLUP-uni |
+|---|---|---|---|
+| mix0.20_typed0.70_s1 | 0.005 | 0.000 | 0.330 |
+| mix0.20_typed0.70_s4 | 0.039 | 0.012 | 0.188 |
+| mix0.20_typed0.70_s5 | 0.000 | 0.000 | 0.137 |
+| mix0.05_typed0.10_s4 | 0.000 | 0.024 | 0.136 |
+| mix0.20_typed0.70_s2 (good) | 0.204 | 0.204 | 0.164 |
+| mix0.20_typed0.70_s3 (good) | 0.133 | 0.155 | 0.283 |
+| mix0.00_typed0.70_s1 (good) | 0.031 | 0.031 | 0.028 |
+
+**The cap fixes h²_snp but NOT prediction.** SARGENT's r²_calib on the
+degenerate cells stays ≈0 (vs ARG-BLUP-uniform 0.13–0.33); well-behaved cells
+are unchanged. This is expected and fundamental: r²_calib is scale-invariant,
+so bounding the betas' *magnitude* does not help when their *direction* is still
+ancestry-confounded. A magnitude cap cannot distinguish confounded betas from
+real ones, so no single cap recovers prediction without zeroing the legitimate
+fixed effect on well-behaved cells (where it genuinely helps, e.g. s2:
+0.204 > 0.164).
+
+**Bottom line:** option 2 is good enough to make the **h² decomposition** sane
+(the audit's named symptom: h²_snp −3 → near-truth), harmlessly to good cells,
+and is worth keeping for honest h² reporting. It is **not** a prediction fix —
+robust cross-ancestry prediction on the extreme cells needs the principled
+**ancestry-covariate** fix (option 1, issue #22). The 4 cells remain excluded
+from the Block 1.1 prediction verdict (which is robust regardless).
+
 ## Reproduce
 
 ```bash

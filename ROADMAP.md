@@ -137,9 +137,31 @@ populations), and the Neanderthal-style demonstration if added.
       (`SARGENT_CG_MAXIT` env override; commit `1fd75ab`).
 - [x] v1 sweep: 120 cells (3 mix × 2 typed × 5 seeds × 4 arms) on the
       Linux server. `test/eval/block1_1_design.md` § "v1 results".
-- [ ] Stage-1 BayesR h²_snp divergence audit (4 affected cells; server
-      ongoing; `test/eval/h2_decomp_divergence.md`). In the same h²
-      family as Block 1.3. Audit-only per the guardrails.
+- [x] Stage-1 BayesR h²_snp divergence audit (4 affected cells;
+      `test/eval/h2_decomp_divergence.md`, issue #22). Root cause:
+      cross-ancestry overfitting — on mixed-ancestry training the BayesR
+      coordinate descent fits allele-frequency-divergent SNPs to separate
+      the populations; betas escape the prior (~40×), σ² inflates to
+      ~4× var_y, h²_snp = 1 − σ²/var_y → ≈ −3. Clamp/damping/joint-EM all
+      fail (clamp is counterproductive). In the same h² family as Block 1.3.
+- [x] **Pragmatic fix (2026-06-01, per Adam's go):** trust-region cap on
+      the Stage-1 fixed-effect variance, `var(Xβ) ≤ 0.6·var_y`
+      (`VAR_FIXED_VFCAP`; env `SARGENT_S2_VFCAP`). Recovers all 4 cells'
+      **h²_snp** from ≈−3 to a sane value near the simulated truth; leaves
+      well-conditioned cells essentially untouched. **But end-to-end
+      validation shows it does NOT recover prediction** — SARGENT's r²_calib
+      on the degenerate cells stays ≈0 (the bounded betas are still
+      ancestry-confounded; a magnitude cap can't fix direction). So it is an
+      honest-h²-reporting fix, not a prediction fix. The 4 cells stay excluded
+      from the prediction verdict. Prediction needs option 1 (below).
+- [ ] **Future (deferred — captured per Adam 2026-06-01):** the principled
+      fix is **ancestry covariates in Stage 1** (PCs, or the ARG kinship's
+      leading eigenvectors — which after the rank-1 constant mode are the
+      ancestry axes; ties into Block 1.3 `center_kinship`). Deferred because
+      it adds the "how many PCs" choice and complicates head-to-head
+      comparison with BayesR/GBLUP. Revisit if the vf-cap proves inadequate
+      under v2's deeper divergence (F_ST=0.25 / Neanderthal), where more
+      cells will be affected. Tracked in issue #22.
 
 **v2 deliverables (next experiment — keep the prediction story alive):**
 
