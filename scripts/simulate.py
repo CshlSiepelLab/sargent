@@ -111,17 +111,23 @@ def sim_random_effect(ts, hap_ranks, n_indiv, ws2_vec, rng):
     return u
 
 
-def build_ws2_architecture(kind, n_trees, n_blocks, block_frac, contrast):
-    """Phase 10: directly construct a per-tree ws² profile (pre-normalisation).
+def build_ws2_architecture(kind, n_trees, n_blocks, block_frac, contrast,
+                           rng=None):
+    """Phase 10 / Block 2.6 — construct a per-tree ws² profile.
 
-    'diffuse' : constant ws² across all trees (flat landscape).  Oracle K is then
-                proportional to the uniform K, so the oracle BLUP coincides with
-                ARG-BLUP-uniform — the control that should show no advantage.
-    'sparse'  : a small floor everywhere plus `n_blocks` evenly-spaced, contiguous
-                runs of trees set high.  `block_frac` of all trees are active;
-                block:floor ratio is `contrast` (large ⇒ nearly all variance in
-                the blocks).  This is the large-effect-region regime that should
-                favour per-segment weights if anything does.
+    'diffuse'   : constant ws² across all trees (flat landscape). Oracle K is then
+                  proportional to the uniform K, so the oracle BLUP coincides
+                  with ARG-BLUP-uniform — the control that should show no advantage.
+    'sparse'    : floor + `n_blocks` evenly-spaced, contiguous runs of trees set
+                  high. `block_frac` of all trees are active; block:floor ratio
+                  is `contrast`. This is the large-contiguous-region regime that
+                  matches the fused-lasso prior; reviewers will read this as the
+                  best-case for sparsity-on-differences.
+    'scattered' : floor + `block_frac · n_trees` *individually scattered* active
+                  trees (Bernoulli-style draw, no contiguity). The robustness
+                  check on the sparse architecture — confirms that any per-segment
+                  amplitude advantage isn't an artifact of "fused-lasso prior
+                  matches the truth shape". `n_blocks` is ignored. Requires `rng`.
 
     Absolute scale is arbitrary — the caller renormalises ws2_vec so that the
     realised var(u) matches h2_arg, and the BLUP re-fits the overall variance
@@ -131,9 +137,17 @@ def build_ws2_architecture(kind, n_trees, n_blocks, block_frac, contrast):
         return np.zeros(0, dtype=float)
     if kind == "diffuse":
         return np.ones(n_trees, dtype=float)
-    # sparse
     floor = 1.0 / max(contrast, 1.0)
     ws2 = np.full(n_trees, floor, dtype=float)
+    if kind == "scattered":
+        if rng is None:
+            rng = np.random.default_rng(0)
+        n_active = max(1, int(round(block_frac * n_trees)))
+        n_active = min(n_active, n_trees)
+        active_idx = rng.choice(n_trees, size=n_active, replace=False)
+        ws2[active_idx] = 1.0
+        return ws2
+    # sparse (n_blocks contiguous, evenly spaced)
     n_active = max(n_blocks, int(round(block_frac * n_trees)))
     width = max(1, n_active // max(n_blocks, 1))
     centres = np.linspace(0, n_trees, n_blocks + 2)[1:-1]   # avoid genome edges
@@ -263,10 +277,15 @@ def main():
     # (control: oracle ≈ uniform) with a sparse contiguous large-effect landscape
     # (the regime that should favour per-segment weights, if anything does).
     ap.add_argument("--ws2-architecture", type=str, default=None,
-                    choices=["diffuse", "sparse"],
-                    help="directly build the per-tree ws² profile (Phase 10), overriding "
-                         "the --regime mixture draw. 'diffuse' = flat constant ws²; "
-                         "'sparse' = floor + contiguous large-effect blocks.")
+                    choices=["diffuse", "sparse", "scattered"],
+                    help="directly build the per-tree ws² profile (Phase 10 / Block 2.6), "
+                         "overriding the --regime mixture draw.  "
+                         "'diffuse' = flat constant ws²; "
+                         "'sparse' = floor + n_blocks evenly-spaced contiguous blocks; "
+                         "'scattered' = floor + block_frac·n_trees individually scattered "
+                         "active trees (n_blocks ignored). The 'scattered' option is the "
+                         "fused-lasso robustness check: confirms that any per-segment "
+                         "advantage isn't an artifact of the prior matching contiguous truth.")
     ap.add_argument("--ws2-n-blocks", type=int, default=3,
                     help="number of contiguous large-effect blocks (--ws2-architecture sparse)")
     ap.add_argument("--ws2-block-frac", type=float, default=0.05,
@@ -557,7 +576,8 @@ def main():
     if args.ws2_architecture is not None:
         ws2_vec = build_ws2_architecture(
             args.ws2_architecture, n_trees, args.ws2_n_blocks,
-            args.ws2_block_frac, args.ws2_block_contrast)
+            args.ws2_block_frac, args.ws2_block_contrast,
+            rng=rng)
     else:
         mix_draw = rng.choice(M, size=n_trees, p=phi_mix)
         ws2_vec  = tau2_mix[mix_draw]       # shape (n_trees,)
