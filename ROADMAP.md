@@ -77,6 +77,21 @@ optimisations needed for biobank scale.
 > ill-conditioned cells. Branches consolidated: merge commit
 > `6061f57` brings Block 1.2 + ROADMAP Applications arc into PR #21.
 >
+> **2026-06-01 (pm) — Block 2.6 partial verdict; spike-and-slab on ws² is
+> the right next step.** The fused-lasso prior on `θ = log ws² − mean log ws²`
+> (Block 2.6.1–2.6.4) shipped on branch `lap/block2.6-fused-lasso` and was
+> tested on bf=0.005 and bf=0.5 cells of Block 2.5.2. Result:
+> the prox **does not solve polygenicity recovery** (M_e on bf=0.5
+> plateaus at 42 vs truth 600, regardless of λ₂ ∈ {0.5–10}; L1 on
+> bf=0.005 pushes the estimator toward uniform, the wrong direction).
+> However, **it modestly improves Block 1.2 localization AUC on oligogenic
+> regimes** (+0.10 at λ₁=0.5 on bf=0.005), so it ships as an opt-in
+> tuning knob — defaults are 0 (byte-identical to legacy). The polygenicity-
+> recovery target needs a **different prior**: spike-and-slab on `ws²_s`
+> directly (the prior the SARGENT main.tex Methods already derives but
+> the code abandoned for point-estimate REML EM). This becomes **new
+> Block 2.6.5**. Verdict writeup: `test/eval/block2_6_verdict.md`.
+>
 > **2026-06-01 — Block 2.5.2 verdict: fused-lasso (Phase 11) un-parks.**
 > The controlled-polygenicity sweep (3 block_frac × 2 demog × 5 seeds at
 > n=300, L=300kb; 381 min wall on the laptop) shows the truth-side
@@ -539,14 +554,38 @@ LD-machinery entirely.
 Estimated effort: ~2 weeks for 2.5.1 + 2.5.2 (heavy reuse of existing
 infra); ~1-2 weeks for 2.5.3 after Blocks 2.1 and 2.2 land.
 
-#### Block 2.6 — Phase 11 fused lasso (REACTIVATED 2026-06-01)
+#### Block 2.6 — Phase 11 fused lasso — ⚠️ PARTIAL VERDICT 2026-06-01
 
-**Goal**: replace the current per-tree multiplicative-EM REML with a
+**Status**: implemented + tested on 2 cells × 7 λ combos. Opt-in CLI
+flags `--ws2-l1` / `--ws2-l2` shipping as an additional tuning knob;
+default behaviour unchanged.
+
+**Verdict (see `test/eval/block2_6_verdict.md`):** the fused-lasso prox
+modestly improves Block 1.2 localization AUC in oligogenic regimes
+(+0.10 at λ₁=0.5 on bf=0.005) but **does not fix the polygenicity-
+recovery target** (M_e plateaus at 42 vs truth 600 on bf=0.5, regardless
+of λ₂ ∈ {0.5, 1, 2, 5, 10}; L1 pushes oligogenic estimates toward
+uniform — wrong direction).
+
+**Mechanism of the partial fix**: the post-EM prox can reshape the
+active set but cannot lift floored trees back. The EM's
+`ws²[s] *= A/B` runs *before* the prox each iteration; the variance
+floor clamp wins. Higher λ₂ doesn't help because the limit isn't
+penalty strength.
+
+**Mechanism of the wrong-direction effect on L1**: the prior is L1/L2
+on `θ = log ws² − mean(log ws²)`, which shrinks θ toward zero, i.e.
+pushes ws² toward *uniform*. The oligogenic regime needs the *opposite*:
+sparse ws² (many trees at exactly zero, few at slab variance). That's
+the **spike-and-slab on ws² directly** — the prior the SARGENT main.tex
+Methods derives but the code abandoned. See Block 2.6.5 below.
+
+**Original goal**: replace the current per-tree multiplicative-EM REML with a
 hierarchical-centering + sparse-fused-lasso prior on `log ws²` so that
 the *amplitude* of `ŵ²_s` (not just the *localization* of active
 trees) recovers the truth. The previous decision to park this redesign
 was based on Block 1.2's small estimator→ceiling AUC gap (0.04–0.11);
-Block 2.5.2 surfaces a separate failure that the parking-lot entry did
+Block 2.5.2 surfaced a separate failure that the parking-lot entry did
 not anticipate: at typical n the estimated `M_e,ARG` is flat at 12–20
 *regardless* of true polygenicity ranging from 5 to 600 trees. This
 defeats the polygenicity / variance-capture story (Block 2.5).
@@ -589,22 +628,68 @@ alongside `sparse`. `polygenicity_sweep.sh` defaults to `ARCHS="sparse
 scattered"`. Manuscript figures showing the fused-lasso advantage should
 show both architectures side-by-side.
 
-**Sub-blocks (proposed order):**
+**Sub-blocks:**
 
-- [ ] 2.6.1 — implement hierarchical centering `log ws² = μ + θ_s` in
-      the C variational solver; verify identity behaviour at λ = 0.
-- [ ] 2.6.2 — add fused-lasso proximal step on θ (cyclic coordinate or
-      ADMM); start with positional fusion weights, upgrade to ARG-aware.
-- [ ] 2.6.3 — cross-validation grid for `(λ₁, λ₂)`.
-- [ ] 2.6.4 — re-run Block 2.5.2 sweep with the new estimator; check
-      acceptance criteria #1, #2.
-- [ ] 2.6.5 — re-run Block 1.2 localization sweep with the new
-      estimator; check #3.
-- [ ] 2.6.6 — diffuse-control sanity check (#4).
-- [ ] 2.6.7 — write-up `test/eval/phase11_fused_lasso.md`.
+- [x] 2.6.1 — hierarchical centering `log ws² = μ + θ_s` (DONE; included
+      in branch `lap/block2.6-fused-lasso`, awaiting PR merge).
+- [x] 2.6.2 — fused-lasso proximal step on θ (DONE; cyclic coordinate
+      descent; positional fusion weights; ARG-aware weights deferred).
+- [x] 2.6.3 — λ-sweep on bf=0.5 (truth M_e=600) and bf=0.005 (truth M_e=9)
+      done. Results in `test/eval/block2_6_verdict.md`.
+- [x] 2.6.4 — verdict-write-up `test/eval/block2_6_verdict.md` (DONE).
 
-**Effort estimate**: 2–4 weeks. Mostly C work in `src/lib/variational.c`
-on top of the existing var_random infrastructure.
+#### Block 2.6.5 — Spike-and-slab on `ws²` directly (NEW 2026-06-01)
+
+The fused-lasso (2.6.1–2.6.4) is the *wrong prior* for the polygenicity-
+recovery target. It sparsifies θ = log(ws²) − mean(log(ws²)), which
+pushes ws² toward *uniform* (all trees at the slab mean). The right
+prior — the one the SARGENT main.tex Methods already derives but the
+code abandoned — is a **mixture spike-and-slab on `ws²_s` directly**:
+
+```
+ws²_s ~ φ_1 · δ(0) + φ_2 · δ(τ²)        (spike at 0, slab at τ²)
+   or:  Σ_m φ_m · δ(τ_m²)                (multi-component generalisation)
+```
+
+Sparsity is then multiplicative: each tree gets a posterior activation
+probability ρ_s ∈ [0, 1]. At posterior mode, most trees go to ρ_s = 0
+(exactly zero ws²), a few to ρ_s = 1 (slab variance). This is the
+direction the oligogenic regime needs.
+
+**Sub-blocks:**
+
+- [ ] 2.6.5.1 — Resurrect the marginalised mixture-prior update from
+      the original Phase 11 derivation (main.tex Methods). The update
+      equations exist on paper; the code abandoned them.
+- [ ] 2.6.5.2 — Implement in `src/lib/variational.c` alongside the
+      current per-tree REML EM; gate by CLI flag (`--ws2-prior {reml,mixture}`).
+- [ ] 2.6.5.3 — Re-run Block 2.5.2 with the mixture-prior estimator on
+      bf ∈ {0.005, 0.05, 0.5} × {sparse, scattered}.
+      **Acceptance criterion**: estimator M_e tracks truth M_e within 2×.
+- [ ] 2.6.5.4 — Re-run Block 1.2 localization sweep with the mixture-prior
+      estimator; check no AUC regression vs current 0.74 mean.
+- [ ] 2.6.5.5 — Cross-validation for `τ²` and `φ_m`.
+- [ ] 2.6.5.6 — Write-up `test/eval/block2_6_5_spike_slab.md`.
+
+**Effort estimate**: 2–3 weeks. The variational updates are derived in
+main.tex; the work is to (a) verify the derivation in the current code
+basis, (b) implement in C, (c) validate. Heavier than 2.6.1–2.6.2 but
+more contained than a full ADMM refactor.
+
+**Why this is the right next step:** main.tex's Methods derivation
+(starting from `\subsection*{Mean-field Variational Approximation}`)
+already lays out the variational update for the spike-and-slab mixture
+prior on `ws²_s`. The current C code took a shortcut (point-estimate
+REML EM on the variance components, post-hoc activation map for ρ); the
+shortcut works for total h² and prediction but fails on polygenicity
+recovery. Implementing the original derivation is faithful to the
+manuscript's Methods, not a redesign.
+
+**Original (2.6.1–2.6.4) acceptance criteria — preserved for record:**
+
+The pre-registered criteria below were the acceptance test for the
+fused-lasso on log ws². They are kept here for traceability of the
+partial verdict.
 
 **Parking-lot entry replaced** by this block. Previous version preserved
 in git history (`56f6a3a`, parking-lot row "Phase 11 — sparse fused
