@@ -225,14 +225,16 @@ BASE=$HOME/test-sargent/block1_1_pilot \
 If the pilot produces a sensible `portability_table.md`, fire the full v1
 with the default env vars (3 mix × 2 typed × 5 seeds = 120 cells).
 
-## Interpretation (v1, 2026-05-30) — PROVISIONAL (26/30 cells)
+## Interpretation (v1, 2026-05-31) — FINAL (30/30 cells)
 
-Status: 26 of 30 cells complete. The 4 missing cells (mostly `mix=0.20
-typed=0.70`) were lost to an out-of-memory event on the shared workstation
-(another user's ~150 GB jobs), not to the run itself; they are re-running
-behind a memory guard. The trend below is consistent across all six (mix ×
-typed) cells, so the 4 missing cells are very unlikely to change the call,
-but treat the exact numbers as provisional until 30/30.
+Status: all 30 cells complete. (4 cells originally hung in Stage 2 — see the
+CG-cap fix, PR #21; they were then lost once to an external OOM on the shared
+box, and finally completed cleanly. The CG cap is validated accuracy-neutral:
+cap=64 vs uncapped on a hard cell agree to Δh2_arg=1.2e-3, and a well-conditioned
+cell reproduces uncapped to 5 sig figs.) **Caveat:** those same 4 cells expose a
+*separate* fixed-effect fitting divergence (see "Fixed-effect divergence" below);
+the headline verdict is reported on the 26 well-behaved cells and is unchanged
+whether or not the 4 are included.
 
 **Metric note.** Read these on `r2_calib` (squared Pearson correlation), not
 raw R². In the cross-ancestry regime raw R² is destroyed by *calibration*,
@@ -245,13 +247,18 @@ isolates discrimination and is the fair cross-method metric. See the
 
 ### Result
 
-Mean `r2_calib` by training-set target-mix (collapsed over typed × seeds):
+Mean `r2_calib` (squared correlation) by target-mix, on the **26 well-behaved
+cells** (the 4 fixed-effect-divergent cells excluded; see below):
 
 | mix_B | GBLUP | ARG-BLUP-uni | SARGENT | **SARGENT − ARG-BLUP-uni** |
 |---|---|---|---|---|
 | 0.00 (n=10) | 0.048 | **0.069** | 0.053 | **−0.016** |
 | 0.05 (n=9)  | 0.038 | **0.096** | 0.047 | **−0.048** |
 | 0.20 (n=7)  | 0.171 | **0.221** | 0.141 | **−0.080** |
+
+The verdict is unchanged if the 4 divergent cells are kept (all-30 gap:
+−0.016 / −0.057 / −0.117 — more negative at mix=0.20, same direction). So the
+conclusion is robust to that choice.
 
 Two facts: (1) prediction transfers and scales sensibly — `r2_calib` rises
 with target-population training fraction (sanity ✓); (2) **SARGENT does not
@@ -262,6 +269,24 @@ beating both the SNP-GRM (GBLUP) and SARGENT's per-segment-weighted variant.
 The verdict rule required SARGENT **>** ARG-BLUP-uniform with the gap widening
 **in SARGENT's favour**. We observe the opposite ⇒ **null (mildly negative)
 prediction verdict.**
+
+### Fixed-effect divergence (separate finding, flagged for follow-up)
+
+Completing the 4 formerly-hung cells (`mix0.20_typed0.70` s1/s4/s5,
+`mix0.05_typed0.10` s4 — all extreme cross-ancestry) surfaced a **fixed-vs-random
+`h²` decomposition divergence in sargent's Stage-1 fit**: the *simulated* truth
+is `h²_snp ≈ h²_arg ≈ 0.30`, but sargent fits **`h²_snp ≈ −3`, `h²_arg ≈ +3.8`**
+(total stays ~sane). The garbage fixed effect collapses BayesR/SARGENT point
+prediction to ~0 `r2_calib` on these cells, while ARG-BLUP-uniform (no fixed
+effect) is unaffected — which is why the divergent cells make the mix=0.20 gap
+look worse.
+
+This is **pre-existing and independent of the CG-cap fix** (the uncapped run
+reproduces `h²_snp = −3.13` to the digit; Stage 1 is untouched by PR #21) — the
+cap merely let these cells finish and reveal it. It is the fixed-vs-random
+non-identifiability (sargent's own note: "the classical fixed-vs-random
+decomposition is not identifiable") blowing up in the extreme-divergence regime.
+Tracked as a separate issue; diagnosis in `test/eval/h2_decomp_divergence.md`.
 
 ### Why this is a robust null, not a wrong-regime artifact
 
