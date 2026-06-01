@@ -111,17 +111,23 @@ def sim_random_effect(ts, hap_ranks, n_indiv, ws2_vec, rng):
     return u
 
 
-def build_ws2_architecture(kind, n_trees, n_blocks, block_frac, contrast):
-    """Phase 10: directly construct a per-tree ws² profile (pre-normalisation).
+def build_ws2_architecture(kind, n_trees, n_blocks, block_frac, contrast,
+                           rng=None):
+    """Phase 10 / Block 2.6 — construct a per-tree ws² profile.
 
-    'diffuse' : constant ws² across all trees (flat landscape).  Oracle K is then
-                proportional to the uniform K, so the oracle BLUP coincides with
-                ARG-BLUP-uniform — the control that should show no advantage.
-    'sparse'  : a small floor everywhere plus `n_blocks` evenly-spaced, contiguous
-                runs of trees set high.  `block_frac` of all trees are active;
-                block:floor ratio is `contrast` (large ⇒ nearly all variance in
-                the blocks).  This is the large-effect-region regime that should
-                favour per-segment weights if anything does.
+    'diffuse'   : constant ws² across all trees (flat landscape). Oracle K is then
+                  proportional to the uniform K, so the oracle BLUP coincides
+                  with ARG-BLUP-uniform — the control that should show no advantage.
+    'sparse'    : floor + `n_blocks` evenly-spaced, contiguous runs of trees set
+                  high. `block_frac` of all trees are active; block:floor ratio
+                  is `contrast`. This is the large-contiguous-region regime that
+                  matches the fused-lasso prior; reviewers will read this as the
+                  best-case for sparsity-on-differences.
+    'scattered' : floor + `block_frac · n_trees` *individually scattered* active
+                  trees (Bernoulli-style draw, no contiguity). The robustness
+                  check on the sparse architecture — confirms that any per-segment
+                  amplitude advantage isn't an artifact of "fused-lasso prior
+                  matches the truth shape". `n_blocks` is ignored. Requires `rng`.
 
     Absolute scale is arbitrary — the caller renormalises ws2_vec so that the
     realised var(u) matches h2_arg, and the BLUP re-fits the overall variance
@@ -131,9 +137,17 @@ def build_ws2_architecture(kind, n_trees, n_blocks, block_frac, contrast):
         return np.zeros(0, dtype=float)
     if kind == "diffuse":
         return np.ones(n_trees, dtype=float)
-    # sparse
     floor = 1.0 / max(contrast, 1.0)
     ws2 = np.full(n_trees, floor, dtype=float)
+    if kind == "scattered":
+        if rng is None:
+            rng = np.random.default_rng(0)
+        n_active = max(1, int(round(block_frac * n_trees)))
+        n_active = min(n_active, n_trees)
+        active_idx = rng.choice(n_trees, size=n_active, replace=False)
+        ws2[active_idx] = 1.0
+        return ws2
+    # sparse (n_blocks contiguous, evenly spaced)
     n_active = max(n_blocks, int(round(block_frac * n_trees)))
     width = max(1, n_active // max(n_blocks, 1))
     centres = np.linspace(0, n_trees, n_blocks + 2)[1:-1]   # avoid genome edges
@@ -192,6 +206,25 @@ def main():
                          "(default 0.01 = 1%%, matches SBayesR's canonical scenario for human "
                          "polygenic traits; typical GWAS-polygenic range is 0.01-0.10).  "
                          "Overridden by an explicit --n-causal.")
+    # Block 2.1 — age-stratified effect-size architecture.
+    # Scale per-variant β² by (age_j / age_ref)^tau before the h²_snp
+    # normalisation. tau=0 disables (default, current behaviour).
+    # tau<0 puts more variance on RECENT variants (rare-variant burden /
+    # purifying-selection-driven architecture; e.g., O'Connor / Zeng / Schoech).
+    # tau>0 puts more variance on ANCIENT variants (drift-dominated background).
+    # The total h²_snp is preserved by the downstream scale_f normalisation
+    # (line 488); tau redistributes the variance among causal SNPs by age.
+    ap.add_argument("--age-tau-coef", type=float, default=0.0,
+                    help="age-dependent effect-size exponent. β² scales as "
+                         "(age / age_ref)^tau.  Default 0 (no age dependence). "
+                         "Negative: young variants larger (purifying-selection "
+                         "model). Positive: ancient variants larger (drift "
+                         "background).")
+    ap.add_argument("--age-tau-ref", type=float, default=10000.0,
+                    help="reference age (generations) for age-tau scaling. "
+                         "Choose near the median variant age to keep magnitudes "
+                         "comparable across runs. Default 10000 generations "
+                         "(near 4·Ne for Ne=1e4).")
     ap.add_argument("--bed-coverage", type=float, default=1.0,
                     help="fraction of polymorphic SNPs to keep in the BED file (0 < f <= 1). "
                          "Hidden SNPs still contribute to y via their true β and remain in the "
@@ -244,10 +277,15 @@ def main():
     # (control: oracle ≈ uniform) with a sparse contiguous large-effect landscape
     # (the regime that should favour per-segment weights, if anything does).
     ap.add_argument("--ws2-architecture", type=str, default=None,
-                    choices=["diffuse", "sparse"],
-                    help="directly build the per-tree ws² profile (Phase 10), overriding "
-                         "the --regime mixture draw. 'diffuse' = flat constant ws²; "
-                         "'sparse' = floor + contiguous large-effect blocks.")
+                    choices=["diffuse", "sparse", "scattered"],
+                    help="directly build the per-tree ws² profile (Phase 10 / Block 2.6), "
+                         "overriding the --regime mixture draw.  "
+                         "'diffuse' = flat constant ws²; "
+                         "'sparse' = floor + n_blocks evenly-spaced contiguous blocks; "
+                         "'scattered' = floor + block_frac·n_trees individually scattered "
+                         "active trees (n_blocks ignored). The 'scattered' option is the "
+                         "fused-lasso robustness check: confirms that any per-segment "
+                         "advantage isn't an artifact of the prior matching contiguous truth.")
     ap.add_argument("--ws2-n-blocks", type=int, default=3,
                     help="number of contiguous large-effect blocks (--ws2-architecture sparse)")
     ap.add_argument("--ws2-block-frac", type=float, default=0.05,
@@ -369,7 +407,10 @@ def main():
     print("Collecting polymorphic variants ...", flush=True)
     dosage_list = []   # each entry: dosage vector (n_indiv,)
     pos_list    = []
+    age_list    = []   # per-variant age (generations), from mutation time
 
+    # Pre-build a tree iterator so we can resolve mutation.node → branch parent
+    # time when the mutation's own `time` field is unknown (older tskit).
     for var in ts.variants():
         alleles = [a for a in var.alleles if a is not None]
         if len(alleles) != 2:
@@ -381,6 +422,16 @@ def main():
             continue
         dosage_list.append(d.astype(float))
         pos_list.append(int(var.site.position))
+        # Age of the variant = mutation time (generations before present).
+        # Use the first mutation at the site (biallelic ⇒ exactly one).
+        mut = var.site.mutations[0]
+        age = float(mut.time) if not math.isnan(mut.time) else float("nan")
+        if math.isnan(age):
+            # Fallback: time of the parent of the mutation node in the local tree.
+            tree = ts.at(var.site.position)
+            parent_node = tree.parent(mut.node)
+            age = float(tree.time(parent_node)) if parent_node != tskit.NULL else 0.0
+        age_list.append(age)
 
     p = len(dosage_list)
     if p == 0:
@@ -389,6 +440,7 @@ def main():
 
     dosage = np.stack(dosage_list)   # (p, n_indiv)
     positions = pos_list
+    ages = np.array(age_list, dtype=float)  # per-variant age in generations
 
     # Decide which variants will be written to the BED file (the "observed panel").
     # Variants are still in the ARG and can carry true β; this controls what Stage 1
@@ -481,6 +533,19 @@ def main():
         if sigma2_mix[k] > 0:
             beta[j] = rng.normal(0.0, math.sqrt(sigma2_mix[k]))
 
+    # Block 2.1 — age-stratified effect-size scaling.
+    # β_j² is scaled by (age_j / age_ref)^tau before h²_snp normalisation.
+    # The downstream scale_f rescaling preserves total h²_snp; tau only
+    # changes the SHAPE of the effect-size distribution across variant ages.
+    if args.age_tau_coef != 0.0 and args.h2_snp > 0:
+        ref = max(args.age_tau_ref, 1.0)
+        # Clip ages to avoid 0^negative = inf for variants at the leaves.
+        # Use 1 generation as the floor.
+        eff_ages = np.clip(ages, 1.0, None) / ref
+        # β scales as sqrt of variance scaling → exponent is tau/2.
+        beta_scale = eff_ages ** (args.age_tau_coef / 2.0)
+        beta *= beta_scale
+
     # Fixed-effect phenotype contribution (uses standardized genotypes)
     y_fixed = dosage_std.T @ beta           # (n_indiv,)
 
@@ -511,7 +576,8 @@ def main():
     if args.ws2_architecture is not None:
         ws2_vec = build_ws2_architecture(
             args.ws2_architecture, n_trees, args.ws2_n_blocks,
-            args.ws2_block_frac, args.ws2_block_contrast)
+            args.ws2_block_frac, args.ws2_block_contrast,
+            rng=rng)
     else:
         mix_draw = rng.choice(M, size=n_trees, p=phi_mix)
         ws2_vec  = tau2_mix[mix_draw]       # shape (n_trees,)
@@ -628,11 +694,11 @@ def main():
     bed_idx_of[bed_mask] = np.arange(n_bed)
 
     with open(args.out + ".true_beta.tsv", "w") as f:
-        f.write("snp_idx\tbp_pos\tbeta\tin_bed\tbed_idx\n")
+        f.write("snp_idx\tbp_pos\tbeta\tin_bed\tbed_idx\tage\n")
         for j in causal_idx:
             in_bed = 1 if bed_mask[j] else 0
             f.write(f"{j}\t{positions[j]}\t{beta[j]:.8g}\t{in_bed}\t"
-                    f"{bed_idx_of[j] if in_bed else -1}\n")
+                    f"{bed_idx_of[j] if in_bed else -1}\t{ages[j]:.6g}\n")
 
     # ws2_vec is defined on the FULL ARG's trees (or on the only ARG if no test split).
     # If there is a test split, we also record train-tree ws² indexed by the simplified
@@ -683,6 +749,8 @@ def main():
         "h2_snp_target":   args.h2_snp,
         "h2_arg_target":   args.h2_arg,
         "h2_unobs_target": args.h2_unobs,
+        "age_tau_coef":    args.age_tau_coef,
+        "age_tau_ref":     args.age_tau_ref if args.age_tau_coef != 0 else None,
         "h2_snp_realised":   h2_snp_realised,
         "h2_arg_realised":   h2_arg_realised,
         "h2_unobs_realised": h2_unobs_realised,
