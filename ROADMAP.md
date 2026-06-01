@@ -179,14 +179,34 @@ populations), and the Neanderthal-style demonstration if added.
       ancestry-confounded; a magnitude cap can't fix direction). So it is an
       honest-h²-reporting fix, not a prediction fix. The 4 cells stay excluded
       from the prediction verdict. Prediction needs option 1 (below).
-- [ ] **Future (deferred — captured per Adam 2026-06-01):** the principled
-      fix is **ancestry covariates in Stage 1** (PCs, or the ARG kinship's
-      leading eigenvectors — which after the rank-1 constant mode are the
-      ancestry axes; ties into Block 1.3 `center_kinship`). Deferred because
-      it adds the "how many PCs" choice and complicates head-to-head
-      comparison with BayesR/GBLUP. Revisit if the vf-cap proves inadequate
-      under v2's deeper divergence (F_ST=0.25 / Neanderthal), where more
-      cells will be affected. Tracked in issue #22.
+##### Block 1.1a — Ancestry-covariate Stage-1 correction (SCHEDULED 2026-06-01, per Adam)
+
+**Why scheduled now:** the vf-cap (#23) was validated to fix the h²_snp
+*decomposition* but **not** prediction — SARGENT's r²_calib on the degenerate
+cells stays ≈0 because the bounded betas are still ancestry-confounded (a
+magnitude cap can't fix direction). The principled fix — **ancestry covariates
+in Stage 1** — is therefore the prediction fix, and is a **prerequisite for a
+clean Block 1.1 v2** (F_ST=0.25 / Neanderthal deepen the divergence → more cells
+affected). Tracked in issue #22.
+
+- [ ] **Covariate source:** use the ARG kinship's leading eigenvectors (after
+      the rank-1 constant mode — these are the ancestry axes; reuses the GRM
+      SARGENT already computes and ties into Block 1.3 `center_kinship`).
+      Fallback: typed-SNP GRM PCs.
+- [ ] **Mechanism:** project the covariates out of `y` (and implicitly `X`)
+      before the BayesR sweep, or include them as unpenalized fixed effects in
+      `var_fixed`. Re-fit; confirm the betas no longer carry ancestry.
+- [ ] **Design decisions to settle at kickoff (the reason it was deferred):**
+      (a) how many eigenvectors/PCs; (b) ARG-GRM vs typed-GRM source;
+      (c) whether the BayesR/GBLUP comparators also receive the covariates
+      (fairness vs. "framework is more robust" framing).
+- [ ] **Validation:** re-run the 4 degenerate cells (+ well-behaved controls);
+      success = SARGENT r²_calib recovers toward ARG-BLUP-uniform on the
+      degenerate cells **without** degrading the well-behaved cells. Then the 4
+      cells can rejoin the prediction verdict, and the vf-cap can stay as a
+      belt-and-suspenders h²-reporting guard (or be removed if covariates make
+      it redundant).
+- [ ] **Sequencing:** do this *before* Block 1.1 v2 / the Neanderthal demo.
 
 **v2 deliverables (next experiment — keep the prediction story alive):**
 
