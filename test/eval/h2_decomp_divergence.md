@@ -57,22 +57,41 @@ Stage 2) and thereby exposed it. It is the fixed-vs-random non-identifiability
 (sargent's own `--help`: "the classical fixed-vs-random decomposition is not
 identifiable") destabilising under cross-ancestry overfitting.
 
-## Candidate fixes (for Adam — do not modify production C without sign-off)
+## Tested candidate fixes — all three obvious ones FAIL
 
-1. **Hard floor `h2_snp ≥ 0` / clamp `σ² ≤ var_y`** — enforces the invariant the
-   comment already assumes. Cheap and makes the *reported* h² sane, but does
-   NOT fix the underlying overfit betas, so cross-ancestry prediction stays bad.
-2. **Stronger σ² cascade control** in `var_fixed` (symmetric damping / clip, as
-   `var_joint` uses), or a divergence guard that detects `σ² → >var_y` and
-   backtracks. Targets the root EM instability.
-3. **Joint-EM mode (`--em N`)** for these cells — let the ARG random effect
-   absorb the h²_arg variance so Stage 1 stops over-attributing it to (and
-   overfitting) the typed SNPs. Worth checking whether `--em` already avoids the
-   divergence on these cells (quick test, no code change).
-4. **Investigate the mixed-ancestry standardisation / mixture-assignment** — why
-   16% of SNPs land in the top effect class on mixed training. This is the
-   cross-ancestry analogue of the BayesR fixed-effect blow-up that also drives
-   the negative raw R² (see the `r2_calib` patch rationale in PR #21).
+Stage-1-only A/B tests on `mix0.20_typed0.70_s1` (truth h²_snp ≈ 0.30, baseline
+fit −3.13):
+
+| fix | resulting h²_snp | verdict |
+|---|---|---|
+| clamp σ² ≤ var_y | +0.000 | **counterproductive** — pegs reported h² at 0 but makes betas **14× larger** (‖β‖ 13 → 186). Holding σ² low keeps `u_bar = n/σ²` high ⇒ SNPs look *more* significant ⇒ *more* overfit. |
+| upward-damping factor (0.5 → 1.0) | −3.13 | no effect |
+| joint-EM (`--em`) | −3.13 | first `var_fixed` pass diverges identically; random effect inherits it |
+
+**Conclusion: `h²_snp = −3` is a symptom; the disease is cross-ancestry
+overfitting.** The fitted betas escape the prior entirely — BayesR largest
+mixture class is σ² = 1e-2·var_y ⇒ prior std ≈ 0.093, yet the degenerate cell
+fits **max|β| = 11.9** (~128 prior-stds; **40×** the well-behaved cells'
+max|β| = 0.31). On mixed-ancestry training (80% A / 20% B) the coordinate
+descent fits allele-frequency-divergent SNPs to separate ancestry
+(confounding-by-ancestry); the EM then raises σ² to ~4× var_y as a partial
+shrinkage response. The high baseline σ² is the EM's own (partial) correction —
+which is why clamping it *down* makes things worse.
+
+## Recommended direction (methodological — for Adam, none applied)
+
+A guard/clamp cannot fix this; it needs a real intervention, all of which
+change behaviour on **all** cells and so are deferred for decision:
+
+1. **Ancestry-PC covariates** in Stage 1 — standard PRS confounding control.
+2. **Cap total fixed-effect variance / sparser-or-capped large-class prior** so
+   betas cannot escape the prior.
+3. **Constrain the coordinate descent** (bound per-SNP β, or proper p ≫ n
+   shrinkage).
+4. **Filter / down-weight ancestry-divergent SNPs.**
+
+For Block 1.1 the 4 affected cells are excluded from the verdict and the
+conclusion is unchanged. Tracked as GitHub issue #22.
 
 ## Reproduce
 
