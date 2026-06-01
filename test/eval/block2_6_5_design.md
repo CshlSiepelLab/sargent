@@ -1,4 +1,25 @@
-# Block 2.6.5 — Spike-and-slab on `ws²` directly (design)
+# Block 2.6.5 — Spike-and-slab on `ws²` directly — **DROPPED 2026-06-01**
+
+> **Status (2026-06-01 evening): DROPPED from the active plan.**
+> The design below is preserved as a record of what was considered and why.
+>
+> **Reason for dropping (Adam, with Claude after a meta-review):** the
+> only manuscript claim this would back is a quantitative polygenicity
+> index (`M_e` tracking truth). That claim is third-tier — well below
+> localization (Block 1.2) and prediction (Blocks 1.1 / rare-variant) in
+> manuscript priority. Implementing this would cost ~2 weeks with high
+> algorithmic risk (the manuscript Methods documented the naïve approach
+> failing in 2024–2025; an analytic check today showed the most natural
+> "fix" (Wakefield-style Bayes factor) gives mathematically the same
+> too-weak score), and could hurt prediction by over-sparsifying. The
+> current per-tree REML EM continues to deliver localization, prediction,
+> and aggregated partitioned-h² well; only the quantitative M_e recovery
+> falls short, which the manuscript can handle by showing truth-side
+> variance-capture curves with a methodological caveat.
+>
+> Effort redirected to **Block 2.1 (allele-age decomposition)** and
+> **Block 2.2 (partitioned heritability across functional annotations)** —
+> both have clearer paths and bigger manuscript payoffs.
 
 Date: 2026-06-01 (pm). Status: design; implementation pending.
 
