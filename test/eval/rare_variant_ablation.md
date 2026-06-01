@@ -6,7 +6,10 @@ the laptop).
 Output (not in repo): `~/test-sargent/rare_variant/`.
 
 Backs **CLAIMS B6** (ARG kinship recovers prediction value from variants
-missing the typed-SNP panel).
+missing the typed-SNP panel) — *within population only*. Cross-ancestry
+is a separate axis (Block 1.1 v2 territory); this experiment establishes
+the **F_ST = 0 baseline** of a larger 2D surface (coverage × F_ST) that
+Block 1.1 v2 + this experiment together will cover.
 
 ## Design
 
@@ -41,6 +44,19 @@ sparse       0.3  5  +0.323±0.066  +0.318±0.052  +0.349±0.042  +0.339±0.046 
 sparse       0.1  5  +0.317±0.065  +0.309±0.070  +0.349±0.042  +0.351±0.053     +0.032±0.033
 ```
 
+## Single-population scope (important)
+
+All 40 cells use a single panmictic population (N_e = 10⁴); train and
+test individuals are drawn from the same population. There is **no
+cross-ancestry component in this experiment**. The only axis varied is
+how many polymorphic variants get written to the BED file (the typed
+panel). The ARG, the simulated causal effects, and the phenotypes are
+unchanged across the coverage axis — only the BED file shrinks.
+
+The hidden variants are common variants randomly dropped from the panel;
+this is *not* a true rare-MAF dropping experiment (that would be a separate
+Phase 6b/c-style ablation, currently dormant).
+
 ## Headline finding
 
 **ARG-BLUP-uni − BayesR gap is monotone in coverage, both architectures:**
@@ -66,6 +82,40 @@ because the 3 contiguous active blocks are typically well-tagged by
 the typed panel even at low coverage; scattered's individually-distributed
 active trees are not.
 
+### Bonus mechanistic observation: ARG-BLUP-uni R² is *invariant* in coverage
+
+Looking at the ARG-BLUP-uni column above: **the R² is identical to three
+decimal places across all four coverages** (scattered: 0.423 / 0.423 /
+0.423 / 0.423; sparse: 0.349 / 0.349 / 0.349 / 0.349). This is mechanistically
+clean: the `--bed-coverage` parameter controls what's in the **BED file**
+(typed panel); the **ARG itself is unchanged**. Since ARG-BLUP-uniform uses
+only the tree sequence (the random-effect side) and not the genotype matrix
+(no fixed effects), its prediction is structurally coverage-independent.
+
+This is a direct visual proof of the "ARG kinship is genotype-independent"
+mechanism — better than what the headline gap captures. Worth a sentence in
+the manuscript: *"At fixed n, the ARG-LMM prediction is invariant under
+typed-SNP coverage; the ARG carries the same information regardless of which
+descendant mutations were retained in the typed panel."*
+
+### Why scattered shows a larger ARG advantage than sparse
+
+Both architectures show the same monotone pattern, but the ARG advantage
+at cov=0.1 is **+0.075 R² (scattered)** vs **+0.032 (sparse)**. Mechanism:
+
+- **Sparse**: 3 contiguous blocks of active trees. Causal SNPs are
+  geographically clustered. Even at cov=0.1, the typed SNPs *inside an
+  active block* still tag the untyped ones via tight local LD → BayesR
+  loses less.
+- **Scattered**: active trees individually distributed. Random dropping
+  hits each active tree on its own; no nearby LD rescue → BayesR loses
+  more, ARG-LMM advantage grows.
+
+This is exactly why we now require scattered architecture in every
+future polygenicity / coverage validation (project rule, 2026-06-01):
+sparse alone would understate the ARG advantage and lead to incorrect
+manuscript framing.
+
 ## SARGENT (full hybrid) vs ARG-BLUP-uniform
 
 SARGENT R² tracks ARG-BLUP-uni within ~0.03 R² across all cells — consistent
@@ -78,22 +128,39 @@ primitive.
 ## CLAIMS implications
 
 **B6** (SARGENT's ARG kinship recovers prediction value from untyped
-variants): currently MIXED / REFRAME (the cleanly-tested cells in Phase
-6b/c were underpowered at n=200). This 40-cell, n=300 ablation gives a
-direct, monotone demonstration: **the ARG-kinship advantage grows with
-the proportion of causal variants missing from the typed panel**, in
-both sparse and scattered architectures. **Proposed bucket move: B6
-→ HELD**.
+variants — *within population*): moved to **HELD** in `CLAIMS.md`.
 
-Caveats for the bucket move:
-- All cells are panmictic (no population structure). Cross-ancestry +
-  low-coverage is the Block 1.1 v2 territory; the rare-variant story
-  there will need that sweep to land.
+Caveats baked into the bucket move:
+- All cells are panmictic. Cross-ancestry × coverage is a separate 2D
+  axis; Block 1.1 v2 will land the F_ST > 0 line of that surface.
 - The "untyped variants" here are common variants randomly dropped from
   the BED; truly rare (low-MAF) variant dropping is a separate
-  Block 6b/c experiment that isn't covered.
+  experiment.
 - The advantage is for the **framework** (ARG-LMM vs typed-SNP-only),
   not for the per-segment-weight feature. SARGENT ≈ ARG-BLUP-uni.
+
+## Joint coverage × F_ST surface (what Block 1.1 v2 will add)
+
+This experiment establishes the **F_ST = 0 baseline line** of a 2D
+coverage × F_ST surface. Block 1.1 v2 (running on the server) covers
+`f_typed ∈ {0.7, 0.1}` × `F_ST ∈ {0.07, 0.12, 0.16, 0.30}` × mix_B × seeds.
+Together they will populate the surface as follows:
+
+|  | F_ST = 0 (this exp) | F_ST > 0 (Block 1.1 v2) |
+|---|---|---|
+| f_typed = 1.0 | ✓ | not covered |
+| f_typed = 0.7 | ✓ | ✓ (4 F_ST × 3 mix_B × 5 seeds) |
+| f_typed = 0.3 | ✓ | not covered |
+| f_typed = 0.1 | ✓ | ✓ (4 F_ST × 3 mix_B × 5 seeds) |
+
+The manuscript-headline 2D figure (`Fig 3` candidate per
+`REFRAME_NOTES.md`) is **R² gain (ARG-LMM − BayesR) vs (F_ST, coverage)**.
+Open question once v2 lands: do the two mechanisms (rare-variant
+recovery + cross-ancestry transfer) **add** or **multiply**? A diagonal
+trend (gain monotone in F_ST + coverage drop) would imply additive;
+a strongly bowed surface (the cov=0.1, F_ST=0.3 corner showing more
+than the sum of marginal effects) would imply multiplicative — which
+would be the stronger manuscript pitch.
 
 ## Manuscript implications
 
