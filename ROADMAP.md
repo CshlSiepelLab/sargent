@@ -527,14 +527,25 @@ this document.
 **Acceptance criteria (pre-registered):**
 
 1. Estimated `M_e,ARG` separates the three Block 2.5.2 regimes (bf =
-   0.005 / 0.05 / 0.5) by ≥ 10× (vs 1.4× currently).
+   0.005 / 0.05 / 0.5) by ≥ 10× (vs 1.4× currently), **under both
+   `--ws2-architecture sparse` AND `--ws2-architecture scattered`** (the
+   fused-lasso advantage must not be specific to truth-shape matching
+   the prior; Adam 2026-06-01).
 2. Variance-capture curve at bf = 0.005 is visibly different from bf =
-   0.5 on the estimator side (currently they overlap).
+   0.5 on the estimator side, **under both architectures** (currently
+   they overlap under sparse; scattered is the robustness check).
 3. No regression on the Block 1.2 localization AUC (estimator AUC ≥
-   current 0.74 mean in the admixed-c1000 cell).
+   current 0.74 mean in the admixed-c1000 cell), **including a scattered
+   variant of the localization sweep**.
 4. Diffuse-control sim (uniform true ws²) selects ~zero blocks
    post-thresholding.
 5. Cross-validated `λ₁`, `λ₂` are stable across seeds (CV bands narrow).
+
+**Standing rule (Adam 2026-06-01)**: every future polygenicity /
+estimator-amplitude validation MUST include the `scattered` architecture
+alongside `sparse`. `polygenicity_sweep.sh` defaults to `ARCHS="sparse
+scattered"`. Manuscript figures showing the fused-lasso advantage should
+show both architectures side-by-side.
 
 **Sub-blocks (proposed order):**
 
