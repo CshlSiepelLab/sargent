@@ -169,6 +169,78 @@ def per_branch_summary(branches):
     }
 
 
+def per_tree_mean_branch_age(ts):
+    """For each tree, return the mean of (parent_time of branch) over all
+    internal branches, weighted by branch length.
+
+    This is the "age" of the tree in the same units as variant ages
+    (generations before present, assuming the underlying simulation set up
+    times that way). Used by Block 2.5.3 joint distributions: variance-
+    capture curves stratified by tree-age bin.
+
+    Returns:
+        ages: np.ndarray of length ts.num_trees, in same time units as ts.
+    """
+    ages = np.zeros(ts.num_trees)
+    for s, tree in enumerate(ts.trees()):
+        total_bl = 0.0
+        total_weighted_time = 0.0
+        for nd in tree.nodes():
+            parent = tree.parent(nd)
+            if parent == tskit.NULL:
+                continue
+            bl = tree.branch_length(nd)
+            if bl <= 0:
+                continue
+            total_bl += bl
+            total_weighted_time += bl * tree.time(parent)
+        ages[s] = total_weighted_time / total_bl if total_bl > 0 else float("nan")
+    return ages
+
+
+def capture_curve_by_age_bin(w2, ts, age_quantiles=(0.33, 0.67)):
+    """Variance-capture curves stratified by tree-age quantile bins.
+
+    Returns:
+        bins: list of (lo, hi) age ranges
+        curves: dict mapping (lo, hi) → (k_arr_normalised, captured_fraction)
+                Each curve uses log-spaced sampling of k like the main
+                variance_capture_curve.
+        per_bin_sum: dict (lo, hi) → total Σ w² in bin (for normalisation
+                     across bins later)
+    """
+    if len(w2) != ts.num_trees:
+        return None
+    ages = per_tree_mean_branch_age(ts)
+    qs = sorted(set([0.0] + list(age_quantiles) + [1.0]))
+    edges = np.quantile(ages, qs)
+    curves = {}
+    sums = {}
+    bins = []
+    for c in range(len(edges) - 1):
+        lo, hi = float(edges[c]), float(edges[c + 1])
+        if c == len(edges) - 2:
+            mask = (ages >= lo) & (ages <= hi)
+        else:
+            mask = (ages >= lo) & (ages < hi)
+        if not mask.any():
+            continue
+        bin_w2 = w2[mask]
+        k_arr, capt = variance_capture_curve(bin_w2)
+        # downsample k for storage
+        idx = _logspace_sample(len(k_arr))
+        curves[(lo, hi)] = {
+            "k":      [int(k_arr[i])  for i in idx],
+            "f":      [float(capt[i]) for i in idx],
+            "S_bin":  int(len(bin_w2)),
+            "sum_w2": float(bin_w2.sum()),
+            "me_arg": me_arg(bin_w2),
+        }
+        sums[(lo, hi)] = float(bin_w2.sum())
+        bins.append((lo, hi))
+    return {"bins": bins, "curves": curves, "sums": sums}
+
+
 # ---------------------------------------------------------------------------
 # I/O for a single case
 # ---------------------------------------------------------------------------
@@ -206,7 +278,8 @@ def load_ts_for_branches(case_prefix):
     return None, None
 
 
-def compute_case_metrics(case_prefix, sargent_prefix, want_branches=True):
+def compute_case_metrics(case_prefix, sargent_prefix, want_branches=True,
+                         want_age_bins=False):
     """Compute the three metrics for a single case.
 
     Returns a dict suitable for serialisation as JSON.
@@ -268,9 +341,27 @@ def compute_case_metrics(case_prefix, sargent_prefix, want_branches=True):
         }
 
     # ---- Per-branch effect-size distribution ---------------------------------
-    if want_branches:
+    if want_branches or want_age_bins:
         ts, which = load_ts_for_branches(case_prefix)
-        if ts is not None:
+    else:
+        ts, which = None, None
+
+    if want_age_bins and ts is not None:
+        # Use estimated w² if it matches; else truth.
+        for src_name, src_w2, src_S in (("est",   w2_est, result["S_est"]),
+                                        ("truth", (w2_true if 'w2_true' in locals() else None),
+                                                  result.get("S_truth", 0))):
+            if src_w2 is None or src_S != ts.num_trees:
+                continue
+            ab = capture_curve_by_age_bin(src_w2, ts)
+            if ab is not None:
+                result.setdefault(src_name, {})
+                result[src_name]["age_bin_curves"] = {
+                    f"[{lo:.0f},{hi:.0f}]": c for (lo, hi), c in ab["curves"].items()
+                }
+                break
+
+    if want_branches and ts is not None:
             # Choose which w2 vector to use: prefer truth if available and S
             # matches; else use estimated (and tolerate length mismatch).
             for src_name, src_w2, src_S in (("truth", result.get("truth") and w2_true, result.get("S_truth", 0)),
@@ -331,9 +422,14 @@ def main():
     ap.add_argument("--no-branches",    action="store_true",
                     help="Skip the per-branch effect-size distribution "
                          "(faster; useful for batch runs).")
+    ap.add_argument("--age-bins",       action="store_true",
+                    help="Block 2.5.3: also compute variance-capture curves "
+                         "stratified by per-tree mean-branch-age tercile "
+                         "(slower; requires the tree sequence).")
     args = ap.parse_args()
 
     want_branches = not args.no_branches
+    want_age_bins = args.age_bins
 
     if args.batch:
         rows = []
@@ -351,7 +447,8 @@ def main():
             print(f"[arch_metrics] {os.path.relpath(case, args.batch)}",
                   flush=True)
             rows.append(compute_case_metrics(case, est_prefix,
-                                             want_branches=want_branches))
+                                             want_branches=want_branches,
+                                             want_age_bins=want_age_bins))
         out_path = args.out or os.path.join(args.batch, "arch_metrics_batch.json")
         with open(out_path, "w") as f:
             json.dump(rows, f, indent=2)
@@ -361,7 +458,8 @@ def main():
             sys.exit("ERROR: --case-prefix and --sargent-prefix required "
                      "(or use --batch).")
         result = compute_case_metrics(args.case_prefix, args.sargent_prefix,
-                                      want_branches=want_branches)
+                                      want_branches=want_branches,
+                                      want_age_bins=want_age_bins)
         out_path = args.out or (args.sargent_prefix + ".arch_metrics.json")
         with open(out_path, "w") as f:
             json.dump(result, f, indent=2)
