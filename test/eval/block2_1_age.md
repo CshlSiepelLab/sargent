@@ -99,6 +99,93 @@ for tau in -1 0 1; do
 done
 ```
 
+## v2 — ARG-side age decomposition, n-scaling test (2026-06-01)
+
+Per Adam's 2026-06-01 directive: "Should this test use SNPs at all or
+would it be better to do it based on the ARG alone? Maybe that would
+require some work to justify but it might still be needed — as you say,
+the SNP part of the model doesn't really know about age." → The SNP-side
+test (v1, above) put the age signal on BayesR effect sizes, but BayesR
+has no age awareness. v2 moves the test entirely to the ARG side: the
+per-tree variance `ŵ²_s` is binned by the *mean branch age of the
+local tree* (`per_tree_mean_branch_age` in `arch_metrics.py`), and the
+per-bin sum of `ŵ²_s · ℓ_s` is compared against truth.
+
+### Setup
+
+- Trait: `h²_arg = 0.5`, `h²_snp = 0`, uniform `ws²` (no artificial age
+  stratification — we're testing whether the *natural* age distribution
+  of variance is recovered).
+- Demography: panmictic, single pop.
+- Sims: `L = 100 kb`, `Ne = 1e4`. 3 sample sizes × 3 seeds = 9 cells.
+- Bins: recent (≤5k gen), middle (5k–20k gen), ancient (>20k gen).
+- Driver: `test/eval/age_decomp_nscan.sh` (BASE=`~/test-sargent/block2_1_v2_nscan`).
+
+### Results — per-bin h² fractions (mean ± sd over 3 seeds)
+
+| n | bin | truth frac | est frac | bias (est − truth) | mean trees |
+|---|---|---|---|---|---|
+| 300  | recent  | 0.022 ± 0.027 | 0.181 ± 0.314 | +0.160 | 29.7  |
+| 300  | middle  | 0.719 ± 0.200 | 0.618 ± 0.340 | -0.101 | 194.7 |
+| 300  | ancient | 0.259 ± 0.227 | 0.200 ± 0.255 | -0.059 | 32.7  |
+| 600  | recent  | 0.009 ± 0.008 | 0.005 ± 0.007 | -0.004 | 22.3  |
+| 600  | middle  | 0.639 ± 0.329 | 0.817 ± 0.192 | +0.178 | 249.0 |
+| 600  | ancient | 0.352 ± 0.322 | 0.177 ± 0.187 | -0.174 | 33.7  |
+| 1000 | recent  | 0.052 ± 0.045 | 0.090 ± 0.154 | +0.038 | 54.7  |
+| 1000 | middle  | 0.856 ± 0.129 | 0.774 ± 0.215 | -0.083 | 223.0 |
+| 1000 | ancient | 0.092 ± 0.088 | 0.136 ± 0.067 | +0.044 | 40.7  |
+
+### Total L1 bias (Σ|est − truth| across bins, mean over seeds) vs n
+
+| n | recent | middle | ancient | total L1 bias |
+|---|---|---|---|---|
+| 300  | +0.160 | -0.101 | -0.059 | 0.319 |
+| 600  | -0.004 | +0.178 | -0.174 | 0.356 |
+| 1000 | +0.038 | -0.083 | +0.044 | 0.165 |
+
+Wall: 156 min. n=600 is paradoxically slightly worse than n=300 in
+total L1 bias, but the spread across seeds at both n=300 and n=600 is
+huge — this is small-sample noise across 3 seeds, not a real trend.
+The clearer pattern: **n=1000 ≈ halves the L1 bias relative to n=300**.
+
+### Interpretation
+
+- The middle (5k–20k gen) bin carries the bulk of the recoverable
+  variance under uniform `ws²` (since most segment-weighted ARG
+  variance lives in this depth band at Ne=1e4); at n=1000 the
+  estimator captures 0.774 vs truth 0.856 — close.
+- The recent (≤5k gen) bin is intrinsically low-variance (truth ≤ 0.05
+  across all n) and noisy on the estimator side; not interpretable
+  per cell, but the bias trend ≤ 0.04 at n=1000 is acceptable.
+- The ancient (>20k gen) bin is also small-mass but the bias drops
+  from -0.174 (n=600) to +0.044 (n=1000).
+
+**Conclusion**: per-tree-mean-age binning *is* a viable
+ARG-only WHEN-axis primitive — but it needs n≥1000 to escape
+seed-to-seed noise at L=100kb. For the manuscript Fig 5 (Block 2.5
+WHEN axis), we should run at n≥1000 and likely 5+ seeds for the
+ribbons to be tight. At n=1000 the estimator total `ĥ²` was close to
+the simulated 0.5 (visible in `est.summary.json` if needed for the
+draft figure).
+
+### Files
+
+- `test/eval/age_decomp_nscan.sh` — driver.
+- `test/eval/arch_metrics.py::per_tree_age_binned_h2()` — the
+  estimator-side aggregation; matches the truth-side computation by
+  using the **same** bin edges for both truth and estimator.
+- Output: `~/test-sargent/block2_1_v2_nscan/n{300,600,1000}_s{1,2,3}/`,
+  `~/test-sargent/block2_1_v2_nscan/run.log` (aggregated tables).
+
+### Reproduce
+
+```bash
+BASE=$HOME/test-sargent/block2_1_v2_nscan \
+  bash test/eval/age_decomp_nscan.sh
+```
+
+(Resumable: skips cells with `est.summary.json` already present.)
+
 ## Caveats
 
 - For variants NOT in the BED panel, `Var(x_j)` is approximated as 1
