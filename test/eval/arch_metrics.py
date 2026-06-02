@@ -169,6 +169,183 @@ def per_branch_summary(branches):
     }
 
 
+def per_branch_age_binned_variance(w2, ts, age_edges=None, n_bins=3):
+    """Block 2.1 ARG-based age decomposition.
+
+    For each branch b in tree s, the contribution to phenotype variance
+    (under the Brownian-motion-on-branches model that SARGENT uses) is:
+
+        contrib(b) = w²_s · 0.25 · bl(b) · Σ_i c_i²
+
+    where c_i is the number of haplotypes of individual i descending from
+    branch b. This is the per-branch term in tr(K_s) weighted by w²_s.
+
+    Aggregates these per-branch contributions into bins of branch
+    parent-time (the age at which a mutation on this branch would have
+    arisen). Returns per-bin total contribution, plus the bin edges and
+    counts.
+
+    Args:
+        w2: array of length ts.num_trees (one weight per tree).
+        ts: tskit.TreeSequence (typically the full ARG).
+        age_edges: optional list of bin edges in generations. If None,
+                   uses equal-quantile binning of the observed branch
+                   parent-times (n_bins bins).
+        n_bins: when age_edges is None, number of equal-quantile bins.
+
+    Returns:
+        dict with keys:
+            bins:        list of (lo, hi) bin tuples (in generations)
+            contribution_per_bin: array length n_bins, total contribution
+            n_branches_per_bin:   array length n_bins, branch count per bin
+            total:       scalar, sum across bins
+            fraction:    array length n_bins, normalised so sums to 1
+    """
+    w2 = np.asarray(w2, dtype=float)
+    if len(w2) != ts.num_trees:
+        raise ValueError(f"w2 length {len(w2)} != ts.num_trees {ts.num_trees}")
+
+    # Determine bin edges. If not supplied, sample branch ages to set
+    # equal-quantile edges. (Sampling avoids walking all branches twice.)
+    if age_edges is None:
+        sample_ages = []
+        sample_rate = max(1, ts.num_trees // 100)
+        for s, tree in enumerate(ts.trees()):
+            if s % sample_rate != 0: continue
+            for nd in tree.nodes():
+                if tree.parent(nd) == tskit.NULL: continue
+                if tree.branch_length(nd) <= 0: continue
+                sample_ages.append(float(tree.time(tree.parent(nd))))
+        if not sample_ages:
+            return None
+        qs = np.linspace(0, 1, n_bins + 1)
+        age_edges = np.quantile(sample_ages, qs)
+        age_edges[0] = -1.0   # ensure first edge is below any real age
+        age_edges[-1] = age_edges[-1] + 1.0
+    else:
+        age_edges = np.asarray(age_edges, dtype=float)
+
+    n_bin = len(age_edges) - 1
+    contrib_per_bin = np.zeros(n_bin)
+    nbranches_per_bin = np.zeros(n_bin, dtype=int)
+
+    for s, tree in enumerate(ts.trees()):
+        w_s = float(w2[s])
+        if w_s == 0.0: continue
+        for nd in tree.nodes():
+            parent = tree.parent(nd)
+            if parent == tskit.NULL: continue
+            bl = tree.branch_length(nd)
+            if bl <= 0: continue
+            age = float(tree.time(parent))
+            # c_i² sum (c_i = haplotype count below this branch per individual)
+            # Use sample-rank // 2 as the individual index, matching SARGENT.
+            counts = {}
+            for h in tree.samples(nd):
+                i = h // 2
+                counts[i] = counts.get(i, 0) + 1
+            if not counts: continue
+            c2_sum = sum(c*c for c in counts.values())
+            # Per-branch variance contribution (matches oracle_ws2.py's tr(G_s)
+            # per-branch decomposition):
+            contrib = w_s * 0.25 * bl * c2_sum
+            # Find bin
+            b = int(np.searchsorted(age_edges, age, side="right")) - 1
+            b = max(0, min(n_bin - 1, b))
+            contrib_per_bin[b] += contrib
+            nbranches_per_bin[b] += 1
+
+    total = float(contrib_per_bin.sum())
+    return {
+        "bins":     [(float(age_edges[i]), float(age_edges[i+1])) for i in range(n_bin)],
+        "contribution_per_bin": contrib_per_bin.tolist(),
+        "n_branches_per_bin":   nbranches_per_bin.tolist(),
+        "total":    total,
+        "fraction": (contrib_per_bin / max(total, 1e-30)).tolist(),
+        "age_edges": age_edges.tolist(),
+    }
+
+
+def per_tree_age_binned_h2(w2, ts, n_bins=3, age_edges=None):
+    """Block 2.1 — per-tree-age-binned heritability fraction.
+
+    Each tree is assigned to an age bin using its mean branch parent-time
+    (per_tree_mean_branch_age). The per-bin variance contribution is the
+    sum of ws²_s × tr(G_s) over trees in the bin, where tr(G_s) is
+    estimated from the tree's branch-length × n_below² structure.
+
+    This is the natural per-tree decomposition of variance by age that
+    the manuscript Fig 5 WHEN axis would use.
+
+    Args:
+        w2: array of length ts.num_trees (per-tree weights).
+        ts: tskit.TreeSequence.
+        n_bins: number of equal-quantile age bins (default 3).
+        age_edges: optional list of bin edges in generations; overrides
+                   n_bins-based equal-quantile binning.
+
+    Returns:
+        dict with keys:
+            bins:        list of (lo, hi) bin tuples
+            contribution_per_bin: array
+            n_trees_per_bin: array
+            total:       scalar
+            fraction:    array
+            tree_ages:   array of length ts.num_trees (the per-tree mean ages used)
+    """
+    w2 = np.asarray(w2, dtype=float)
+    if len(w2) != ts.num_trees:
+        raise ValueError(f"w2 length {len(w2)} != ts.num_trees {ts.num_trees}")
+
+    ages = per_tree_mean_branch_age(ts)
+    # Compute per-tree tr(G_s) estimate: Σ_branches 0.25 · bl · n_below²
+    tree_sizes = np.zeros(ts.num_trees)
+    for s, tree in enumerate(ts.trees()):
+        trG = 0.0
+        for nd in tree.nodes():
+            if tree.parent(nd) == tskit.NULL: continue
+            bl = tree.branch_length(nd)
+            if bl <= 0: continue
+            counts = {}
+            for h in tree.samples(nd):
+                i = h // 2
+                counts[i] = counts.get(i, 0) + 1
+            trG += 0.25 * bl * sum(c*c for c in counts.values())
+        tree_sizes[s] = trG
+
+    contributions = w2 * tree_sizes  # per-tree contribution to total variance
+
+    # Bin edges
+    if age_edges is None:
+        qs = np.linspace(0, 1, n_bins + 1)
+        age_edges = np.quantile(ages[~np.isnan(ages)], qs)
+        age_edges[0] -= 1.0
+        age_edges[-1] += 1.0
+    else:
+        age_edges = np.asarray(age_edges, dtype=float)
+    n_bin = len(age_edges) - 1
+
+    contrib_per_bin = np.zeros(n_bin)
+    ntrees_per_bin = np.zeros(n_bin, dtype=int)
+    for s in range(ts.num_trees):
+        if np.isnan(ages[s]): continue
+        b = int(np.searchsorted(age_edges, ages[s], side="right")) - 1
+        b = max(0, min(n_bin - 1, b))
+        contrib_per_bin[b] += contributions[s]
+        ntrees_per_bin[b] += 1
+
+    total = float(contrib_per_bin.sum())
+    return {
+        "bins":     [(float(age_edges[i]), float(age_edges[i+1])) for i in range(n_bin)],
+        "contribution_per_bin": contrib_per_bin.tolist(),
+        "n_trees_per_bin":      ntrees_per_bin.tolist(),
+        "total":    total,
+        "fraction": (contrib_per_bin / max(total, 1e-30)).tolist(),
+        "age_edges": age_edges.tolist(),
+        "tree_ages": ages.tolist(),
+    }
+
+
 def per_tree_mean_branch_age(ts):
     """For each tree, return the mean of (parent_time of branch) over all
     internal branches, weighted by branch length.
