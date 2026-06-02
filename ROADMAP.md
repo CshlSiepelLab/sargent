@@ -752,6 +752,21 @@ this stays deferred. Was Phase 12.
 - [ ] Sub-linear `max_iter` cap; smarter Hutchinson; sub-quadratic ARG matvec
       (Lee 2025 / Zhu 2026 direction); revisit Phase 5.5 OpenMP after
       preconditioner reshapes the profile.
+- [ ] **Large-n low-rank G_all extension (n > 5,000)**: the current `.gall`
+      approach stores and eigendecomposes a full n×n matrix, limiting
+      practical use to n ≈ 5,000 (25 MB storage, O(n³) one-time
+      eigendecompose < 30 s). For biobank scale (n ~ 50,000–500,000),
+      replace the full eigendecompose with a **randomised SVD** retaining
+      k ≈ 50–200 leading eigenvectors (Halko–Martinsson–Tropp 2011):
+      draw an n × k Gaussian sketch Y = G_all · Ω, orthogonalise Q = orth(Y),
+      then eigendecompose the k × k projected matrix Q^T G_all Q. Cost:
+      O(k · n · n_hap · S) for the sketch (k tree-sequence passes) vs O(n²·S)
+      for the full build — a factor of k/n improvement. The preconditioner
+      and EMMA search both extend naturally to the rank-k approximation.
+      Practical impact: extends the current n ≤ 5,000 ceiling to n ~ 100,000
+      with k = 100, at the cost of a slightly looser preconditioner.
+      **Not needed for the current methodological story; revisit when
+      biobank-scale validation is in scope.**
 
 ### Block 5 — Publication readiness (last)
 

@@ -12,9 +12,11 @@
 #include <stdio.h>
 #include <string.h>
 #include <getopt.h>
+#include <sys/stat.h>
 #include <tskit.h>
 #include "geno.h"
 #include "sargent.h"
+#include "gall.h"
 #include "variational.h"
 #include "sargent.help.h"
 
@@ -202,6 +204,7 @@ int main(int argc, char *argv[])
     int sequential_flag = 0; /* --sequential: explicit-no-op kept for forward-compat */
     int em_flag_set = 0;     /* tracks whether --em was explicitly passed */
     int pheno_col   = 0;     /* 0 = last whitespace field (legacy); >0 = 1-indexed column */
+    int precompute  = 0;     /* --precompute: force rebuild of .gall eigen cache */
     double pi0      = -1.0; /* < 0 means unset */
     /* Block 2.6 — sparse fused-lasso prior on log ws². Both default to 0 (off).
      * --ws2-l1 LAMBDA   — sparsity-on-levels strength.
@@ -226,12 +229,13 @@ int main(int argc, char *argv[])
         {"mode",           1, 0, 'M'},
         {"ws2-l1",         1, 0, 0x100},
         {"ws2-l2",         1, 0, 0x101},
+        {"precompute",     0, 0, 'X'},
         {"version",        0, 0, 'v'},
         {"help",           0, 0, 'h'},
         {0, 0, 0, 0}
     };
 
-    while ((c = getopt_long(argc, argv, "zGSAUQE:C:M:o:N:P:vh", long_opts, &opt_idx)) != -1) {
+    while ((c = getopt_long(argc, argv, "zGSAUQXE:C:M:o:N:P:vh", long_opts, &opt_idx)) != -1) {
         switch (c) {
         case 'z': silent      = 1;                break;
         case 'G': ts_geno     = 1;                break;
@@ -248,6 +252,7 @@ int main(int argc, char *argv[])
         case 'N': nprobe      = atoi(optarg);     break;
         case 0x100: ws2_l1    = atof(optarg);     break;
         case 0x101: ws2_l2    = atof(optarg);     break;
+        case 'X': precompute  = 1;                break;
         case 'v': printf("sargent version %s\n", SARGENT_VERSION); exit(0);
         case 'h': printf("%s", HELP); exit(0);
         case '?':
@@ -389,6 +394,61 @@ int main(int argc, char *argv[])
     }
     (void)mode_predict;  /* currently the only operational mode */
 
+    /* ---- G_all precompute / cache load ------------------------------------
+     *
+     * G_all = Σ_s G_s enables two optimisations in Stage 2:
+     *   1. EMMA-based Newton-REML for --uniform-arg: O(n²) vs. O(100 × 700 × S)
+     *      for CG-based var_random (>60× speedup at n=1000, S=3000).
+     *   2. G_all preconditioner for per-tree CG: κ(P⁻¹V)≈O(1) → ~5 iterations
+     *      vs. ~64 without preconditioner.
+     *
+     * Cache file: <trees_stem>.gall beside the .trees file.  Invalidated when
+     * the .trees file size changes.  Auto-detected on every run; rebuilt when
+     * --precompute is passed or on first use with --uniform-arg.
+     * -------------------------------------------------------------------- */
+    gall_t *gall = NULL;
+    {
+        /* Derive .gall path from .trees path by stripping extension. */
+        char gall_path[4096];
+        snprintf(gall_path, sizeof(gall_path), "%s", trees_file);
+        char *ext = strrchr(gall_path, '.');
+        if (ext && strcmp(ext, ".trees") == 0) *ext = '\0';
+        strncat(gall_path, ".gall", sizeof(gall_path) - strlen(gall_path) - 1);
+
+        /* Get current .trees file size for cache validation. */
+        struct stat ts_stat;
+        long trees_sz = (stat(trees_file, &ts_stat) == 0) ? (long)ts_stat.st_size : -1L;
+
+        if (precompute) {
+            if (!silent)
+                fprintf(stderr, "G_all: --precompute: rebuilding %s\n", gall_path);
+        } else {
+            /* Try loading cached .gall */
+            gall = gall_load(gall_path, sg->n, trees_sz);
+            if (gall && !silent)
+                fprintf(stderr, "G_all: loaded %s\n", gall_path);
+        }
+
+        /* Build (and save) if not loaded and we need it:
+         *   - always for --uniform-arg (EMMA path requires gall)
+         *   - always for --precompute
+         *   - auto-skip for per-tree mode (gall is a bonus, not required) */
+        if (!gall && (precompute || uniform_arg)) {
+            gall = gall_build(&ts, sg->hap_to_indiv, sg->n);
+            if (gall) {
+                if (trees_sz >= 0) {
+                    if (gall_save(gall, gall_path, trees_sz) == 0 && !silent)
+                        fprintf(stderr, "G_all: saved %s\n", gall_path);
+                }
+            } else {
+                fprintf(stderr, "WARNING: G_all build failed; "
+                        "falling back to CG-based Stage 2\n");
+            }
+        }
+
+        sg->gall = gall;
+    }
+
     if (em_iters > 0) {
         /* ---- Warm-started joint EM (Phase 4.5) -----------------------------
          *
@@ -441,10 +501,16 @@ int main(int argc, char *argv[])
         }
 
         if (!snp_only) {
+            int use_emma = (sg->uniform_arg && sg->gall != NULL);
             if (!silent)
-                fprintf(stderr, "Stage 2: inferring segment weights (%d trees%s)...\n",
-                        sg->S, sg->uniform_arg ? ", uniform-random" : "");
-            var_random(sg, silent);
+                fprintf(stderr, "Stage 2: inferring segment weights (%d trees%s%s)...\n",
+                        sg->S,
+                        sg->uniform_arg ? ", uniform-random" : "",
+                        use_emma ? ", EMMA eigenspace" : "");
+            if (use_emma)
+                var_random_emma(sg, silent);
+            else
+                var_random(sg, silent);
             if (!silent)
                 fprintf(stderr, "Stage 2 done: h2_arg=%.4f  sigma2=%.4f\n",
                         sg->h2_arg, sg->sigma2);
@@ -467,7 +533,9 @@ int main(int argc, char *argv[])
         fprintf(stderr, "  sigma2    : %.4f\n", sg->sigma2);
     }
 
+    sg->gall = NULL;       /* gall is managed externally; clear before free */
     sargent_free(sg);
+    gall_free(gall);
     geno_close(gr);
     tsk_treeseq_free(&ts);
     if (!silent) fprintf(stderr, "Done.\n");

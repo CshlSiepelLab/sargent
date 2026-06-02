@@ -92,10 +92,12 @@ int cg_solve(cg_state_t *st, cg_matvec_fn Av, void *data,
     double *q = st->q;
     double *z = st->z;   /* preconditioned residual */
 
-    const double *M = st->opts.diag_precond;  /* NULL → identity */
+    const double     *M  = st->opts.diag_precond;   /* NULL → no diagonal precond */
+    const cg_precond_fn Pfn  = st->opts.precond_fn;     /* NULL → fall back to diag */
+    void             *Pd  = st->opts.precond_data;
 
     /* r = b - A x */
-    Av(q, x, n, data);                     /* q = A x */
+    Av(q, x, n, data);
     for (int i = 0; i < n; i++) r[i] = b[i] - q[i];
 
     double b_norm = sqrt(dot(b, b, n));
@@ -106,8 +108,10 @@ int cg_solve(cg_state_t *st, cg_matvec_fn Av, void *data,
         return 0;
     }
 
-    /* z = M^{-1} r  (M is stored as 1/d_i, so z_i = M_i * r_i) */
-    if (M) {
+    /* z = M⁻¹ r  (general preconditioner takes priority over diagonal) */
+    if (Pfn) {
+        Pfn(z, r, n, Pd);
+    } else if (M) {
         for (int i = 0; i < n; i++) z[i] = M[i] * r[i];
     } else {
         memcpy(z, r, (size_t)n * sizeof(double));
@@ -130,18 +134,20 @@ int cg_solve(cg_state_t *st, cg_matvec_fn Av, void *data,
         if (rel < tol) break;
         if (atol > 0.0 && r_norm < atol) break;
 
-        Av(q, p, n, data);            /* q = A p */
+        Av(q, p, n, data);
 
         double pAp = dot(p, q, n);
         if (pAp <= 0.0) break;        /* loss of positive-definiteness */
 
         double alpha = rz / pAp;
 
-        axpy(x,  alpha,   p, n);      /* x += alpha p */
-        axpy(r, -alpha,   q, n);      /* r -= alpha q */
+        axpy(x,  alpha,   p, n);
+        axpy(r, -alpha,   q, n);
 
-        /* z = M^{-1} r */
-        if (M) {
+        /* z = M⁻¹ r */
+        if (Pfn) {
+            Pfn(z, r, n, Pd);
+        } else if (M) {
             for (int i = 0; i < n; i++) z[i] = M[i] * r[i];
         } else {
             memcpy(z, r, (size_t)n * sizeof(double));
