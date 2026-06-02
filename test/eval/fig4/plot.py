@@ -245,6 +245,126 @@ def fig4_panel_c(ax, base_b12):
     ax.legend(loc="lower left", fontsize=8, frameon=True)
 
 
+# ---------- Panel D: fused-lasso contrast (polygenic vs oligogenic) ----------
+
+def _auc(scores, labels):
+    pos = scores[labels == 1]; neg = scores[labels == 0]
+    if len(pos) == 0 or len(neg) == 0:
+        return float("nan")
+    order = np.argsort(scores, kind="mergesort")
+    ranks = np.empty(len(scores), float); ranks[order] = np.arange(1, len(scores)+1)
+    _, inv, counts = np.unique(scores, return_inverse=True, return_counts=True)
+    tm = np.zeros(len(counts)); np.add.at(tm, inv, ranks); tm /= counts
+    ranks = tm[inv]
+    r_pos = ranks[labels == 1].sum()
+    u = r_pos - len(pos)*(len(pos)+1)/2.0
+    return float(u / (len(pos) * len(neg)))
+
+
+def _load_w2(path):
+    if not os.path.exists(path):
+        return None
+    return np.loadtxt(path, skiprows=1)[:, -1]
+
+
+def _truth_active(case_root, est_len):
+    """Pick the truth file whose length matches the estimator (train vs full).
+    Returns (truth_w2, active_labels) or (None, None) if no match."""
+    for suf in (".true_ws2.tsv", ".full.true_ws2.tsv"):
+        path = os.path.join(case_root, "case" + suf)
+        if not os.path.exists(path): continue
+        wt = np.loadtxt(path, skiprows=1)[:, -1]
+        if len(wt) == est_len:
+            return wt, (wt > wt.min() + 1e-12).astype(int)
+    return None, None
+
+
+def fig4_panel_d(ax, base_b252=os.path.expanduser("~/test-sargent/block2_5_2"),
+                  fl_runs_dir="/tmp/fig4_fl_runs",
+                  b26_real_dir="/tmp/b26_real"):
+    """Computes AUC for {bf=0.5, bf=0.005} × {unreg, fused-lasso} × 5 seeds
+    and renders a 4-bar comparison.
+
+    bf=0.5 (polygenic): fused-lasso uses λ₂=0.5 (TV).
+    bf=0.005 (oligogenic): fused-lasso uses λ₁=0.5 (L1).
+    """
+    conditions = [
+        ("polygenic\n(bf=0.5)",  "0.5",   "λ₂=0.5"),
+        ("oligogenic\n(bf=0.005)", "0.005", "λ₁=0.5"),
+    ]
+    results = {}
+    for label, bf, fl_tag in conditions:
+        unreg_aucs = []
+        fl_aucs = []
+        for seed in (1, 2, 3, 4, 5):
+            case_root = os.path.join(base_b252, f"bf{bf}_dadmixed_s{seed}")
+            # Unreg from block2_5_2
+            w_unreg = _load_w2(os.path.join(case_root, "est.w2.tsv"))
+            if w_unreg is not None:
+                wt, active = _truth_active(case_root, len(w_unreg))
+                if wt is not None and active.sum() > 0:
+                    unreg_aucs.append(_auc(w_unreg, active))
+
+            # Fused-lasso source depends on seed and bf
+            fl_path = None
+            if seed == 1:
+                if bf == "0.5":
+                    fl_path = os.path.join(b26_real_dir, "bf05.l1_0.0_l2_0.5.w2.tsv")
+                else:
+                    fl_path = os.path.join(b26_real_dir, "bf005.l1_0.5_l2_0.0.w2.tsv")
+            else:
+                fl_path = os.path.join(fl_runs_dir, f"bf{bf}_fl_s{seed}.w2.tsv")
+            w_fl = _load_w2(fl_path)
+            if w_fl is not None:
+                wt, active = _truth_active(case_root, len(w_fl))
+                if wt is not None and active.sum() > 0:
+                    fl_aucs.append(_auc(w_fl, active))
+        results[label] = {"unreg": np.array(unreg_aucs),
+                          "fl": np.array(fl_aucs),
+                          "fl_tag": fl_tag}
+
+    labels = list(results.keys())
+    x = np.arange(len(labels))
+    width = 0.36
+
+    def msm(arr):
+        if len(arr) == 0: return float("nan"), 0
+        return (arr.mean(), arr.std(ddof=1)/np.sqrt(len(arr)) if len(arr) > 1 else 0)
+
+    u_mean = [msm(results[l]["unreg"])[0] for l in labels]
+    u_se   = [msm(results[l]["unreg"])[1] for l in labels]
+    f_mean = [msm(results[l]["fl"])[0]    for l in labels]
+    f_se   = [msm(results[l]["fl"])[1]    for l in labels]
+
+    ax.bar(x - width/2, u_mean, width, yerr=u_se, color="#999999",
+           capsize=3, edgecolor="white", linewidth=0.5,
+           label="default (no regularisation)")
+    ax.bar(x + width/2, f_mean, width, yerr=f_se, color="#762a83",
+           capsize=3, edgecolor="white", linewidth=0.5,
+           label="fused-lasso (opt-in)")
+    ax.axhline(0.5, color="0.6", lw=0.8, linestyle=":", label="chance")
+
+    for i, lbl in enumerate(labels):
+        gain = f_mean[i] - u_mean[i]
+        ax.annotate(f"{gain:+.2f}", xy=(x[i], max(u_mean[i], f_mean[i]) + 0.04),
+                    ha="center", fontsize=10,
+                    color="#762a83" if gain > 0.02 else "0.4")
+
+    # Per-tag annotations
+    for i, lbl in enumerate(labels):
+        ax.text(x[i] + width/2, 0.43, results[lbl]["fl_tag"],
+                ha="center", fontsize=8, color="#762a83")
+
+    ax.set_xticks(x, labels)
+    ax.set_ylabel("Localization AUC")
+    ax.set_ylim(0.40, 1.02)
+    ax.set_title("D — Fused-lasso opt-in: targets the oligogenic regime "
+                 "(5 seeds each; admixed; contrast 1000)",
+                 loc="left", fontsize=11)
+    ax.grid(True, axis="y", alpha=0.25)
+    ax.legend(loc="upper right", fontsize=9, frameon=True)
+
+
 # ---------- Main ----------
 
 def main():
@@ -257,19 +377,24 @@ def main():
         "~/test-sargent/block1_2_v1"))
     ap.add_argument("--base-phase10", default=os.path.expanduser(
         "~/test-sargent/phase10_admix"))
+    ap.add_argument("--base-b252", default=os.path.expanduser(
+        "~/test-sargent/block2_5_2"),
+        help="Block 2.5.2 sweep root (for Panel D unreg AUCs).")
     ap.add_argument("--out", default=None,
                     help="Output prefix (default: ./fig4).")
     args = ap.parse_args()
 
-    fig = plt.figure(figsize=(15, 9))
-    gs = fig.add_gridspec(2, 2, height_ratios=[1, 1], hspace=0.35, wspace=0.28)
+    fig = plt.figure(figsize=(18, 9))
+    gs = fig.add_gridspec(2, 3, height_ratios=[1, 1], hspace=0.40, wspace=0.30)
     axA = fig.add_subplot(gs[0, :])
     axB = fig.add_subplot(gs[1, 0])
     axC = fig.add_subplot(gs[1, 1])
+    axD = fig.add_subplot(gs[1, 2])
 
     fig4_panel_a(axA, args.cell)
     fig4_panel_b(axB, args.base_phase10)
     fig4_panel_c(axC, args.base_b12)
+    fig4_panel_d(axD, base_b252=args.base_b252)
 
     fig.suptitle(
         "Figure 4 — SARGENT localizes trait variance to genomic regions at "
