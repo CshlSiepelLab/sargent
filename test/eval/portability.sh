@@ -204,6 +204,8 @@ for jf in sorted(glob.glob(os.path.join(base, "*mix*_typed*_s*", "est.predict.js
         "argunif_r2":  d.get("arg_blup_uniform", {}).get("r2"),
         "sargent_r2":  d.get("sargent", {}).get("r2"),
         "sargent_u_r": d.get("sargent_u_r"),
+        "bayesR_r2c":  r2c("bayesR"),
+        "gblup_r2c":   r2c("gblup"),
         "argunif_r2c": r2c("arg_blup_uniform"),
         "sargent_r2c": r2c("sargent"),
     })
@@ -276,6 +278,50 @@ for mix in sorted({r["mix"] for r in rows}):
         continue
     diffs = np.array([s - u for (s, u) in pairs])
     print(f"  mix_B = {mix:.2f}:  {diffs.mean():+.4f}  (n={len(diffs)}, sd={diffs.std(ddof=1) if len(diffs)>1 else 0:.4f})")
+
+# ---- F_ST-stratified portability surface (Block 1.1 v2) -----------------------
+# Only meaningful when SPLITS were swept (cells carry an sp<split>_ prefix).
+splits = sorted({r["split"] for r in rows if r["split"] is not None})
+if splits:
+    FST = {1500.0: 0.07, 2500.0: 0.12, 3500.0: 0.16, 7000.0: 0.30}
+    def amean(rs, k):
+        v = [r[k] for r in rs if isinstance(r[k], (int, float))]
+        return float(np.mean(v)) if v else float("nan")
+    def fst(sp):
+        return FST.get(sp, float("nan"))
+
+    print("\n## Portability surface by F_ST — CALIBRATION-INVARIANT r²\n")
+    print("Mean r²_calib over (mix × typed × seed) per split:\n")
+    print("| split | F_ST | BayesR | GBLUP | ARG-uni | SARGENT | ARG-uni−GBLUP | ARG-uni−BayesR |")
+    print("|---|---|---|---|---|---|---|---|")
+    for sp in splits:
+        rs = [r for r in rows if r["split"] == sp]
+        b, g, a, s = (amean(rs, "bayesR_r2c"), amean(rs, "gblup_r2c"),
+                      amean(rs, "argunif_r2c"), amean(rs, "sargent_r2c"))
+        print(f"| {int(sp)} | {fst(sp):.2f} | {b:+.3f} | {g:+.3f} | {a:+.3f} | {s:+.3f} "
+              f"| {a-g:+.3f} | {a-b:+.3f} |")
+
+    print("\nFramework−typed gap by F_ST "
+          "(framework=max(ARG-uni,SARGENT), typed=max(BayesR,GBLUP); per-cell paired):")
+    for sp in splits:
+        gaps = []
+        for r in (x for x in rows if x["split"] == sp):
+            fw = [v for v in (r["argunif_r2c"], r["sargent_r2c"]) if isinstance(v, (int, float))]
+            tp = [v for v in (r["bayesR_r2c"], r["gblup_r2c"]) if isinstance(v, (int, float))]
+            if fw and tp:
+                gaps.append(max(fw) - max(tp))
+        if gaps:
+            ga = np.array(gaps)
+            sd = ga.std(ddof=1) if len(ga) > 1 else 0.0
+            print(f"  F_ST={fst(sp):.2f}: {ga.mean():+.4f} ± {sd:.4f}  (n={len(ga)})")
+
+    print("\nARG-uni vs GBLUP by F_ST × typed coverage "
+          "(ARG kinship is coverage-invariant; does low coverage widen the gap?):")
+    for sp in splits:
+        for tc in sorted({r["typed"] for r in rows if r["split"] == sp}):
+            rs = [r for r in rows if r["split"] == sp and r["typed"] == tc]
+            gg, aa = amean(rs, "gblup_r2c"), amean(rs, "argunif_r2c")
+            print(f"  F_ST={fst(sp):.2f} typed={tc:.2f}: GBLUP={gg:+.3f}  ARG-uni={aa:+.3f}  (gap {aa-gg:+.3f})")
 PY
 
 t_end=$(date +%s)

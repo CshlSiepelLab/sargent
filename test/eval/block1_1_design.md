@@ -346,3 +346,74 @@ this **redirects cycles from the prediction sweep to Block 2.**
   transfer better across ancestry than others). That is the one mechanism that
   could in principle give per-segment weighting a portability edge, and it is a
   v2 / Block 1.2 question — but Phase 10's tight CI makes a large swing unlikely.
+
+## v2 results (F_ST ladder, 2026-06-02) — PROVISIONAL (framing Adam-led)
+
+Run: 4 F_ST × 3 mix_B × 2 typed × 5 seeds = **120/120 cells, 0 failures**, at
+n_train=500, n_test=200, L=1Mb (tmux `b11v2`, memory-aware parallel dispatcher).
+Binary carries the CG-iteration cap and the vf-cap (`VAR_FIXED_VFCAP=0.6`).
+Per-cell data: `test/eval/block1_1_v2_results.csv`; full table:
+`<BASE>/portability_table.md` § "Portability surface by F_ST". Metric is
+`r2_calib` (squared correlation) — raw R² is destroyed cross-ancestry (the
+aggregator's raw-R² section shows a −220 blow-up at mix=0.05 from one
+mis-calibrated cell).
+
+### vf-cap held at scale: 0 / 120 cells with h²_snp < 0
+
+The Stage-1 divergence is fully contained across the whole ladder, **including
+F_ST=0.30**. So Block 1.1a (ancestry covariates) is **not** required for
+h²-reporting robustness. (It remains relevant for SARGENT's *prediction* — see
+below — but the −3 catastrophe is gone.)
+
+### Portability surface — mean r²_calib by F_ST (30 cells/split)
+
+| F_ST | BayesR | GBLUP | **ARG-uni** | SARGENT | ARG-uni−GBLUP | ARG-uni−BayesR |
+|---|---|---|---|---|---|---|
+| 0.07 | 0.112 | 0.112 | **0.155** | 0.140 | +0.043 | +0.043 |
+| 0.12 | 0.098 | 0.119 | **0.172** | 0.124 | +0.053 | +0.074 |
+| 0.16 | 0.054 | 0.091 | **0.130** | 0.066 | +0.039 | +0.076 |
+| 0.30 | 0.037 | 0.062 | **0.089** | 0.048 | +0.027 | +0.052 |
+
+- All arms decline with F_ST (expected). **ARG-BLUP-uniform is the best arm at
+  every F_ST.**
+- Retention (F_ST 0.07→0.30): BayesR 33%, SARGENT 34%, GBLUP 55%, ARG-uni 57%.
+  **BayesR collapses hardest — and SARGENT collapses with it**, because it
+  inherits the BayesR fixed effect (the cross-ancestry confounding the vf-cap
+  bounds but does not fix). GBLUP ports about as well as ARG-uni.
+- SARGENT < ARG-uni at every F_ST → **within-method null holds** (consistent
+  with v1; SARGENT−ARG-uni = −0.024 / −0.026 / −0.076 by mix).
+
+### The headline claim "framework−typed gap widens with F_ST" is NOT supported
+
+Framework−typed (framework=max(ARG-uni,SARGENT), typed=max(BayesR,GBLUP),
+per-cell paired): +0.036 / +0.043 / +0.031 / +0.025 at F_ST 0.07/0.12/0.16/0.30.
+The ARG framework **beats typed-SNP methods at every F_ST** (~+0.03–0.05), but
+the gap is **flat-to-slightly-narrowing** (peaks at mid-divergence F_ST≈0.12).
+A figure built on the F_ST axis shows a roughly flat gap, not a widening one.
+
+### Where the framework advantage DOES widen: typed coverage, not F_ST
+
+ARG-uni is **coverage-invariant** (it uses the ARG kinship, not typed SNPs);
+GBLUP degrades at low coverage:
+
+| F_ST | ARG-uni − GBLUP @ typed=0.70 | ARG-uni − GBLUP @ typed=0.10 |
+|---|---|---|
+| 0.07 | +0.018 | +0.068 |
+| 0.30 | +0.016 | +0.039 |
+
+The gap is ~3–4× larger at low coverage, at every F_ST. Target injection helps
+ARG methods most: at F_ST=0.30 mix=0.20, ARG-uni recovers to 0.182 while BayesR
+stays at 0.066.
+
+### Verdict (provisional)
+
+- **Holds:** ARG framework > typed-SNP across the ladder; BayesR (sparse PRS)
+  collapses worst; **ARG-BLUP-uniform is the robust prediction workhorse**; the
+  advantage is largest in the **low-coverage** and **with-target-injection**
+  regimes.
+- **Does not hold:** the "framework advantage widens with F_ST" headline.
+- **Manuscript implication:** lead the cross-ancestry figure with the
+  **typed-coverage axis** (and BayesR's collapse), not F_ST; and use
+  **ARG-BLUP-uniform**, not SARGENT, as the framework's prediction representative
+  (SARGENT's BayesR fixed effect is the cross-ancestry liability). Framing is
+  Adam-led — these numbers are captured here; the figure narrative is Block 3.
