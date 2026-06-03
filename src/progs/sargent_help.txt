@@ -58,6 +58,34 @@ MAIN OPTIONS:
         giving prior mean phi=1-pi0 (e.g. --pi0 0.9 gives prior mean
         phi=0.1, favouring 90% null segments).  Default: Beta(1,1).
 
+    --ws2-l1 <lambda>
+        Block 2.6 fused-lasso prior on log w_s^2.  Sparsity-on-levels
+        penalty (lambda * sum_s |log w_s^2 - log w0|) that shrinks per-
+        tree weights toward a common floor; encourages a small number of
+        large w_s^2 and zeros out the rest.  Helps localization in
+        strongly oligogenic regimes (e.g. lambda~0.5 at block_frac
+        ~0.005 gave +0.07 AUC); at moderately oligogenic settings it
+        can over-shrink and hurt rank quality.  Default: 0 (off).
+
+    --ws2-l2 <lambda>
+        Block 2.6 fused-lasso prior on log w_s^2.  Sparsity-on-
+        differences (total-variation) penalty (lambda * sum_s |log
+        w_{s+1}^2 - log w_s^2|) that smooths neighbouring trees toward
+        each other; matches a contiguous-block architecture where
+        runs of trees share elevated w_s^2.  Often the right default
+        for sparse-architecture localization.  Default: 0 (off).
+
+        --ws2-l1 and --ws2-l2 may be combined; both penalties are
+        applied via a fast proximal step inside the Stage-2 EM.
+
+    --precompute, -X
+        Force-rebuild the G_all eigendecomposition cache (see OUTPUT
+        FILES: <prefix>.gall) before Stage 2.  In normal use the cache
+        is auto-built whenever Stage 2 will run and reused if its size
+        signature matches the inputs; --precompute is useful only after
+        a sargent upgrade that bumps GALL_VERSION (e.g. dadeca1's REML
+        correction was such a bump).
+
     --outroot <prefix>, -o <prefix>
         Set the output file prefix (default: "sargent").  Output files
         are named <prefix>.beta.tsv and <prefix>.w2.tsv.
@@ -74,6 +102,10 @@ MAIN OPTIONS:
           predict   - the main pipeline.  Default fit is sequential
                       (Stage 1 BayesR on typed SNPs, then Stage 2
                       per-tree REML EM for the ARG random effect).
+                      Stage 2 is preconditioned with the G_all
+                      eigendecomposition (.gall cache) and warm-started
+                      from a fast EMMA solve under uniform weights;
+                      see OUTPUT FILES and ALGORITHMIC VARIANTS below.
                       Use --em N (N >= 1) for sequential followed by N
                       joint-EM polish iterations on (beta, ws^2, sigma^2).
                       Outputs .beta.tsv, .w2.tsv, .summary.json with
@@ -86,8 +118,13 @@ ALGORITHMIC VARIANTS (for systematic comparison):
     --uniform-arg, -U
         Replace Stage 2's per-tree REML with a single shared variance
         component on the uniformly-weighted kinship K = (1/S) sum_s G_s.
-        Equivalent to fitting ARG-BLUP with a single tau^2.  Useful when
-        per-tree weights are unidentifiable.
+        Equivalent to fitting ARG-BLUP with a single tau^2.  Solved with
+        an EMMA-style 100-step golden-section search over log delta in
+        O(n^2) using the precomputed G_all eigendecomposition (.gall);
+        replaces 100 EM iterations each costing ~700 tree passes.
+        Useful when per-tree weights are unidentifiable.  At very small
+        n where G_all absorbs all residual variance, EMMA's boundary
+        check defers to the per-tree solver as a safety fallback.
 
     --em <N>, -E <N>
         Run sequential SARGENT (Stage 1 + Stage 2) and then N polish
@@ -138,3 +175,17 @@ OUTPUT FILES:
     <outroot>.summary.json
         Coherent record of the fit: mode, h2_snp, h2_arg, h2 (total),
         sigma2, plus context (n_indiv, n_variants, n_trees, etc.).
+
+    <geno_prefix>.gall  (when Stage 2 runs; cached next to the inputs,
+                         not under <outroot>)
+        Binary cache of the aggregate kinship G_all = sum_s G_s and its
+        eigendecomposition (U, lambda, w_ones = U^T * 1).  Used inside
+        Stage 2 as:
+          - a CG preconditioner for the per-tree V-solve (reduces CG
+            iterations ~64 -> ~5 in per-tree mode);
+          - the eigenbasis for EMMA's golden-section REML profile under
+            --uniform-arg and for the per-tree EMMA warm-start.
+        Auto-built on first Stage-2 run and invalidated when the
+        n*n size signature changes; force-rebuild with --precompute.
+        Version-tagged (GALL_VERSION): bumps invalidate older caches
+        and require regeneration.
