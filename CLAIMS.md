@@ -19,7 +19,7 @@ experiments and can be reframed or dropped quietly during Block 3 rework.
 Per Adam (2026-05-29): the obviation of the finite-mixture `wₛ²` prior is
 already well established and does not need to be dwelt on.
 
-Tally (draft): HELD 13 · PLAUSIBLE/UNTESTED 12 · FALSIFIED/WEAK 11 · OUT OF SCOPE 2.
+Tally (draft): HELD 13 · PLAUSIBLE/UNTESTED 11 · FALSIFIED/WEAK 11 · OUT OF SCOPE 2.
 Of the FALSIFIED/WEAK group, 5 are flagged **[MINOR]**: A2, B3, C2, C4, F2.
 
 ---
@@ -29,7 +29,7 @@ Of the FALSIFIED/WEAK group, 5 are flagged **[MINOR]**: A2, B3, C2, C4, F2.
 | # | Claim | Bucket | Evidence held | Evidence missing | Source |
 |---|---|---|---|---|---|
 | A1 | SARGENT recovers total `h²` accurately. | **HELD** | Phase 6 n=1000: h²_total est 0.81–0.85 vs truth 0.76–0.90 (within 3–15%). SARGENT `--arg-only` on Phase 10: bias +0.06–0.10. | Direct comparison vs GCTA / eGRM / tslmm on identical input. | ROADMAP Phase 6; `phase10_oracle.md`. |
-| A2 | SARGENT separates `h²` into SNP (fixed) vs ARG (random) components. | **FALSIFIED · [MINOR]** | Phase 1 concession: not identifiable in principle (X is an observed subset of the genealogy that K_ARG encodes in expectation). | — (it is structurally non-identifiable; no experiment will resolve it). Not a strong manuscript claim; reframe Stage-1/Stage-2 as an "operational prioritization" rather than a decomposition. | ROADMAP Phase 1. |
+| A2 | SARGENT separates `h²` into SNP (fixed) vs ARG (random) components. | **FALSIFIED · [MINOR]** | Phase 1 concession: not identifiable in principle (X is an observed subset of the genealogy that K_ARG encodes in expectation). Direct empirical confirmation: Fig2 MKLMM comparison on Seed8890 gives h²_snp=0/h²_arg=0.793; SARGENT gives h²_snp=0.725/h²_arg=0.082 on identical data (truth h²_arg=0). Both are legitimate model fits under different conventions. | — (it is structurally non-identifiable; no experiment will resolve it). Not a strong manuscript claim; reframe Stage-1/Stage-2 as an "operational prioritization" rather than a decomposition. | ROADMAP Phase 1. |
 | A3 | Per-segment `wₛ²` heterogeneity improves `h²` recovery vs uniform-weight ARG-LMM. | **FALSIFIED** | Phase 10: uniform ≈ oracle ≈ estimated `h²` to ~2nd decimal across both diffuse and sparse architectures. | — (the BLUP absorbs kinship into σ_u², so this is a structural negative). | `phase10_oracle.md` (h² addendum). |
 | A4 | SARGENT recovers per-region (partitioned) `h²` respecting recombination boundaries. | **PLAUSIBLE / UNTESTED** | Phase 10 localization ceiling 0.84 + estimator 0.74 in one architecture imply the per-region track has signal. | Quantitative per-region `h²` recovery vs truth; comparison vs S-LDSC / MESC. | Block 1.2 sweep + new "partitioned-h² recovery" metric. |
 
@@ -96,7 +96,7 @@ Of the FALSIFIED/WEAK group, 5 are flagged **[MINOR]**: A2, B3, C2, C4, F2.
 | H2 | SARGENT improves over GBLUP (standard genomic GRM). | **HELD (low coverage)** | Phase 3 f=0.03. | — | Phase 3. |
 | H3 | SARGENT improves over ARG-BLUP-uniform / eGRM / tslmm within-population. | **FALSIFIED** | Phase 10 + Phase 3 — no within-population gap. | — | Phase 10. |
 | H4 | SARGENT improves over multi-kernel LMM (mkLMM) / windowed local GRM / hapla. | **UNTESTED** | None implemented as baselines. | Implement minimal versions of the 2–3 most relevant baselines, run side-by-side. | `main.tex` comparison table (lists 9; need triage). |
-| H5 | SARGENT (C) is faster/more accurate than Nurdan's R implementation. | **UNTESTED** | Phase 3.5 smoke ran; no side-by-side. | Block 1 or parking-lot; gated on availability of Nurdan's code. | Old Phase 6d. |
+| H5 | SARGENT (C) is faster/more accurate than Nurdan's R implementation. | **MIXED / REFRAME** | Fig2 Seed8890 comparison (2026-06-02). Total h²: comparable (SARGENT 0.831, MKLMM 0.793, truth ≈0.80). Prediction: MKLMM ARG-BLUP-uniform R²=0.666, Stage2 R²=0.676 > SARGENT BayesR R²=0.601 ≈ MKLMM Just-Fixed R²=0.597 (consistent with B2/H3: SARGENT's ws² adds nothing to prediction in the within-pop pure-SNP regime). SNP/ARG attribution: SARGENT gives h²_snp=0.725/h²_arg=0.082; MKLMM gives h²_snp=0/h²_arg=0.793 — different conventions, not a quality difference (see A2). Timing: SARGENT 205-tree dedup 7.5 min wall vs MKLMM fit ~1.5 min (K precomputation excluded from MKLMM time); with K precomputation counted, gap likely similar. 4869-tree full run: 7.5 min CPU (Dropbox IO inflated to 67 min wall on FUSE volume). | Reframe: the C implementation is competitive with the R implementation; the comparison is most useful to illustrate the MIXED (A2) non-identifiability result. Not a "SARGENT is better" story; remove from comparison table unless framed around identifiability. | Old Phase 6d; Fig2 comparison 2026-06-02. |
 | H6 | SARGENT is the right object for transfer / portability *because* it integrates fixed + random (vs eGRM which uses ARG kinship alone). | **PLAUSIBLE / UNTESTED** | Mechanism is sound; no empirical demonstration. | The Block 1.1 transfer experiment, specifically including a per-arm decomposition (BayesR / ARG-BLUP-uniform / SARGENT). | Block 1.1. |
 
 ## I. Out of scope (for this paper)
