@@ -332,6 +332,12 @@ def main():
                     help="prefix of sargent's output files (.beta.tsv, .w2.tsv)")
     ap.add_argument("--out",            default=None,
                     help="output JSON path (default: <sargent-prefix>.predict.json)")
+    ap.add_argument("--sargent-only",   action="store_true",
+                    help="compute ONLY the SARGENT arm (K_sg·α). Skips the "
+                         "ARG-uniform kinship and the BayesR/GBLUP/ARG-uni arms — "
+                         "use when those are already available from a prior run "
+                         "(e.g. re-fitting SARGENT variants). Roughly halves the "
+                         "Python kinship cost.")
     args = ap.parse_args()
 
     case = args.case_prefix
@@ -410,10 +416,13 @@ def main():
     ones = np.ones(S_full) / S_full
 
     print(f"Computing combined kinship over {S_full} full-ARG trees ...", flush=True)
-    K_uni_train_hap  = streaming_combined_kinship(ts_full, train_nodes, ones)
-    K_uni_cross_hap  = streaming_combined_kinship(ts_full, test_nodes, ones, train_nodes)
-    K_uni_train = hap_to_indiv_2d(K_uni_train_hap, n_train)
-    K_uni_cross = hap_to_indiv_2d(K_uni_cross_hap, n_test, n_train)
+    if args.sargent_only:
+        K_uni_train = K_uni_cross = None     # ARG-uniform arm skipped
+    else:
+        K_uni_train_hap  = streaming_combined_kinship(ts_full, train_nodes, ones)
+        K_uni_cross_hap  = streaming_combined_kinship(ts_full, test_nodes, ones, train_nodes)
+        K_uni_train = hap_to_indiv_2d(K_uni_train_hap, n_train)
+        K_uni_cross = hap_to_indiv_2d(K_uni_cross_hap, n_test, n_train)
 
     if ws2_full is not None:
         K_sg_train_hap = streaming_combined_kinship(ts_full, train_nodes, ws2_full)
@@ -443,32 +452,40 @@ def main():
             tc = tc[np.newaxis, :]
         y_true_components = {"fixed": tc[:, 1], "random": tc[:, 2], "total": tc[:, 3]}
 
-    # (a) BayesR-only
-    print("Predicting: BayesR-only ...", flush=True)
-    y_hat_b = predict_bayesR(X_test, beta, y_train.mean())
-    results["bayesR"] = metrics(y_hat_b, y_true_test)
+    # Arms (a)-(c) are skipped in --sargent-only mode (already have them from a
+    # prior full run); only the SARGENT arm (d) below is computed.
+    if not args.sargent_only:
+      # (a) BayesR-only
+      print("Predicting: BayesR-only ...", flush=True)
+      y_hat_b = predict_bayesR(X_test, beta, y_train.mean())
+      results["bayesR"] = metrics(y_hat_b, y_true_test)
 
-    # (b) GBLUP — single genome-wide GRM, fitted h² on training
-    print("Predicting: GBLUP ...", flush=True)
-    K_g_train = (X_train.T @ X_train) / p          # (n_train, n_train)
-    K_g_cross = (X_test.T  @ X_train) / p          # (n_test, n_train)
-    K_g_train_c, K_g_cross_c = center_kinship(K_g_train, K_g_cross)
-    s2, su2, alpha, mean_y = fit_blup(y_train, K_g_train_c)
-    y_hat_g = predict_blup(K_g_cross_c, alpha, mean_y)
-    results["gblup"] = metrics(y_hat_g, y_true_test)
-    results["gblup_h2"] = su2 / (su2 + s2)
+      # (b) GBLUP — single genome-wide GRM, fitted h² on training
+      print("Predicting: GBLUP ...", flush=True)
+      K_g_train = (X_train.T @ X_train) / p          # (n_train, n_train)
+      K_g_cross = (X_test.T  @ X_train) / p          # (n_test, n_train)
+      K_g_train_c, K_g_cross_c = center_kinship(K_g_train, K_g_cross)
+      s2, su2, alpha, mean_y = fit_blup(y_train, K_g_train_c)
+      y_hat_g = predict_blup(K_g_cross_c, alpha, mean_y)
+      results["gblup"] = metrics(y_hat_g, y_true_test)
+      results["gblup_h2"] = su2 / (su2 + s2)
 
-    # (c) ARG-BLUP uniform — average of per-tree kinship
-    print("Predicting: ARG-BLUP-uniform ...", flush=True)
-    K_uni_train_c, K_uni_cross_c = center_kinship(K_uni_train, K_uni_cross)
-    s2, su2, alpha, mean_y = fit_blup(y_train, K_uni_train_c)
-    y_hat_a = predict_blup(K_uni_cross_c, alpha, mean_y)
-    results["arg_blup_uniform"] = metrics(y_hat_a, y_true_test)
-    results["arg_blup_uniform_h2"] = su2 / (su2 + s2)
+      # (c) ARG-BLUP uniform — average of per-tree kinship
+      print("Predicting: ARG-BLUP-uniform ...", flush=True)
+      K_uni_train_c, K_uni_cross_c = center_kinship(K_uni_train, K_uni_cross)
+      s2, su2, alpha, mean_y = fit_blup(y_train, K_uni_train_c)
+      y_hat_a = predict_blup(K_uni_cross_c, alpha, mean_y)
+      results["arg_blup_uniform"] = metrics(y_hat_a, y_true_test)
+      results["arg_blup_uniform_h2"] = su2 / (su2 + s2)
 
-    # (d) Full SARGENT
+    # (d) Full SARGENT.
+    # Note: `has_beta` is NOT required here. When the sargent run had no Stage-1
+    # β (e.g. `--arg-only`), `beta` is the zero vector, so X·β = 0 and the SARGENT
+    # arm reduces to the per-tree-weighted ARG-BLUP K_sg·α — i.e. "SARGENT-W"
+    # (per-tree ŵ² with no fixed effect). This is backward-compatible: a normal
+    # run (has_beta True) is unchanged.
     y_hat_s = None
-    if ws2_full is not None and has_beta and K_sg_train is not None:
+    if ws2_full is not None and K_sg_train is not None:
         print("Predicting: full SARGENT ...", flush=True)
         y_hat_s, sigma2_used = predict_sargent(
             X_test, beta, K_sg_train, K_sg_cross,
