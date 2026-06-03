@@ -101,10 +101,11 @@ gall_t *gall_build(const tsk_treeseq_t *ts,
     }
 
     /* Allocate output arrays and pre-allocated workspace for precond_apply. */
-    g->U    = malloc((size_t)n * n * sizeof(double));
+    g->U      = malloc((size_t)n * n * sizeof(double));
     g->lambda = malloc((size_t)n * sizeof(double));
-    g->work = malloc((size_t)n * sizeof(double));   /* scratch for precond_apply */
-    if (!g->U || !g->lambda || !g->work) {
+    g->w_ones = malloc((size_t)n * sizeof(double));
+    g->work   = malloc((size_t)n * sizeof(double));   /* scratch for precond_apply */
+    if (!g->U || !g->lambda || !g->w_ones || !g->work) {
         fprintf(stderr, "gall_build: out of memory for eigen arrays\n");
         goto fail;
     }
@@ -135,6 +136,14 @@ gall_t *gall_build(const tsk_treeseq_t *ts,
         }
     }
 
+    /* w_ones[k] = (U^T 1_n)[k] = sum of k-th eigenvector column. */
+    for (int k = 0; k < n; k++) {
+        const double *Uk = g->U + (size_t)k * n;
+        double s = 0.0;
+        for (int i = 0; i < n; i++) s += Uk[i];
+        g->w_ones[k] = s;
+    }
+
     fprintf(stderr, "gall_build: done (λ ∈ [%.3g, %.3g])\n",
             g->lambda[0], g->lambda[n-1]);
     return g;
@@ -151,6 +160,7 @@ void gall_free(gall_t *g)
     if (!g) return;
     free(g->U);
     free(g->lambda);
+    free(g->w_ones);
     free(g->Pinv);
     free(g->work);
     free(g);
@@ -180,6 +190,8 @@ int gall_save(const gall_t *g, const char *path, long trees_size)
     ok &= (fwrite(g->U,      sizeof(double), (size_t)g->n * g->n, f)
                == (size_t)g->n * g->n);
     ok &= (fwrite(g->lambda, sizeof(double), (size_t)g->n, f)
+               == (size_t)g->n);
+    ok &= (fwrite(g->w_ones, sizeof(double), (size_t)g->n, f)
                == (size_t)g->n);
 
     fclose(f);
@@ -219,11 +231,13 @@ gall_t *gall_load(const char *path, int n_expected, long trees_size_expected)
     g->n      = n;
     g->U      = malloc((size_t)n * n * sizeof(double));
     g->lambda = malloc((size_t)n * sizeof(double));
+    g->w_ones = malloc((size_t)n * sizeof(double));
     g->work   = malloc((size_t)n * sizeof(double));
-    if (!g->U || !g->lambda || !g->work) goto fail;
+    if (!g->U || !g->lambda || !g->w_ones || !g->work) goto fail;
 
     ok  = (fread(g->U,      sizeof(double), (size_t)n * n, f) == (size_t)n * n);
     ok &= (fread(g->lambda, sizeof(double), (size_t)n,     f) == (size_t)n);
+    ok &= (fread(g->w_ones, sizeof(double), (size_t)n,     f) == (size_t)n);
     fclose(f);
 
     if (!ok) {
@@ -291,20 +305,34 @@ void gall_precond_cb(double *out, const double *in, int n, void *data)
 }
 
 /* -------------------------------------------------------------------------
- * EMMA 1-D profile-likelihood search.
+ * EMMA REML 1-D profile-likelihood search.
+ *
+ * Projects out the intercept exactly (REML), which ensures a well-defined
+ * interior maximum even when the ML boundary is flat.
+ *
+ *   d_i = δ λ_i + 1
+ *   A = Σ z_i²/d_i,  B = Σ z_i w_i/d_i,  C = Σ w_i²/d_i
+ *   ss_reml = A − B²/C
+ *   σ²* = ss_reml/(n−1)
+ *   LL = −(n−1)/2 log σ²* − ½ Σ log d_i − ½ log C
  * ---------------------------------------------------------------------- */
-static double emma_profile_ll(double log_delta, int n,
-                               const double *lambda, const double *z)
+static double emma_profile_reml(double log_delta, int n,
+                                 const double *lambda,
+                                 const double *z, const double *w)
 {
     double delta = exp(log_delta);
-    double ss = 0.0, ld = 0.0;
+    double A = 0.0, B = 0.0, C = 0.0, ld = 0.0;
     for (int i = 0; i < n; i++) {
         double d = delta * lambda[i] + 1.0;
-        ss += z[i] * z[i] / d;
+        A  += z[i] * z[i] / d;
+        B  += z[i] * w[i] / d;
+        C  += w[i] * w[i] / d;
         ld += log(d);
     }
-    double sig2 = fmax(ss / n, 1e-15);
-    return -(double)n * 0.5 * log(sig2) - 0.5 * ld;
+    double C_safe   = fmax(C, 1e-30);
+    double ss_reml  = A - B * B / C_safe;
+    double sig2     = fmax(ss_reml / (n - 1), 1e-15);
+    return -(double)(n - 1) * 0.5 * log(sig2) - 0.5 * ld - 0.5 * log(C_safe);
 }
 
 int gall_emma_reml(const gall_t *g, const double *y,
@@ -313,6 +341,7 @@ int gall_emma_reml(const gall_t *g, const double *y,
     int n = g->n;
     const double *U      = g->U;
     const double *lambda = g->lambda;
+    const double *w      = g->w_ones;   /* U^T 1_n, precomputed */
 
     /* z = Uᵀ y */
     double *z = malloc((size_t)n * sizeof(double));
@@ -331,30 +360,36 @@ int gall_emma_reml(const gall_t *g, const double *y,
     double lo = -20.0, hi = 20.0;
     double x1 = lo + PHI * (hi - lo);
     double x2 = hi - PHI * (hi - lo);
-    double f1 = emma_profile_ll(x1, n, lambda, z);
-    double f2 = emma_profile_ll(x2, n, lambda, z);
+    double f1 = emma_profile_reml(x1, n, lambda, z, w);
+    double f2 = emma_profile_reml(x2, n, lambda, z, w);
 
     for (int iter = 0; iter < 100; iter++) {
         if (f1 > f2) {
-            hi = x2; x2 = x1; f2 = f1;
+            /* x1 (right probe) is better → max is in [x2, hi]; discard [lo, x2] */
+            lo = x2; x2 = x1; f2 = f1;
             x1 = lo + PHI * (hi - lo);
-            f1 = emma_profile_ll(x1, n, lambda, z);
+            f1 = emma_profile_reml(x1, n, lambda, z, w);
         } else {
-            lo = x1; x1 = x2; f1 = f2;
+            /* x2 (left probe) is better → max is in [lo, x1]; discard [x1, hi] */
+            hi = x1; x1 = x2; f1 = f2;
             x2 = hi - PHI * (hi - lo);
-            f2 = emma_profile_ll(x2, n, lambda, z);
+            f2 = emma_profile_reml(x2, n, lambda, z, w);
         }
     }
 
     double delta_opt = exp(0.5 * (x1 + x2));
 
-    /* Profile σ²* at optimal δ */
-    double ss = 0.0;
+    /* REML σ²* and ws2* at optimal δ */
+    double A = 0.0, B = 0.0, C = 0.0;
     for (int i = 0; i < n; i++) {
         double d = delta_opt * lambda[i] + 1.0;
-        ss += z[i] * z[i] / d;
+        A += z[i] * z[i] / d;
+        B += z[i] * w[i] / d;
+        C += w[i] * w[i] / d;
     }
-    *sigma2_out = fmax(ss / n, 1e-15);
+    double C_safe   = fmax(C, 1e-30);
+    double ss_reml  = A - B * B / C_safe;
+    *sigma2_out = fmax(ss_reml / (n - 1), 1e-15);
     *ws2_out    = delta_opt * (*sigma2_out);
 
     free(z);

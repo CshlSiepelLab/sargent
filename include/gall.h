@@ -30,21 +30,23 @@
  *
  * File format (.gall):
  *   uint64  magic   = 0x4C4C41475247_4153  ('SARGGALL')
- *   uint32  version = 1
+ *   uint32  version = 2
  *   int32   n
  *   int64   trees_size  (st_size of .trees file at build time; used for
  *                        cache invalidation — reload if size changes)
  *   double  U[n*n]      (eigenvectors, col-major; U[:,k] = k-th eigenvector)
  *   double  lambda[n]   (eigenvalues of G_all, ascending order)
+ *   double  w_ones[n]   (= U^T 1_n; used for REML intercept projection)
  */
 
 #define GALL_MAGIC   UINT64_C(0x4C4C414753524741)
-#define GALL_VERSION 1u
+#define GALL_VERSION 2u
 
 typedef struct {
     int     n;          /* number of individuals */
     double *U;          /* n×n eigenvectors, col-major */
     double *lambda;     /* n eigenvalues, ascending */
+    double *w_ones;     /* n entries: (U^T 1_n)[k]; used in REML profile LL */
     double *Pinv;       /* n entries: 1/(ws2_mean*lambda[i]+sigma2); NULL until
                            gall_precond_build() */
     double *work;       /* n scratch doubles for gall_precond_apply(); pre-alloc'd
@@ -100,16 +102,20 @@ void gall_precond_apply(const gall_t *g, double *out, const double *in);
 void gall_precond_cb(double *out, const double *in, int n, void *data);
 
 /*
- * EMMA profile-likelihood search for the uniform ARG model:
+ * EMMA REML profile-likelihood search for the uniform ARG model:
  *
- *   V = sigma2 * I + ws2_total * G_all
+ *   V = sigma2 * I + ws2_total * G_all,   G_all = U Λ Uᵀ
  *
- * Optimises the ML log-likelihood by a golden-section search over
- *   δ = ws2_total / sigma2  ∈  [e^{-20}, e^{20}]
- * in log space (100 bracket contractions), then recovers sigma2 from the
- * profile estimate σ²* = (1/n) Σ_i z_i² / (δ λ_i + 1).
+ * Optimises the REML log-likelihood (intercept projected out) by a
+ * golden-section search over δ = ws2_total / sigma2 ∈ [e⁻²⁰, e²⁰]:
  *
- * y must be mean-centred (ML ≈ REML for centred data; sargent_new centres y).
+ *   w = U^T 1_n  (precomputed as g->w_ones)
+ *   d_i = δ λ_i + 1
+ *   A = Σ z_i²/d_i,  B = Σ z_i w_i/d_i,  C = Σ w_i²/d_i
+ *   ss_reml = A − B²/C
+ *   σ²* = ss_reml/(n−1)
+ *   LL_REML = −(n−1)/2 log σ²* − ½ Σ log d_i − ½ log C
+ *
  * On return: *ws2_out = δ* × σ²*, *sigma2_out = σ²*.
  * Returns the number of golden-section iterations (always 100).
  */
