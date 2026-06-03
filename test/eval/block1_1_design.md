@@ -417,3 +417,50 @@ stays at 0.066.
   **ARG-BLUP-uniform**, not SARGENT, as the framework's prediction representative
   (SARGENT's BayesR fixed effect is the cross-ancestry liability). Framing is
   Adam-led — these numbers are captured here; the figure narrative is Block 3.
+
+## SARGENT cross-ancestry rescue test (SARGENT-W, 2026-06-03)
+
+**Question:** the v2 surface showed SARGENT (full) collapses to BayesR levels
+cross-ancestry (it inherits the β fixed-effect liability). Can it be rescued by
+dropping β? **SARGENT-W** = `sargent --arg-only` = per-tree ŵ² with **no β
+fixed effect** (predict path = K_sg·α only). Re-fit on the existing 120 v2 cells
+(no re-sim); **120/120, 0 failures**; ŵ²-only so the h²_snp divergence cannot
+occur (W-arm h²_arg ∈ [0.45, 0.70], 0 negative). The EM variant (`--em 5`) was
+scoped out (≥5× cost, anticipated negative).
+
+NB: the SARGENT-W cells were fit with the **new EMMA Stage-2 binary** (perf PR),
+the v2 baselines with the old Hutchinson binary. A 3-cell pilot confirmed they
+agree within ~0.01 r²_calib (Δh²_arg ≤ 0.006, Δr²_calib ≤ 0.009; ws² correlates
+0.92–0.98 on signal cells), so the comparison is valid.
+
+### Result — r²_calib by F_ST (the three SARGENT flavours)
+
+| F_ST | **SARGENT-U**(uniform ŵ², no β) | SARGENT-W (per-tree ŵ², no β) | SARGENT-full (β + per-tree ŵ²) | W−full | W−U |
+|---|---|---|---|---|---|
+| 0.07 | **0.155** | 0.143 | 0.140 | +0.003 | −0.012 |
+| 0.12 | **0.172** | 0.145 | 0.124 | +0.021 | −0.027 |
+| 0.16 | **0.130** | 0.102 | 0.066 | +0.036 | −0.028 |
+| 0.30 | **0.089** | 0.070 | 0.048 | +0.022 | −0.019 |
+
+(SARGENT-U = ARG-BLUP-uniform from the v2 surface.)
+
+### Verdict: the rescue is PARTIAL — SARGENT-U remains the cross-pop representative
+
+- **Dropping β helps (or is neutral) at every F_ST** — SARGENT-W ≥ SARGENT-full
+  by +0.00 to +0.04, biggest at mid-divergence (F_ST=0.16). So β is confirmed
+  the cross-ancestry liability the collapse came from.
+- **But SARGENT-W never reaches SARGENT-U** — it stays −0.01 to −0.03 below
+  uniform at every F_ST. The **per-tree ŵ² weighting is a residual drag below
+  uniform**, independent of β (consistent with Phase 10 / Block 1.2 / v1:
+  ŵ² is a localization primitive, not a prediction primitive).
+- **SARGENT-U (uniform ŵ², no β) is the best SARGENT flavour at every F_ST.**
+
+**Both ingredients are cross-ancestry liabilities for prediction**: β (sharply,
+at mid-F_ST) and per-tree ŵ² (mildly, throughout). The clean manuscript framing
+the data supports: **SARGENT-U is the cross-population framework representative;
+SARGENT-with-β is the within-population representative.** Use ARG-BLUP-uniform
+for the cross-ancestry figure, not SARGENT-full or SARGENT-W.
+
+Per-cell data: `test/eval/block1_1_v2_variants_results.csv`
+(`sargentW_r2`, `sargentW_r2c`, `sargentW_h2arg`). Driver:
+`test/eval/sargent_variants_v2.sh` (VARIANTS=W). Provisional framing — Adam-led.
