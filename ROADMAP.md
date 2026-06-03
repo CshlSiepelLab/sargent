@@ -1,11 +1,102 @@
 # SARGENT — Development Roadmap
 
-Last updated: 2026-06-01.
+Last updated: 2026-06-03.
+
+> **2026-06-03 — status sweep + figure framework + next priorities.**
+> Substantial progress across multiple blocks in the past 48 h; the
+> manuscript figure infrastructure is now in place and Block 3
+> (manuscript drafting) becomes the next bottleneck. Summary of
+> completed items, with priority shifts at the end.
+>
+> **Completed in this cycle:**
+>
+> - **Block 1.1 v2** (server, F_ST ladder; commit `ad348d5`): 120/120
+>   cells (4 F_ST × 3 mix × 2 typed × 5 seeds); 0/120 with h²_snp < 0
+>   incl. F_ST=0.30. ARG framework beats typed-SNP arms at every F_ST
+>   (~+0.03–0.05) but the gap is **flat across F_ST** — the original
+>   "widens with F_ST" headline does NOT hold. The gap **does widen
+>   3–4× along typed coverage** at every F_ST. SARGENT-U is the best
+>   arm at every F_ST; SARGENT-with-β collapses with BayesR at
+>   F_ST ≥ 0.16 due to the β cross-ancestry liability.
+> - **Block 1.1 SARGENT-W rescue test** (server; commits `96d3a2a` +
+>   `b7f9d73`): 120/120 cells with `sargent --arg-only` (no β fixed
+>   effect). Verdict: rescue is **partial at mix=0** (W < U by 0.01–
+>   0.03 across the ladder) and **essentially complete at mix=0.20**
+>   (W ≈ U). Manuscript framing: **SARGENT-U is the cross-pop arm;
+>   SARGENT-with-β is the within-pop arm.**
+> - **Block 1.1a (ancestry-PC covariates) — DESCOPED.** The vf-cap fix
+>   from PR #23 held at scale in v2; ancestry covariates are no longer
+>   prerequisite for v2/v3. Moved to parking lot; revisit only if a
+>   reviewer asks for the principled fix.
+> - **Block 2.1 v2** (laptop; commit `ee2d648`/`d916e87`): ARG-side per-
+>   tree-mean-age binning is a viable WHEN-axis primitive at n≥1000.
+>   Total L1 bias 0.32 (n=300) → 0.17 (n=1000); middle 5k–20k gen bin
+>   recovered 0.774 vs truth 0.856. Validates the WHEN-axis primitive
+>   for Fig 5 panel B.
+> - **Perf PR** (commits `e74b7ca`, `dadeca1`, `3486aaa`, `864a41a`):
+>   G_all eigendecomposition + EMMA Stage-2 + preconditioned CG +
+>   REML correction + warm-start. Bit-equivalent --arg-only output
+>   verified old vs new binary. New `.gall` cache file, `--precompute`
+>   flag, `--ws2-l1`/`--ws2-l2` flags. **Substantially closes Block 4
+>   (efficiency)** items 1–4; the remaining biobank-scale low-rank G_all
+>   extension stays in scope but is no longer pressing.
+> - **Block 2.6 (fused-lasso) reframed**: L2=0.5 is now the **recommended
+>   default for localization** under contiguous-block architectures
+>   (Block 1.2 setup). Used as the production estimator for Fig 4
+>   Panels A/B/C and Fig 4 Panel D's polygenic/oligogenic comparison.
+>   Story shifts from "opt-in tuning knob" → "L2=0.5 is the localization
+>   default; L1=0.5 is opt-in for oligogenic regimes."
+> - **Version bump 0.1.0 → 0.3.0** (commit `020a935`): help text
+>   documents EMMA Stage-2, .gall cache, fused-lasso flags.
+> - **Manuscript figures** (R/ggplot2; commits `8584f07`, `74dc62e`):
+>   Fig 2 (within-pop coverage axis), Fig 3 (cross-ancestry portability,
+>   2 panels with SARGENT-W in both), Fig 3 supplementary (mix_B=0
+>   regime), Fig 4 (localization headline, 4 panels with L2=0.5 default).
+>   Shared theme at `test/eval/figs_r/theme.R`. All output to
+>   `~/newwriting/arg-mapping/figs2/`. Captions stubbed in
+>   `figs2/captions.md`.
+>
+> **Dispatched 2026-06-03:**
+>
+> - **Server: Block 2.2 toward Fig 5 Panel A v1 draft** (LDSC partitioned
+>   heritability — three-estimator framework). Stage 1 produces a single
+>   reference simulation + all three estimators on it; Stage 2 is full
+>   validation across regimes. Expected: Stage 1 lands within ~1 week.
+> - **iMac: Fig 5 Panels B + C v1 draft** (WHEN and HOW axes; reuses
+>   existing Block 2.1 v2 and Block 2.5.2 data; no new sargent fits
+>   required for B, may need a small re-fit for C with the L2=0.5
+>   default). Expected: same day delivery.
+>
+> **Next priorities (in order):**
+>
+> 1. **Fig 5 v1 draft** — assemble Panels B + C from iMac immediately;
+>    Panel A from server when Stage 1 lands. Sub-week target.
+> 2. **Block 3 (manuscript drafting)** — Adam-led; can start now against
+>    the existing Figs 2/3/4 drafts in `figs2/`, with Fig 5 plugged in
+>    when it lands. The REFRAME_NOTES.md edits (2026-06-02) are the
+>    section-by-section blueprint.
+> 3. **Block 2.2 Stage 2 + Block 2.2.3 (admixed)** — full validation
+>    after Stage 1, before manuscript submission.
+> 4. **Block 5 (publication readiness)** — README/help/CI polish; defer
+>    until manuscript draft is near-final.
+>
+> **Items intentionally NOT prioritized:**
+>
+> - Joint EM (`--em N`) within-pop test: deprioritized but a one-cell
+>   diagnostic is running on the laptop (2026-06-03) to put a number on
+>   the SARGENT vs BayesR h² overlap at cov=0.05.
+> - Block 1.1 v3 (n_train ladder; F_ST=0.5 archaic): defer to manuscript
+>   review pass.
+> - Block 2.3 (ARG-aware fine-mapping): separate paper.
+
+---
 
 This document captures the agreed plan for finalising SARGENT. The
 priority order is **correctness first, scale later**. We finish each
 algorithmic mode at small scale, validate it, then tackle the engineering
 optimisations needed for biobank scale.
+
+Historical entries below (most recent first):
 
 > **2026-05-27 strategic re-evaluation.** A full review of code, results,
 > and manuscript concluded that the distinctive per-segment `ws²` machinery
