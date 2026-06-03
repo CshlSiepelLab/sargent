@@ -40,8 +40,8 @@ Bars = inferred h²_snp (blue) and h²_arg (red); black ticks = realised truth.
 
 ## Operational implications
 
-- **For prediction**: ship `--em 50` (joint EM) as default.
-- **For h²_snp / h²_arg reporting**: continue using sequential — it gives the manuscript-style "BayesR fit, then ARG explains the residue" decomposition. Joint EM's decomposition isn't a useful summary.
+- **For prediction**: `--em 50` (joint EM) was tentatively flagged as default here, but **this was reverted by Phase 4.5** after joint EM collapsed at Nurdan scale (n=200, S=2739). The default is **sequential** (`--mode predict` without `--em`). Joint EM is a warm-start polish step available via `--em N`, not the default.
+- **For h²_snp / h²_arg reporting**: sequential — it gives the manuscript-style "BayesR fit, then ARG explains the residue" decomposition. Joint EM's decomposition isn't a useful summary.
 - **Total h²**: both methods agree within ~15% of realised; sequential's `h2 = h2_snp + h2_arg` is a usable point estimate.
 
 ## What's next

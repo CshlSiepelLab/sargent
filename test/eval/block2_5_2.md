@@ -139,3 +139,10 @@ python ~/git-src/sargent/test/eval/plot_arch.py arch_b252_grouped.json \
   (which-trees-are-active) is OK (0.7+); the new result here is that
   *amplitude recovery* (how much variance in each tree) is not OK. These
   are different aspects of the same estimator.
+- **Note (project standing rule, established 2026-06-01):** this sweep ran
+  `sparse` architecture only. Future polygenicity / estimator-amplitude
+  validations must include `scattered` alongside `sparse` — sparse's
+  contiguous blocks can be well-tagged even at low coverage, understating
+  the ARG advantage and making estimator behaviour look better than it is
+  for realistic architectures. The Block 2.6 acceptance criteria were
+  extended to require both architectures.

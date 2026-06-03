@@ -22,29 +22,23 @@ The current methodological focus and remaining open questions live in:
 - **`test/eval/block1_1_design.md`** — Block 1.1 (cross-ancestry PRS
   portability) design + SSH-launch instructions. **This is the active
   experiment.**
-- **`test/eval/fit_blup_audit.md`** *(may not exist yet)* — Block 1.3
-  audit of the +0.25 h² bias in `predict.py:fit_blup`. Was being run by
-  an agent in the macOS-side session — check whether the file exists
-  before assuming the audit is pending.
+- **`test/eval/fit_blup_audit.md`** — Block 1.3 audit of the +0.25 h²
+  bias in `predict.py:fit_blup`. Done (commits `53af237`, `ebf757c`);
+  root cause: rank-1 constant offset in ARG kinship; fix: double-center K.
 
-## Current state (as of 2026-05-31)
+## Current state (as of 2026-06-03)
 
-Branch context: `fix/cg-hang-and-r2-miscalib` (draft PR #21). This
-branch now has the server-side fixes (CG cap, r2_calib) and the
-laptop-side Block 1.2 + ROADMAP work merged together (merge commit
-`6061f57`, 2026-05-31).
+Branch context: `main`. All active PRs (#21, #23, #24) merged.
 
 Active work blocks:
 
-- **Block 1.1** (cross-ancestry PRS portability): v1 done on server
-  (commit `e6d46ee`). **Verdict: NULL within method** — SARGENT ≈
-  ARG-BLUP-uniform on the transfer ladder. See
-  `test/eval/block1_1_design.md`. Adam's 2026-05-31 directive: **keep
-  this as a paper component** — cross-ancestry / Neanderthal prediction
-  is novel for ARG-LMM and shows the framework helps over BayesR even
-  if SARGENT and ARG-BLUP-uniform tie. Plus a Stage-1 BayesR h²_snp
-  divergence audit on 4 extreme cells
-  (`test/eval/h2_decomp_divergence.md`) — server investigating.
+- **Block 1.1** (cross-ancestry PRS portability): v1 + v2 + SARGENT-W
+  rescue test all done. **Verdict: ARG framework (SARGENT-U) beats
+  typed-SNP methods across the F_ST ladder; per-segment ŵ² and β are
+  both cross-ancestry liabilities vs ARG-BLUP-uniform.** The manuscript
+  contribution is "framework vs typed-SNP methods", not "SARGENT vs
+  ARG-BLUP-uniform". See `test/eval/block1_1_design.md` §§ "v1 results",
+  "v2 results", "SARGENT cross-ancestry rescue test".
 - **Block 1.2** (localization robustness sweep): v1 done on laptop
   (commit `2c19ba3`). **Verdict: estimator above chance in 5/6 cells**;
   estimator-ceiling gap small (0.04-0.11) across the grid. C1 HELD;
@@ -54,8 +48,9 @@ Active work blocks:
   `53af237`, `ebf757c`). `predict.py` double-centers K
   (`center_kinship`); h² bias +0.26 → +0.05; R² unchanged.
 - **Block 0** (claims triage): Adam signed off 2026-05-29. Bucket
-  moves proposed by Block 1.2 (C1 → HELD; C4 → HELD [MINOR]; C5 →
-  WEAK) and Block 1.1 NULL verdict pending.
+  moves C1 → HELD; C4 → HELD [MINOR]; C5 → WEAK (Block 1.2) and
+  D2 → FALSIFIED at current estimator (Block 2.5.2) still awaiting
+  Adam's sign-off on `CLAIMS.md` patch.
 
 **Block 2 is now the Applications arc** (replaces the deferred sparse
 fused lasso, demoted to parking lot). Localization confirmed as the

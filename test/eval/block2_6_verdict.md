@@ -91,7 +91,13 @@ bf=0.005 admixed cell (truth M_e ≈ 9, S_train=1171, n_active=6):
    spike-and-slab mixture prior on ws² directly), we'd need a
    different prior structure. See "What's next" below.
 
-## What's next: spike-and-slab on `ws²` directly (NEW SUB-BLOCK)
+## What's next: spike-and-slab on `ws²` directly — **DROPPED 2026-06-01**
+
+> The path described below was proposed as Block 2.6.5, then dropped after a
+> meta-review (Adam + Claude). Design preserved at
+> `test/eval/block2_6_5_design.md`. Effort redirected to Blocks 2.1 and 2.2.
+
+## Original "what's next" note (superseded)
 
 The right prior for polygenicity / variance-capture recovery is the
 spike-and-slab mixture prior on `ws²_s` *itself* (not on log(ws²) − mean):

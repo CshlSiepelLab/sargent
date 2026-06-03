@@ -165,7 +165,7 @@ would be the stronger manuscript pitch.
 ## Manuscript implications
 
 This is a **clean B6 result that belongs in the manuscript prediction
-figure (`Fig 3` in `REFRAME_NOTES.md`)**:
+figure (Fig 3, cross-ancestry portability)**:
 
 - Headline panel: ARG-BLUP-uni − BayesR R² gap vs coverage, with both
   architectures overlaid. Show the monotone crossover at cov ≈ 0.5.

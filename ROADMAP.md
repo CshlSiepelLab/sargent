@@ -333,34 +333,42 @@ over BayesR / GBLUP — not over ARG-BLUP-uniform. v2 focuses on regimes
 where typed-SNP methods are structurally limited and ARG-based methods
 help, regardless of which specific ARG method is used.
 
-- [ ] **F_ST ladder** (split time = 1500 / 3500 / 7000 →
-      F_ST ≈ 0.05 / 0.15 / 0.25): does the ARG framework's advantage
-      over BayesR widen with population distance?
-- [ ] **Admixed scenario** (recent pulse, α = 0.5, train on admixed cohort
-      → predict on admixed individuals): the AoU / HARC realistic
-      deployment regime. ARG-based methods get cohort-specific kinship;
-      BayesR does not.
-- [ ] **Neanderthal-style deep-divergence demonstration**: train on
-      modern, predict on simulated archaic-divergent individuals
-      (T_split ~ 600 kya). Even if the prediction is poor in absolute
-      terms, demonstrate that the ARG-based framework retains some
-      portability where typed-SNP methods collapse entirely. Backs B5.
-- [ ] **Low-typed-coverage ladder** (f_typed = 0.7 / 0.3 / 0.1): does
-      the ARG-framework-over-BayesR gap widen as typing coverage drops?
-      Block 1.1 v1 covered two coverages; expand for the figure.
-- [ ] **eGRM head-to-head**: include eGRM (Fan et al.) as an explicit
-      ARG-LMM baseline so the claim is not "SARGENT vs everything"
-      but "ARG-based vs BayesR / GBLUP".
+- [x] **F_ST ladder** (F_ST ≈ 0.07 / 0.12 / 0.16 / 0.30, 4 levels):
+      120/120 cells, 0 failures. **Verdict: ARG framework beats typed-SNP
+      at every F_ST (+0.03–0.05); gap flat-to-narrowing with F_ST (does
+      not widen). Advantage axis is typed coverage, not F_ST.** Data:
+      `test/eval/block1_1_v2_results.csv`. (2026-06-02)
+- [x] **Low-typed-coverage ladder** (f_typed = 0.7 / 0.1 both covered
+      in v2 at every F_ST level; see also rare-variant ablation at 4
+      coverages × 2 architectures). Gap is ~3–4× larger at low coverage.
+- [ ] **Admixed scenario** (recent pulse, α = 0.5, train on admixed
+      cohort → predict on admixed individuals): not yet run. v2 used
+      two-population transfer only.
+- [ ] **Neanderthal-style deep-divergence demonstration**: not yet run.
+- [ ] **eGRM head-to-head**: not yet run.
+- [x] **SARGENT-W rescue test** (drop β, per-tree ŵ² only, `--arg-only`):
+      120/120 cells re-fit on v2 sims. **Verdict: partial rescue — SARGENT-W
+      ≥ SARGENT-full at every F_ST but never reaches SARGENT-U.** Both β
+      and per-tree ŵ² are cross-ancestry liabilities; SARGENT-U is the
+      clean prediction representative. Data:
+      `test/eval/block1_1_v2_variants_results.csv`. (2026-06-03)
+
+**v2 overall verdict (2026-06-02/03):** ARG framework > typed-SNP across
+the F_ST ladder; BayesR collapses hardest; **SARGENT-U (ARG-BLUP-uniform)
+is the robust prediction workhorse**. The manuscript cross-ancestry figure
+should lead with the **coverage axis** (not F_ST) and use SARGENT-U as the
+framework representative. See `block1_1_design.md` §§ "v2 results",
+"SARGENT cross-ancestry rescue test".
 
 **Figures for the manuscript** (Block 3):
 
-- [ ] Cross-ancestry portability curve: framework R² vs population
-      distance, with BayesR / GBLUP / ARG-BLUP-uniform / SARGENT lines.
-      Shows the ARG-framework advantage opening up as F_ST grows.
-- [ ] Admixed-cohort prediction figure: per-arm R² in a realistic
-      admixed setting (AoU pitch).
-- [ ] (Stretch) Neanderthal projection figure: ARG-based methods alone
-      retain some predictive power at archaic divergence depths.
+- [x] Cross-ancestry portability figure: data available in
+      `block1_1_v2_results.csv`; `test/eval/fig3/plot.py` written.
+      Two panels: Panel A (R² vs coverage at F_ST=0.16), Panel B
+      (R² vs F_ST at typed=0.70). (2026-06-02)
+- [ ] Admixed-cohort prediction figure: data not yet available (admixed
+      scenario above not yet run).
+- [ ] (Stretch) Neanderthal projection figure: not yet run.
 
 #### Block 1.2 — Localization robustness sweep — ✅ DONE 2026-05-30
 

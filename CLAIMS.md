@@ -60,7 +60,7 @@ Of the FALSIFIED/WEAK group, 5 are flagged **[MINOR]**: A2, B3, C2, C4, F2.
 | # | Claim | Bucket | Evidence held | Evidence missing | Source |
 |---|---|---|---|---|---|
 | D1 | SARGENT estimates polygenicity (π_k from BayesR mixture) accurately. | **WEAK** | π_k is biased by the same fixed/random cannibalization that biases `h²_snp` / `h²_arg`. | Targeted test on simulations with known polygenicity. | Phase 1 / `project_stage2_algorithm.md`. |
-| D2 | SARGENT distinguishes polygenicity regimes (sparse vs diffuse). | **PLAUSIBLE / UNTESTED** | The mixture prior is structurally capable of this. | A 2–3 regime comparison. | Old Phase 3 design (untested at depth); low priority. |
+| D2 | SARGENT distinguishes polygenicity regimes (sparse vs diffuse). | **FALSIFIED (current estimator)** | Block 2.5.2 (2026-06-01): controlled sweep (block_frac ∈ {0.005, 0.05, 0.5}, truth M_e 5→600) shows estimated M_e is flat at 12–20 regardless of true polygenicity (100× separation on truth side). Variance-capture curves overlap on the estimator side. | Fix requires a better prior (fused-lasso / spike-and-slab); Block 2.6 partially improves localization AUC but does not fix M_e recovery; Block 2.6.5 DROPPED. | `test/eval/block2_5_2.md`; `test/eval/block2_6_verdict.md`. |
 
 ## E. Structured / admixed populations
 
