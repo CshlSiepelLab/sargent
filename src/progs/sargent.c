@@ -432,8 +432,9 @@ int main(int argc, char *argv[])
         /* Build (and save) if not loaded and we need it:
          *   - always for --uniform-arg (EMMA path requires gall)
          *   - always for --precompute
-         *   - auto-skip for per-tree mode (gall is a bonus, not required) */
-        if (!gall && (precompute || uniform_arg)) {
+         *   - for per-tree mode: gall supplies both the CG preconditioner and
+         *     the EMMA warm-start (reduces Stage 2 from ~750 s to ~50 s). */
+        if (!gall && (precompute || uniform_arg || !snp_only)) {
             gall = gall_build(&ts, sg->hap_to_indiv, sg->n);
             if (gall) {
                 if (trees_sz >= 0) {
@@ -501,16 +502,32 @@ int main(int argc, char *argv[])
         }
 
         if (!snp_only) {
-            int use_emma = (sg->uniform_arg && sg->gall != NULL);
+            int use_emma       = (sg->uniform_arg && sg->gall != NULL);
+            int emma_warmstart = (!sg->uniform_arg && sg->gall != NULL);
             if (!silent)
                 fprintf(stderr, "Stage 2: inferring segment weights (%d trees%s%s)...\n",
                         sg->S,
                         sg->uniform_arg ? ", uniform-random" : "",
-                        use_emma ? ", EMMA eigenspace" : "");
-            if (use_emma)
+                        use_emma ? ", EMMA eigenspace" :
+                        emma_warmstart ? ", EMMA warm-start" : "");
+            if (use_emma) {
                 var_random_emma(sg, silent);
-            else
+            } else {
+                if (emma_warmstart) {
+                    /* Run EMMA in uniform mode to obtain a fast initialiser for
+                     * ws2[s] and sigma2.  Temporarily set uniform_arg=1 so that
+                     * var_random_emma takes the EMMA path; restore before the
+                     * full per-tree EM call.  On EMMA boundary failure the
+                     * function falls back to uniform EM (still a better warm-start
+                     * than tau2_mix/2).  var_random skips re-initialisation when
+                     * ws2 is already non-NULL, so the warm-start is picked up
+                     * automatically. */
+                    sg->uniform_arg = 1;
+                    var_random_emma(sg, /*silent=*/1);
+                    sg->uniform_arg = 0;
+                }
                 var_random(sg, silent);
+            }
             if (!silent)
                 fprintf(stderr, "Stage 2 done: h2_arg=%.4f  sigma2=%.4f\n",
                         sg->h2_arg, sg->sigma2);
