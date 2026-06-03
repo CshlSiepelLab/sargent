@@ -1,43 +1,45 @@
-# Manuscript Figure 2 — variance decomposition
+# Manuscript Figure 2 — within-population: h² and prediction vs typed coverage
 
-Reframed Fig 2 (per 2026-06-01 evening design discussion). One figure,
-two panels, panmictic single-population sims throughout. Story:
-
-> SARGENT recovers total `h²` accurately while sequentially prioritising
-> the typed-SNP fixed-effect component. As true random share grows or
-> typed coverage drops, the estimated SNP-vs-ARG split shifts in the
-> right direction even though the partition is not strictly identifiable.
+Revised 2026-06-02 (mixture-axis story dropped; non-identifiability of the
+SNP/ARG split moves to supplement). Both panels share the same 50 cells.
 
 ## Panels
 
-- **Panel A — mixture sweep at full coverage.** 5 true mixtures of
-  `h²_SNP` and `h²_ARG` (total = 0.6): all-SNP, heavy-SNP, balanced,
-  heavy-ARG, all-ARG. 10 seeds each. Stacked bars showing SARGENT's
-  estimated `h²_SNP` + `h²_ARG`, with the simulated `h²_ARG` share
-  marked as a reference line. Plus overlay of BayesR (typed-SNP only)
-  and ARG-BLUP-uniform (ARG only) total h².
-- **Panel B — coverage sweep at balanced mixture.** Reuses the
-  `~/test-sargent/rare_variant/` data (4 coverages × 2 architectures × 5
-  seeds; `h²_SNP = h²_ARG = 0.3`). Lines: SARGENT `h²_SNP`,
-  SARGENT `h²_ARG`, SARGENT total, BayesR total, ARG-BLUP-uniform total.
-  Shaded ribbon = ±1 SE over seeds.
+- **Panel A — ĥ² recovery vs typed coverage.** Points + ±1 SE error bars
+  for BayesR (`h²_snp` from `est.summary.json`), GBLUP (`gblup_h2`),
+  SARGENT-U (`arg_blup_uniform_h2`), and SARGENT (`h²` from
+  `est.summary.json`). Truth dashed at 0.60.
+- **Panel B — Held-out r²_calib vs typed coverage.** Same four arms,
+  same cells. Points + ±1 SE error bars.
+
+Coverage grid: `f_typed ∈ {1.00, 0.70, 0.30, 0.10, 0.05}` (extends below
+the rare_variant baseline to amplify the typed-SNP collapse). Sparse
+architecture, panmictic, single population, `h²_SNP = h²_ARG = 0.3`,
+`n_train = 600`, `L = 300 kb`, 10 seeds per coverage level.
+
+## Naming
+
+- **SARGENT** = full pipeline (BayesR fixed effect + per-tree-weighted
+  ARG random effect).
+- **SARGENT-U** = the **ARG-BLUP-uniform** special case (no fixed
+  effect, uniform per-tree weights — pure ARG-kinship BLUP).
+- **GBLUP** = typed-SNP GRM BLUP.
+- **BayesR** = typed-SNP sparse fixed-effect PRS.
 
 ## Files
 
-- `run_sweep.sh` — Panel A mixture sweep driver (50 cells; parallelism via
-  `xargs -P`).
-- `plot.py` — generates both panels into `fig2.{pdf,png}`. Reads:
-  - Panel A: `~/test-sargent/fig2/mix*_s*/est.summary.json`
-  - Panel B: `~/test-sargent/rare_variant/a*_cv*_d*_s*/est.summary.json`
-- `aggregate.py` — extracts per-cell `h²` values into a combined JSON for
-  plotting (called by `plot.py`).
+- `run_sweep.sh` — parallel driver (5 cov × 10 seeds = 50 cells,
+  4-way parallel via `xargs -P`). Per cell: `sim → sargent → predict.py`.
+- `plot.py` — generates `fig2.{pdf,png}` from
+  `est.predict.json` (R²s + GBLUP/SARGENT-U h²) and `est.summary.json`
+  (BayesR h², SARGENT total h²).
 
 ## Reproduce
 
 ```bash
-bash test/eval/fig2/run_sweep.sh        # ~2h with 6-way parallelism
-python test/eval/fig2/plot.py           # produces fig2.{pdf,png}
+bash test/eval/fig2/run_sweep.sh
+python test/eval/fig2/plot.py --base-rva ~/test-sargent/fig2_n600
 ```
 
-Override defaults via env: `N_PAR=4 N_SEEDS=10 H2_TOTAL=0.6`
-`BASE_FIG2=...` `BASE_RVA=...`.
+Override defaults via env: `N_TRAIN=800 N_SEEDS=10 N_PAR=4`
+`COVERAGES="1.0 0.7 0.3 0.1 0.05"` `ARCH=sparse` `BASE=...`.
