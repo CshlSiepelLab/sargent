@@ -1,47 +1,64 @@
 # Manuscript Figure 3 — cross-ancestry portability
 
-Per 2026-06-02 plan (revised Option 3 in the Fig 2 + Fig 3 reconsideration).
+The manuscript deliverable is **`test/eval/figs_r/fig3.R`** (R/ggplot2),
+which renders to `~/newwriting/arg-mapping/figs2/fig3.{pdf,png}`. This
+`plot.py` is the original Python prototype, preserved for reference; it
+implements an earlier panel design (typed-coverage axis at mix_B=0) that
+was superseded on 2026-06-02 (pm) by the target-injection layout below.
 
-Two panels:
+## Current R version (test/eval/figs_r/fig3.R)
 
-- **Panel A — R² vs typed coverage at F_ST = 0.16, mix_B = 0.**
-  Grouped bars over typed = {0.10, 0.70} for the four arms (SARGENT,
-  SARGENT-U, GBLUP, BayesR). SARGENT-U = the SARGENT-U special
-  case of SARGENT (no fixed effect, uniform per-tree weights — pure
-  ARG-kinship BLUP). Shows SARGENT-U is coverage-invariant while BayesR
-  / GBLUP / SARGENT all collapse at low coverage. This is the
-  load-bearing comparison: the ARG-vs-typed gap widens ~3-4× as typed
-  coverage drops (Block 1.1 v2 verdict).
-- **Panel B — R² vs F_ST at typed = 0.70, mix_B = 0.**
-  Line plot over F_ST ∈ {0.07, 0.12, 0.16, 0.30} with ±1 SE ribbons.
-  Shows the ARG framework retains its advantage across the entire
-  ladder; BayesR and SARGENT (which inherits the BayesR fixed effect)
-  collapse hardest. Frame: advantage *preserved* across F_ST, not
-  *widening* with F_ST (the original headline did not survive v2).
+Two panels at 6.5 × 3.3 in, using the shared theme at
+`test/eval/figs_r/theme.R` (Tableau-10 palette, Helvetica via
+`cairo_pdf`, base 8 pt).
 
-Note on the framework representative: **SARGENT-U**, not
-SARGENT, is the figure's framework representative. SARGENT inherits
-the BayesR fixed-effect liability cross-ancestry; the within-method
-SARGENT-vs-SARGENT-U null moves to the supplement.
+- **Panel A — Target-injection axis at F_ST = 0.16, typed = 0.70.**
+  Grouped bars over mix_B ∈ {0.00, 0.05, 0.20} for 5 arms (BayesR,
+  GBLUP, SARGENT, SARGENT-U, SARGENT-W) with light error bars.  Story:
+  without target injection cross-ancestry prediction is dismal; with
+  mix_B = 0.20 SARGENT-U lifts to r²_calib ≈ 0.22 while SARGENT-with-β
+  stays at ≈ 0.07 — confirming β is the cross-ancestry liability.
+  F_ST = 0.16 is annotated in-panel.
+- **Panel B — F_ST ladder at typed = 0.70, mix_B = 0.20 (the predictive
+  regime).**  Lines for the same 5 arms with light per-arm error bars
+  (small interleaved jitter so coincident pairs are distinguishable).
+  Story: SARGENT-U dominates across F_ST ∈ {0.07, 0.12, 0.16, 0.30}.
+  SARGENT-W tracks SARGENT-U closely (rescue is essentially complete
+  with target injection).  SARGENT-with-β collapses with BayesR at
+  F_ST ≥ 0.16.
 
-## Files
+## Companion supplementary figure
 
-- `plot.py` — generates `fig3.{pdf,png}` from
-  `test/eval/block1_1_v2_results.csv` (committed in `ad348d5`).
-- Data: `test/eval/block1_1_v2_results.csv` (120 rows, schema
-  `split, fst, mix, typed, seed, <arm>_r2, <arm>_r2c, h2_snp, h2_arg`
-  for arms ∈ {bayesR, gblup, argunif, sargent}).
+`test/eval/figs_r/fig3_supp.R` renders the same F_ST ladder but at
+**mix_B = 0** (no target injection).  Same 5 arms.  Shows the absolute
+collapse without target individuals and the partial rescue verdict
+(SARGENT-W < SARGENT-U by 0.01–0.03).  Output at
+`~/newwriting/arg-mapping/figs2/fig3_supp.{pdf,png}`.
+
+## Naming
+
+SARGENT-U = pure-ARG-kinship BLUP, no β, uniform per-tree weights
+(equivalent to ARG-BLUP-uniform).  SARGENT-W = `sargent --arg-only` =
+per-tree-weighted ARG without β.  See `test/eval/block1_1_design.md`
+§ "SARGENT cross-ancestry rescue test" for the full verdict.
+
+## Data sources
+
+- `test/eval/block1_1_v2_results.csv` (server-side Block 1.1 v2,
+  commit `ad348d5`; 4 F_ST × 3 mix × 2 typed × 5 seeds = 120 cells).
+- `test/eval/block1_1_v2_variants_results.csv` (SARGENT-W rescue
+  test, commit `b7f9d73`; same 120 cells; schema adds
+  `sargentW_r2c`).
 
 ## Reproduce
 
 ```bash
-python test/eval/fig3/plot.py     # produces fig3.{pdf,png}
+Rscript test/eval/figs_r/fig3.R          # 2-panel main figure
+Rscript test/eval/figs_r/fig3_supp.R     # mix_B = 0 supplementary
 ```
 
-Override defaults via flags:
+## Python legacy
 
-```bash
-python test/eval/fig3/plot.py \
-    --panel-a-fst 0.30 --panel-b-typed 0.10 \
-    --out /tmp/fig3_alt
-```
+`test/eval/fig3/plot.py` implements the pre-2026-06-02 layout
+(typed-coverage axis at mix_B = 0).  Kept for reference but not the
+manuscript deliverable.

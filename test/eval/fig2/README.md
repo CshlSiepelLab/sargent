@@ -1,5 +1,11 @@
 # Manuscript Figure 2 — within-population: h² and prediction vs typed coverage
 
+The manuscript deliverable is **`test/eval/figs_r/fig2.R`** (R/ggplot2),
+which renders to `~/newwriting/arg-mapping/figs2/fig2.{pdf,png}`. This
+`plot.py` is the original Python prototype; the layout and arms are the
+same as the R version. The `run_sweep.sh` driver below produces the cell
+data both versions consume.
+
 Revised 2026-06-02 (mixture-axis story dropped; non-identifiability of the
 SNP/ARG split moves to supplement). Both panels share the same 50 cells.
 
@@ -37,8 +43,9 @@ architecture, panmictic, single population, `h²_SNP = h²_ARG = 0.3`,
 ## Reproduce
 
 ```bash
-bash test/eval/fig2/run_sweep.sh
-python test/eval/fig2/plot.py --base-rva ~/test-sargent/fig2_n600
+bash test/eval/fig2/run_sweep.sh         # produces cell data at ~/test-sargent/fig2_n600/
+Rscript test/eval/figs_r/fig2.R          # manuscript R version (preferred)
+python  test/eval/fig2/plot.py           # Python legacy
 ```
 
 Override defaults via env: `N_TRAIN=800 N_SEEDS=10 N_PAR=4`
