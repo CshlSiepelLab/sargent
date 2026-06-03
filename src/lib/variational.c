@@ -18,13 +18,15 @@
 #include "geno.h"
 #include "conjgrad.h"
 #include "hutchinson.h"
+#include "gall.h"
 
 /* Default BayesR mixture grid: null + three effect-size classes.
  * sigma2_mix values are set relative to var(y) in sargent_new. */
 #define VAR_DEFAULT_K        4
 #define VAR_DEFAULT_M        2       /* spike-and-slab for random effects: null + slab */
 #define VAR_FIXED_MAX_ITER   500
-#define VAR_RANDOM_MAX_ITER  100     /* total EM iterations (burn-in + averaging) */
+#define VAR_RANDOM_MAX_ITER       100  /* total EM iterations (burn-in + averaging), cold-start */
+#define VAR_RANDOM_MAX_ITER_WARM   50  /* total EM iterations when EMMA-warm-started */
 #define FUSED_LASSO_PROX_MAX  200    /* coord-descent sweeps per prox call */
 #define FUSED_LASSO_PROX_TOL  1e-6   /* sweep-max delta below which prox converges */
 /* Trust-region cap on the Stage-1 fixed-effect variance: var(Xβ) ≤ this × var_y
@@ -136,7 +138,8 @@ static void fused_lasso_prox(const double *theta_in, double *theta_out,
  * validation cells while bounding per-iteration cost. Overridable per run via
  * the SARGENT_CG_MAXIT environment variable. */
 #define VAR_RANDOM_CG_MAXIT   64
-#define VAR_RANDOM_BURN_IN   40      /* iterations before Polyak-Ruppert averaging starts */
+#define VAR_RANDOM_BURN_IN        40  /* iterations before Polyak-Ruppert averaging, cold-start */
+#define VAR_RANDOM_BURN_IN_WARM   15  /* burn-in when EMMA-warm-started */
 #define VAR_FIXED_TOL        1e-4
 #define PI_FLOOR             1e-10   /* lower bound on pi/phi_mix to avoid log(0) */
 #define SCORE_CAP            50.0    /* clip tau^2*(A-B)/2 before softmax */
@@ -596,15 +599,18 @@ void var_random(sargent_t *sg, int silent)
     int S      = sg->S;
     int nprobe = sg->nprobe;
 
-    /* Allocate ws2 if needed; initialise to half of tau2_mix[M-1] so the
-     * first V-solve sees a non-trivial covariance and the REML scores have
-     * the correct sign. */
+    /* Detect EMMA warm-start: ws2 pre-filled by the caller (e.g. via a prior
+     * EMMA call in sargent.c) → tighter iteration bounds since we start near
+     * convergence.  Cold-start: allocate and set a default initial value. */
+    int was_warmstarted = (sg->ws2 != NULL);
     if (!sg->ws2) {
         sg->ws2 = malloc((size_t)S * sizeof(double));
         if (!sg->ws2) { fprintf(stderr, "var_random: out of memory\n"); return; }
         double ws2_init = sg->tau2_mix[sg->M - 1] * 0.5;
         for (int s = 0; s < S; s++) sg->ws2[s] = ws2_init;
     }
+    int max_iter = was_warmstarted ? VAR_RANDOM_MAX_ITER_WARM : VAR_RANDOM_MAX_ITER;
+    int burn_in  = was_warmstarted ? VAR_RANDOM_BURN_IN_WARM  : VAR_RANDOM_BURN_IN;
 
     /* Working arrays */
     double   *r          = malloc((size_t)n * sizeof(double));
@@ -630,8 +636,21 @@ void var_random(sargent_t *sg, int silent)
         .tol          = 1e-6,
         .abs_tol      = 0.0,
         .diag_precond = NULL,
+        .precond_fn   = NULL,
+        .precond_data = NULL,
     };
     cg_state_t *cg = cg_state_new(n, &main_cg_opts);
+
+    /* Wire G_all preconditioner for per-tree mode when precomputed.
+     * Reduces κ(P⁻¹V) from O(√κ)≈64 to ~O(1), cutting CG iterations ~64→5.
+     * Pinv is rebuilt each iteration (O(n)) from the current ws2_mean/sigma2. */
+    int use_gall_precond = (sg->gall != NULL && !sg->uniform_arg);
+    if (use_gall_precond && cg) {
+        cg_opts_t prec_opts = main_cg_opts;
+        prec_opts.precond_fn   = gall_precond_cb;
+        prec_opts.precond_data = sg->gall;
+        cg_state_set_opts(cg, &prec_opts);
+    }
 
     tree_cov_matvec_inc_state_t inc;
     int inc_ok = (tree_cov_matvec_inc_state_init(&inc, sg->ts, n, sg->hap_to_indiv) == 0);
@@ -688,10 +707,18 @@ void var_random(sargent_t *sg, int silent)
     int    n_accum      = 0;
     double old_sigma2   = sg->sigma2;
 
-    for (int iter = 0; iter < VAR_RANDOM_MAX_ITER; iter++) {
+    for (int iter = 0; iter < max_iter; iter++) {
 
         double A_0, B_0 = 0.0;
         vd.sigma2 = sg->sigma2;
+
+        /* Rebuild G_all preconditioner from current ws2_mean + sigma2 (O(n)). */
+        if (use_gall_precond) {
+            double ws2_mean = 0.0;
+            for (int s = 0; s < S; s++) ws2_mean += sg->ws2[s];
+            ws2_mean /= fmax(S, 1);
+            gall_precond_build(sg->gall, ws2_mean, sg->sigma2);
+        }
 
         cg_solve(cg, v_matvec, &vd, r, r_tilde);
 
@@ -770,7 +797,7 @@ void var_random(sargent_t *sg, int silent)
         double rel_dsig = fabs(sg->sigma2 - old_sigma2) / (old_sigma2 + 1e-15);
 
         /* Polyak-Ruppert accumulation after burn-in */
-        if (iter >= VAR_RANDOM_BURN_IN) {
+        if (iter >= burn_in) {
             sigma2_accum += sg->sigma2;
             for (int s = 0; s < S; s++) ws2_accum[s] += sg->ws2[s];
             n_accum++;
@@ -780,7 +807,7 @@ void var_random(sargent_t *sg, int silent)
             fprintf(stderr, "var_random iter %3d: sigma2=%.4f  h2_rand=%.4f"
                     "  ws2_mean=%.3e  B0=%.2e  rel_dsig=%.2e%s\n",
                     iter + 1, sg->sigma2, h2_rand, ws2_mean, B_0, rel_dsig,
-                    iter >= VAR_RANDOM_BURN_IN ? " [avg]" : "");
+                    iter >= burn_in ? " [avg]" : "");
 
         old_sigma2 = sg->sigma2;
     }
@@ -842,6 +869,116 @@ cleanup:
     free(fl_log_ws2);
     free(fl_theta_in);
     free(fl_theta_out);
+}
+
+/* =========================================================================
+ * var_random_emma: EMMA-based Stage 2 for uniform-ARG mode.
+ *
+ * Replaces var_random() when sg->uniform_arg=1 and sg->gall is set.
+ * Instead of 100 EM iterations each costing ~700 tree-sequence passes, this
+ * runs a 100-step golden-section search over the 1-D profile log-likelihood
+ * in O(n²) time (one U^T y transform + 100×n evaluations).
+ *
+ * Falls back to var_random() when sg->gall is NULL.
+ * ========================================================================= */
+void var_random_emma(sargent_t *sg, int silent)
+{
+    if (!sg->gall) {
+        if (!silent)
+            fprintf(stderr, "var_random_emma: gall not available, "
+                    "falling back to var_random\n");
+        var_random(sg, silent);
+        return;
+    }
+
+    int n = sg->n;
+    int S = sg->S;
+
+    /* Allocate ws2 if needed */
+    if (!sg->ws2) {
+        sg->ws2 = malloc((size_t)S * sizeof(double));
+        if (!sg->ws2) { fprintf(stderr, "var_random_emma: OOM\n"); return; }
+        double ws2_init = sg->tau2_mix[sg->M - 1] * 0.5;
+        for (int s = 0; s < S; s++) sg->ws2[s] = ws2_init;
+    }
+
+    double var_y = vec_var(sg->y, n);
+
+    if (!silent)
+        fprintf(stderr, "var_random_emma: EMMA profile search (n=%d, S=%d)\n",
+                n, S);
+
+    /* Build residual r = y - X E[β] */
+    double *r = malloc((size_t)n * sizeof(double));
+    if (!r) { fprintf(stderr, "var_random_emma: OOM\n"); return; }
+    memcpy(r, sg->y, (size_t)n * sizeof(double));
+    if (sg->beta) {
+        double *g = malloc((size_t)n * sizeof(double));
+        if (!g) { free(r); fprintf(stderr, "var_random_emma: OOM\n"); return; }
+        geno_rewind(sg->gr);
+        for (int j = 0; j < sg->p; j++) {
+            if (geno_read_variant(sg->gr, g, GENO_STANDARDIZE) <= 0) break;
+            if (sg->beta[j] == 0.0) continue;
+            for (int i = 0; i < n; i++) r[i] -= sg->beta[j] * g[i];
+        }
+        free(g);
+    }
+
+    /* EMMA profile-likelihood search for (ws2_shared, sigma2) */
+    double var_r = vec_var(r, n);
+    double ws2_shared, sigma2;
+    int niters = gall_emma_reml(sg->gall, r, &ws2_shared, &sigma2);
+    free(r);
+
+    /* Boundary check: if sigma2 << var(r), EMMA hit the flat ML boundary
+     * (G_all is full-rank and absorbed all residual variance).  This happens
+     * at small n or near-zero h²_arg.  Fall back to regularised EM. */
+    if (sigma2 < 1e-3 * var_r) {
+        if (!silent)
+            fprintf(stderr, "var_random_emma: boundary (sigma2=%.2e << var_r=%.2e),"
+                    " falling back to var_random\n", sigma2, var_r);
+        var_random(sg, silent);
+        return;
+    }
+
+    /* Clamp to physically sensible range */
+    double ws2_max   = var_y / fmax(S, 1);
+    double ws2_floor = 1e-12 * ws2_max;
+    ws2_shared = fmax(ws2_floor, fmin(ws2_max, ws2_shared));
+    sigma2     = fmax(1e-10 * var_y, fmin(var_y, sigma2));
+
+    /* Apply: uniform ws2 across all segments */
+    for (int s = 0; s < S; s++) sg->ws2[s] = ws2_shared;
+    sg->sigma2 = sigma2;
+
+    sg->h2_arg = (var_y > 0.0) ?
+        fmax(0.0, 1.0 - sg->sigma2 / var_y - sg->h2_snp) : 0.0;
+    sg->h2 = sg->h2_snp + sg->h2_arg;
+
+    double h2_rand = fmax(0.0, 1.0 - sigma2 / var_y - sg->h2_snp);
+    if (!silent)
+        fprintf(stderr, "var_random_emma: done in %d steps  "
+                "ws2=%.4g  sigma2=%.4f  h2_rand=%.4f\n",
+                niters, ws2_shared, sigma2, h2_rand);
+
+    /* Post-hoc activation rho: uniform mode → all segments equal, so use a
+     * single global ws2_thresh derived from the floor/ceiling. */
+    {
+        double ws2_thresh = sqrt(ws2_floor * ws2_max);
+        double phi_ref    = sg->phi_alpha / (sg->phi_alpha + sg->phi_beta + 1e-15);
+        double logit_phi  = log(phi_ref / (1.0 - phi_ref + 1e-15));
+
+        double lw    = log(fmax(ws2_shared, ws2_floor) / ws2_thresh);
+        double score = fmax(-SCORE_CAP, fmin(SCORE_CAP, logit_phi + lw));
+        double rho_s = 1.0 / (1.0 + exp(-score));
+
+        for (int s = 0; s < S; s++) {
+            sg->rho[s * 2 + 0] = 1.0 - rho_s;
+            sg->rho[s * 2 + 1] = rho_s;
+        }
+        sg->phi_mix[sg->M - 1] = rho_s;
+        sg->tau2_mix[sg->M - 1] = ws2_thresh;
+    }
 }
 
 /* =========================================================================

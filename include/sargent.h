@@ -12,6 +12,7 @@
 
 #include <tskit.h>
 #include "geno.h"
+#include "gall.h"
 
 typedef struct {
     int n;              /* number of individuals */
@@ -86,6 +87,15 @@ typedef struct {
      * Defaults (both 0.0) reproduce the unregularised behaviour exactly. */
     double fused_lasso_lambda1;
     double fused_lasso_lambda2;
+
+    /* Precomputed G_all eigendecomposition (optional).
+     * When non-NULL and uniform_arg=1, var_random_emma() replaces the
+     * CG-based var_random() — reducing Stage-2 from >60 min to <1 s.
+     * When non-NULL and uniform_arg=0, used as G_all preconditioner
+     * for the per-tree CG solves (cuts iteration count ~64 → ~5).
+     * Built by gall_build() or loaded from <prefix>.gall cache;
+     * managed externally (sargent_t does not free it). */
+    gall_t *gall;
 } sargent_t;
 
 sargent_t *sargent_new(geno_reader_t *gr, tsk_treeseq_t *ts, double *y);

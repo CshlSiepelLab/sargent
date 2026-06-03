@@ -19,12 +19,19 @@
 /* Callback: compute out = A * in.  n is the vector length; data is opaque. */
 typedef void (*cg_matvec_fn)(double *out, const double *in, int n, void *data);
 
+/* Callback: apply M⁻¹ out-of-place: out = M⁻¹ in.
+ * out and in must not alias.  Used for general (non-diagonal) preconditioners. */
+typedef void (*cg_precond_fn)(double *out, const double *in, int n, void *data);
+
 typedef struct {
-    int    max_iter;      /* 0 → use n as the limit */
-    double tol;           /* convergence: ||r||/||b|| < tol.  Default 1e-6 */
-    double abs_tol;       /* also stop if ||r|| < abs_tol.  0 → disabled */
-    double *diag_precond; /* optional length-n diagonal preconditioner (entries = 1/d_i);
-                             NULL → no preconditioning */
+    int    max_iter;        /* 0 → use n as the limit */
+    double tol;             /* convergence: ||r||/||b|| < tol.  Default 1e-6 */
+    double abs_tol;         /* also stop if ||r|| < abs_tol.  0 → disabled */
+    double *diag_precond;   /* optional length-n diagonal preconditioner (entries = 1/d_i);
+                               used when precond_fn is NULL */
+    cg_precond_fn precond_fn;   /* general preconditioner callback; takes priority over
+                                   diag_precond when non-NULL */
+    void         *precond_data; /* opaque context passed to precond_fn */
 } cg_opts_t;
 
 typedef struct {

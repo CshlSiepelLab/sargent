@@ -618,19 +618,14 @@ void tree_cov_matvec_inc_advance(tree_cov_matvec_inc_state_t *st,
 
 /* Per-sample walk-up: out[indiv(h)] += sum_{v ancestor of h} bl[v] * S[v].
  *
- * Parallelised over haplotypes when SARGENT_HAS_OPENMP is set AND there is
- * enough work to amortise thread fork/join overhead.  Empirically:
+ * Uses #pragma omp for (worksharing) rather than #pragma omp parallel for
+ * (fork/join) so it participates in an EXISTING parallel region from
+ * tree_walker_run_inc without spawning a nested team.  When called outside
+ * any parallel region (e.g. from tree_cov_matvec_incremental), the orphaned
+ * omp for is a no-op and the loop runs serially — correct but unparallelised.
  *
- *   n_hap = 400  (s42_balanced):  serial 1.08x, 8 threads 0.60x  -> skip
- *   n_hap = 2000 (medium n=1000): serial 0.95x, 8 threads 1.83x  -> parallelise
- *
- * The if() clause gives the OpenMP runtime a chance to skip the fork at
- * small n_hap; threshold 1000 sits comfortably between the two data
- * points and gives correct behaviour on cases we've measured.
- *
- * Each indiv has exactly 2 contributing haps so #pragma omp atomic on
- * out[indiv] += a is at most 2-way contended -- cheaper than maintaining
- * a per-thread accumulator. */
+ * Each individual has exactly 2 haplotypes so the omp atomic below is at
+ * most 2-way contended — cheaper than a per-thread scratch array. */
 void tree_cov_matvec_inc_readout(double *out,
                                   const tree_cov_matvec_inc_state_t *st)
 {
@@ -640,7 +635,7 @@ void tree_cov_matvec_inc_readout(double *out,
     const tsk_id_t *samples = tsk_treeseq_get_samples(st->ts);
     const tsk_size_t n_hap  = tsk_treeseq_get_num_samples(st->ts);
 
-    #pragma omp parallel for schedule(static) if(n_hap > 1000)
+    #pragma omp for schedule(static)
     for (tsk_size_t hi = 0; hi < n_hap; hi++) {
         int indiv = st->hap_to_indiv[(int)hi];
         if (indiv < 0 || indiv >= n_indiv) continue;
@@ -667,6 +662,22 @@ void tree_cov_matvec_incremental(double *out,
  * split.  pre_visit may skip the readout; advance always runs to keep S[]
  * coherent across the tree-sequence walk.
  * --------------------------------------------------------------------------- */
+/* tree_walker_run_inc: incremental tree-walker with hoisted OpenMP parallel
+ * region.
+ *
+ * Phase perf: the previous design called tree_cov_matvec_inc_readout (which
+ * had #pragma omp parallel for inside) once per tree — spawning and joining
+ * a thread team ~S times per matvec, ~700S times per EM iteration.  At
+ * S=3000 that is >2M fork/join events per run; on Linux pthreads each costs
+ * ~5 µs → ~10 s overhead alone, masking the actual computation.
+ *
+ * Fix: hoist #pragma omp parallel outside the tree loop so one team is
+ * created per tree_walker_run_inc call.  Inside:
+ *   - omp single (with implicit barrier) handles the sequential steps
+ *     (tsk_tree_next, inc_advance, pre_visit, visit callback).
+ *   - omp for (worksharing within the existing team) handles readout.
+ *
+ * The serial fallback (no OpenMP, or n_hap ≤ 1000) is unchanged. */
 int tree_walker_run_inc(tree_cov_matvec_inc_state_t *inc,
                         int                  S_orig,
                         const int           *prune_map,
@@ -690,25 +701,110 @@ int tree_walker_run_inc(tree_cov_matvec_inc_state_t *inc,
         .gv      = gv,
     };
 
-    int s = 0;
-    for (ret = tsk_tree_first(&tree); ret == TSK_TREE_OK && s < S_orig;
-         ret = tsk_tree_next(&tree), s++) {
-        int sp = prune_map ? prune_map[s] : s;
-        tree_cov_matvec_inc_advance(inc, &tree);    /* always update state */
-        if (pre_visit && !pre_visit(s, sp, ctx))
-            continue;
-        tree_cov_matvec_inc_readout(gv, inc);
-        st.s_orig = s;
-        st.sp     = sp;
-        visit(&st, ctx);
+    int err = 0;
+
+#ifdef SARGENT_HAS_OPENMP
+    tsk_size_t n_hap = tsk_treeseq_get_num_samples(inc->ts);
+
+    if ((int)n_hap > 1000) {
+        /* Hoisted parallel region: one fork for the entire tree sequence.
+         * Shared control variables written only inside omp single blocks;
+         * all threads see consistent values after the implicit barrier. */
+        int s_shared   = 0;
+        int ret_shared = TSK_TREE_OK;
+        int do_visit   = 0;    /* -1 = exit signal; 0 = skip; 1 = readout+visit */
+
+        #pragma omp parallel shared(s_shared, ret_shared, do_visit, err, tree, st)
+        {
+            /* Position to first tree (single thread). */
+            #pragma omp single
+            { ret_shared = tsk_tree_first(&tree); }
+
+            for (;;) {
+                /* Sequential: advance state and decide whether to readout. */
+                #pragma omp single
+                {
+                    if (ret_shared != TSK_TREE_OK || s_shared >= S_orig) {
+                        do_visit = -1;   /* signal loop exit to all threads */
+                    } else {
+                        int sp = prune_map ? prune_map[s_shared] : s_shared;
+                        tree_cov_matvec_inc_advance(inc, &tree);
+                        st.s_orig = s_shared;
+                        st.sp     = sp;
+                        do_visit  = (!pre_visit || pre_visit(s_shared, sp, ctx))
+                                    ? 1 : 0;
+                        s_shared++;
+                        /* Advance tree for the next iteration. */
+                        ret_shared = tsk_tree_next(&tree);
+                    }
+                }
+                /* All threads join here before checking do_visit. */
+
+                if (do_visit < 0) break;   /* all threads exit */
+
+                if (do_visit > 0) {
+                    /* Parallel readout: omp for workshares within this team. */
+                    tree_cov_matvec_inc_readout(gv, inc);
+                    /* Sequential callback (may modify ctx). */
+                    #pragma omp single
+                    { visit(&st, ctx); }
+                }
+            }
+
+            /* Check for real iteration error (not just normal end-of-sequence). */
+            #pragma omp single
+            {
+                if (ret_shared < 0 && ret_shared != 0   /* end-of-sequence: tsk_tree_next returns 0 (not TSK_TREE_OK=1) */) {
+                    fprintf(stderr, "tree_walker_run_inc: tskit error: %s\n",
+                            tsk_strerror(ret_shared));
+                    err = 1;
+                }
+            }
+        }
+        /* end parallel region */
+
+    } else {
+        /* Serial path for small n_hap (fork overhead > benefit). */
+        int s = 0;
+        for (ret = tsk_tree_first(&tree); ret == TSK_TREE_OK && s < S_orig;
+             ret = tsk_tree_next(&tree), s++) {
+            int sp = prune_map ? prune_map[s] : s;
+            tree_cov_matvec_inc_advance(inc, &tree);
+            if (pre_visit && !pre_visit(s, sp, ctx)) continue;
+            tree_cov_matvec_inc_readout(gv, inc);
+            st.s_orig = s; st.sp = sp;
+            visit(&st, ctx);
+        }
+        if (ret < 0) {
+            fprintf(stderr, "tree_walker_run_inc: tskit error: %s\n",
+                    tsk_strerror(ret));
+            err = 1;
+        }
     }
-    if (ret < 0) {
-        fprintf(stderr, "tree_walker_run_inc: tsk_tree iteration: %s\n", tsk_strerror(ret));
-        tsk_tree_free(&tree);
-        return -1;
+
+#else
+    /* No OpenMP: original serial implementation. */
+    {
+        int s = 0;
+        for (ret = tsk_tree_first(&tree); ret == TSK_TREE_OK && s < S_orig;
+             ret = tsk_tree_next(&tree), s++) {
+            int sp = prune_map ? prune_map[s] : s;
+            tree_cov_matvec_inc_advance(inc, &tree);
+            if (pre_visit && !pre_visit(s, sp, ctx)) continue;
+            tree_cov_matvec_inc_readout(gv, inc);
+            st.s_orig = s; st.sp = sp;
+            visit(&st, ctx);
+        }
+        if (ret < 0) {
+            fprintf(stderr, "tree_walker_run_inc: tskit error: %s\n",
+                    tsk_strerror(ret));
+            err = 1;
+        }
     }
+#endif
+
     tsk_tree_free(&tree);
-    return 0;
+    return err ? -1 : 0;
 }
 
 /* ---------------------------------------------------------------------------
