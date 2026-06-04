@@ -1,6 +1,86 @@
 # SARGENT — Development Roadmap
 
-Last updated: 2026-06-03.
+Last updated: 2026-06-04 PM.
+
+> **2026-06-04 PM — Block 2.2 honest negative + strategic reframe (REFRAME v5/v6).**
+> Two major developments in one afternoon:
+>
+> **(A) Block 2.2 Phase B verdict: HONEST NEGATIVE** (server commits
+> `9623d3c`, `12cf61d`, `ed7d8f5`).  The full three-flavour partitioned-
+> heritability pipeline runs end-to-end, but the per-tree ŵ² primitive
+> does not localize to the correct trees: corr(ŵ², true per-tree
+> variance) ≈ 0 across configs (n/n_trees 0.10 → 1.47).  Mechanism:
+> adjacent ARG trees are near-identical genealogies (collinear) →
+> per-tree variances ill-conditioned → ŵ²-ℓ2 shrinks toward uniform,
+> destroying the localization that fine partitioning needs.  Sharpens
+> Phase 10: ŵ² is rank-informative (Block 1.2 / Fig 4 AUC still holds)
+> but **not magnitude-informative** at per-tree resolution.  **Fig 5
+> Panel A (WHERE axis, "ARG-LDSC replacement") dropped from v1**;
+> pipeline + simulator extensions reusable for future estimators or
+> coarser partitions.  Full evidence chain at
+> `test/eval/block2_2_design.md` § Verdict.
+>
+> **(B) Strategic reframe (REFRAME v5 + v6, manuscript repo commits
+> `7b922cd` + `e5c74f8`)**.  Five structural decisions:
+>
+> 1. **Localization is no longer the manuscript headline.**  Fig 4 is
+>    real but regime-dependent (panmictic-contrast-10 AUC=0.54, basically
+>    chance), and Block 2.2's verdict (per-tree magnitudes don't track
+>    truth) directly undercuts any "magnitude-informative partitioning"
+>    framing.  Localization stays in the paper as a *supporting
+>    application*, not THE headline.  "Linkage without pedigrees" drops
+>    from headline framing to a one-sentence Discussion analogy.
+> 2. **Cross-ancestry / portability becomes the primary novel result.**
+>    Block 1.1 v2 + SARGENT-W rescue test give a clean mechanism (β is
+>    the cross-pop liability; per-tree weighting incidental at target
+>    injection) and a clear recommendation (SARGENT-U is the cross-pop
+>    arm).  3× advantage over BayesR at the predictive regime.
+> 3. **Variance decomposition and prediction fold together.**  These
+>    are two sides of the same coin: SARGENT-U recovers both well;
+>    per-segment weights add little to either; fixed effects help
+>    within-pop but are a liability cross-pop.  Fig 2 already does this;
+>    manuscript text should mirror.
+> 4. **Evolutionary analyses become a SARGENT-distinctive primary
+>    contribution.**  The ARG carries far more information than per-tree
+>    ŵ² alone.  Highest-value addition: **ranked list of ARG edges by
+>    per-edge Δh² = ℓ_b · ŵ²_s** (Adam's idea), annotated with time /
+>    population / branch length.  No SNP-based method does this.  See
+>    Block 2.7 below.
+> 5. **Realistic demographies are required for the cross-ancestry
+>    headline.**  Current two-pop-split + admixture-pulse model is a
+>    methodological liability for any pop-gen-aware reviewer.  Need
+>    stdpopsim integration + Gravel OOA + AmericanAdmixture (training
+>    AND testing) + optionally Ragsdale archaic.  See Block 1.1 v3 below.
+>
+> **(C) Two missing experiments surfaced by v6 (see Block 1.1 v3 + v3a):**
+>
+> - **Clustered-architecture cross-ancestry test (1.1 v3a)**: Block
+>   1.1 v2 used diffuse architecture only.  Nurdan's preliminary
+>   finding: nonuniform ws² *does* help cross-pop when active segments
+>   are clustered.  30 cells / ~2-3 h server.  Highest-value small
+>   experiment in the queue.
+> - **Admixed-test prediction**: Block 1.1 v2 had admixed *training*
+>   but pop-B-only *test* individuals.  AoU / HARC reality is admixed
+>   *test* individuals (variable fractional ancestry).  AmericanAdmixture
+>   ASW/MXL/PEL provide this directly.  Folded into Block 1.1 v3.
+>
+> **Updated priority order** (highest manuscript-value first):
+>
+> 1. **Block 1.1 v3a — clustered-arch cross-ancestry test** (30 cells,
+>    cheap, no infrastructure).  Outcome could rescue per-tree ws²
+>    cross-pop or confirm negative cleanly.  Do FIRST.
+> 2. **stdpopsim integration in `scripts/simulate.py`** (1-2 days).
+> 3. **Block 1.1 v3 — Gravel OOA + AmericanAdmixture training + testing
+>    + optional Ragsdale archaic** (~120 cells, 1.5-2.5 days server).
+> 4. **Block 2.7 — Evolutionary analyses** (no new sims; runs on
+>    existing tree sequences + sargent outputs).  Headed by Adam's
+>    ranked-edge h² list.  ~1-2 days.
+> 5. **Block 3 — manuscript drafting** can start in parallel with the
+>    above; sections will be revised as experiments land.
+>
+> Title and abstract: 4 candidates documented in REFRAME v6.
+> Decision deferred to Adam; lean is on "original + cross-ancestry
+> insertion".
 
 > **2026-06-03 — status sweep + figure framework + next priorities.**
 > Substantial progress across multiple blocks in the past 48 h; the
@@ -370,6 +450,110 @@ framework representative. See `block1_1_design.md` §§ "v2 results",
       scenario above not yet run).
 - [ ] (Stretch) Neanderthal projection figure: not yet run.
 
+##### Block 1.1 v3a — Clustered-architecture cross-ancestry test (NEW 2026-06-04, HIGH PRIORITY)
+
+**Goal**: test whether nonuniform per-tree ŵ² *does* help cross-ancestry
+prediction when active ws² segments are clustered along the genome.
+Block 1.1 v2 used the default (diffuse / scattered) architecture; the
+within-method NULL (SARGENT ≈ SARGENT-U cross-pop) is therefore a
+result on the *diffuse* architecture only.  Nurdan's preliminary
+finding: nonuniform weights help under clustered architecture.  If her
+result holds, this rescues the per-tree ws² cross-pop claim.
+
+**Why now (highest manuscript value among small experiments):**
+
+- Single cheapest experiment (~30 cells, 2-3 h server, no
+  infrastructure work) with the biggest potential to move the
+  per-tree ws² claim from "n/a cross-pop" to "yes, with clustered
+  architecture" — *or* confirm the cleanest negative.
+- Drops directly into the existing `portability.sh` driver with
+  `--ws2-architecture sparse --ws2-block-frac 0.05
+  --ws2-block-contrast 1000` (matching Block 1.2's setup).
+- All three possible outcomes are publishable:
+  (i) SARGENT > SARGENT-U → rescues the per-tree weight claim
+  cross-pop (Fig 3 gains a clustered-architecture inset);
+  (ii) SARGENT ≈ SARGENT-U → Block 1.1 v2 verdict reproduces; clean
+  negative;
+  (iii) SARGENT < SARGENT-U → per-tree weights are uniformly
+  counterproductive cross-pop.
+
+**Grid**: 3 F_ST × 2 mix_B × 1 typed × 5 seeds × 1 (sparse) arch = 30
+cells.
+
+- F_ST ∈ {0.07, 0.16, 0.30}
+- mix_B ∈ {0.0, 0.20} (no-injection and target-injection)
+- typed = 0.70
+- arch = sparse-3-block (block_frac=0.05, block_contrast=1000)
+- 5 seeds
+
+- [ ] Launch on server.  Re-uses `portability.sh` with
+      `--ws2-architecture sparse` env override.
+- [ ] Compare SARGENT vs SARGENT-U vs SARGENT-W (the rescue test
+      already done at diffuse).  Append results to
+      `block1_1_design.md` § "SARGENT cross-ancestry rescue test"
+      under a sub-section "clustered architecture".
+- [ ] If positive, update Fig 3 with a clustered-vs-diffuse inset
+      (or replace Fig 3 Panel B with the architecture-comparison
+      version).
+
+##### Block 1.1 v3 — Realistic demographies (NEW 2026-06-04, REQUIRED if cross-ancestry is the headline)
+
+**Goal**: re-run the Block 1.1 v2 verdict under standard pop-gen-aware
+demographic models (Gravel OOA, Browning AmericanAdmixture, optional
+Ragsdale archaic).  Required for any v1 submission to a journal where
+reviewers expect realistic simulations (AJHG, Genome Research, Nature
+Genetics).  The current two-pop-split + admixture-pulse model is a
+toy.
+
+**Infrastructure (Phase 0 — must precede the sweeps):**
+
+- [ ] Add `--demography stdpopsim --model <name>` to `scripts/simulate.py`
+      wrapping stdpopsim's pre-built demographic models.
+- [ ] Add `--train-pop <name>` and `--test-pop <name>` for explicit
+      population sampling.
+- [ ] For admixed-cohort tests, sample test individuals from the
+      admixed deme (ASW / MXL / PEL).
+- [ ] Verify msprime-compatibility: simulate trees + drop into existing
+      sargent + predict.py pipeline without modification.
+
+**Sweeps:**
+
+| sub | demography | grid | cells |
+|---|---|---|---|
+| 1.1 v3.OOA | `OutOfAfrica_3G09` (Gravel et al. 2011) | 3 pop-pairs × 2 typed × 2 mix_B × 5 seeds | 60 |
+| 1.1 v3.ADM-tr | `AmericanAdmixture_4B11` (training: admixed cohort, test: pop B) | 1 admixed pop × 2 typed × 2 mix_B × 5 seeds | 20 |
+| 1.1 v3.ADM-te | `AmericanAdmixture_4B11` (test individuals from admixed deme — the AoU/HARC reality) | 3 admixed pops (ASW / MXL / PEL) × 2 typed × 5 seeds | 30 |
+| 1.1 v3.ARC | `OutOfAfricaArchaicAdmixture_5R19` (Ragsdale & Gravel 2019; stretch) | 1 pop-pair × 5 seeds (small panel) | 5–10 |
+
+Total ~120 cells.  ~1.5–2.5 days wall on the server with new binary +
+parallelism.
+
+**Manuscript-level questions to answer:**
+
+1. Does the Block 1.1 v2 verdict reproduce under realistic OOA?
+2. Are the absolute R² numbers reproduced under realistic OOA?
+3. In the admixed-*training* regime, does the ARG framework's
+   advantage over typed-SNP methods reproduce?
+4. **In the admixed-*testing* regime** (variable fractional ancestry
+   per test individual — the AoU / HARC reality), does SARGENT-U's
+   advantage *widen* relative to unadmixed cross-pop?  Mechanistic
+   prediction: yes (typed-SNP LD-reference mismatch is at its worst
+   here).
+5. **Stretch (archaic):** at F_ST ≈ 0.4–0.7 do ARG-based methods
+   retain ANY predictive value while typed-SNP methods collapse to
+   chance?
+
+**Deliverables:**
+
+- [ ] stdpopsim integration in `simulate.py` (~1-2 days).
+- [ ] OOA sweep (60 cells, ~1 day server).
+- [ ] AmericanAdmixture training sweep (20 cells, ~half-day).
+- [ ] AmericanAdmixture testing sweep (30 cells, ~half-day).
+- [ ] Optional Ragsdale archaic sweep (10 cells, ~quarter-day).
+- [ ] Block 1.1 v3 writeup at `block1_1_design.md`.
+- [ ] Re-render Fig 3 with v3 data; x-axis switches from abstract
+      split-time to realistic F_ST values.
+
 #### Block 1.2 — Localization robustness sweep — ✅ DONE 2026-05-30
 
 **Goal**: extend Phase 10's single architecture to a grid so the
@@ -448,7 +632,49 @@ infinitesimal; Wainschtein / O'Connor framing).
 
 Estimated: 1-2 weeks. Reuses Block 1.2 infrastructure.
 
-#### Block 2.2 — Partitioned heritability across functional annotations
+#### Block 2.2 — Partitioned heritability across functional annotations — ❌ NEGATIVE 2026-06-04
+
+**Status (2026-06-04)**: Phase A + B implemented end-to-end (server,
+commits `9623d3c`, `12cf61d`, `ed7d8f5`); **science verdict is NEGATIVE**.
+The three-flavour pipeline runs cleanly but the per-tree ŵ² primitive
+does not localize heritability to the correct trees at fine resolution:
+corr(ŵ², true per-tree variance) ≈ 0 across configs (n/n_trees from
+0.10 to 1.47).  Mechanism: adjacent ARG trees are near-identical
+genealogies (collinear) → per-tree variances ill-conditioned →
+`--ws2-l2` shrinks toward uniform.  Sharpens Phase 10: ŵ² is
+rank-informative (Block 1.2 / Fig 4 AUC holds) but **not
+magnitude-informative** at per-tree resolution — and partitioning
+needs the magnitudes.
+
+**Manuscript impact**: Fig 5 Panel A (WHERE axis, "ARG-LDSC
+replacement") **dropped from v1**.  Fig 5 reduced to 2 panels
+(WHEN + HOW; both already rendered as `figs2/fig5_pBC.{pdf,png}`).
+The WHERE pipeline + simulator extensions are preserved for future
+estimators (or coarser non-positional partitions) — pipeline at
+`test/eval/{run_ldsc,arg_ldsc,hybrid_ldsc,partition_lib,aggregate_b22}.py`
++ `scripts/simulate.py --annotation-genes` / `--bed-maf-min`.  Full
+evidence chain at `test/eval/block2_2_design.md` § Verdict.
+
+**Open levers (untested; future-work footnotes)**:
+
+- High n / very few trees + low ŵ²-ℓ2 (n≈1500, L≈100 kb;
+  n/n_trees≈6).  One ~30-60 min fit would settle whether a narrow
+  operating point exists.
+- Coarser positional partition (2-way genic/intergenic at large
+  genomic scale) where per-tree resolution demand is lower.
+- Non-positional partitions (allele-age via Block 2.1's per-branch
+  primitive); orthogonal to the collinearity issue.
+
+The sub-blocks below (2.2.1–2.2.4) are preserved for reference but
+the science-level conclusion is documented in
+`test/eval/block2_2_design.md` § Verdict.
+
+---
+
+(Original design retained below for traceability — pipeline still
+reusable for future estimators.)
+
+
 
 **Headline pitch** (candidate primary framing for the manuscript):
 
@@ -578,11 +804,14 @@ n=300 suggests this works at locus scale with more trees per Mb.
 Mentioned here so it doesn't get lost; not part of the immediate critical
 path. One-figure illustration in the current paper if helpful.
 
-#### Block 2.4 — (manuscript framing, not an experiment)
+#### Block 2.4 — (manuscript framing, not an experiment) — DEMOTED 2026-06-04
 
-The "linkage analysis without pedigrees" framing — the cleanest way to
-sell the localization story to a broader audience. Lives in Block 3
-(manuscript), tracked here so it doesn't get lost.
+**Status (v5/v6 reframe)**: The "linkage analysis without pedigrees"
+framing is no longer the headline.  Per the v5/v6 strategic reframe,
+the cross-ancestry / portability story (Block 1.1 v2 + v3) is the
+primary novel result; localization (Block 1.2 / Fig 4) becomes a
+supporting application.  "Linkage without pedigrees" drops from
+headline framing to a one-sentence Discussion analogy.
 
 #### Block 2.5 — Polygenicity / effect-size architecture (HOW dimension)
 
@@ -800,23 +1029,153 @@ partial verdict.
 in git history (`56f6a3a`, parking-lot row "Phase 11 — sparse fused
 lasso `ws²` redesign").
 
+#### Block 2.7 — Evolutionary analyses (NEW 2026-06-04)
+
+**Goal**: exploit the ARG's evolutionary information beyond the per-tree
+ŵ² primitive.  This is the **SARGENT-distinctive primary contribution**
+in the v5/v6 reframe — no SNP-based or summary-stats method can produce
+these readouts.  All analyses are post-hoc on existing tree sequences +
+sargent output; no new sargent fits needed (except where flagged).
+
+**Headed by Adam's idea (2026-06-04 PM)**:
+
+##### Block 2.7.1 — Ranked list of ARG edges by per-edge Δh² (highest priority)
+
+For each tree segment s with weight ŵ²_s and each edge b in tree s
+with branch length ℓ_b, the per-edge variance contribution is
+
+> Δh²_b  =  ℓ_b · ŵ²_s
+
+(exact formula depends on how branch length enters the per-tree
+kinship; needs a 1-day analytical check).  Aggregating across trees
+gives a per-edge h² rank.  Top-K edges become a list of "evolutionary
+moments that contributed most to phenotype variance," each annotated
+with:
+
+- **Time** (the branch's age in generations).
+- **Population identity** (in structured demographies, which deme the
+  edge sits in — pre-split, post-split, admixed, archaic-introgressed).
+- **Branch length** (proxy for selective pressure: short in conserved
+  regions; long at neutral or selected loci).
+- **Position in the genome** (the tree segment's coordinates).
+
+**Why SARGENT-distinctive**: S-LDSC partitions h² by *fixed
+annotations*; partitioned GREML by *kinship slices*; eGRM and ARG-GRM
+give a single aggregated h² with no per-event breakdown.  No
+published method outputs a per-edge h² rank.  This is a uniquely
+ARG-based deliverable that ties h² inference to evolutionary history.
+
+**Manuscript treatment**: a small figure showing the top-K edges from
+a single representative simulation, annotated by time / population /
+length.  Could be visualized as a "Manhattan plot but with edges" —
+y-axis = Δh²_b, x-axis = position, color = branch time.  One
+representative cell with clear population-specific or selection-
+aligned edges would tell a sharp story.
+
+- [ ] `test/eval/edge_h2.py`: extracts per-edge Δh² from tree
+      sequence + `est.w2.tsv`; outputs ranked TSV with time / pop /
+      length / position annotation.
+- [ ] Validate the Δh² formula against a known-truth simulation
+      (~1 day).
+- [ ] Top-K visualization helper.
+- [ ] Apply to a representative Block 1.1 v3 cell (gated on
+      realistic demography sweeps); produce a Fig 5 panel or
+      supplementary figure.
+
+##### Block 2.7.2 — Per-branch effect-size distribution
+
+Bin edges by Δh² magnitude; characterise the distribution of variance
+contributions across the genome.  Non-parametric analog of the BayesR
+mixture spectrum, but extended to untyped variants via the ARG.  Was
+previously in Block 2.5 plan; reframed here as a core evolutionary
+readout.
+
+- [ ] Aggregate ranked-edge output into a non-parametric variance-
+      contribution distribution.  Compare across architectures
+      (oligogenic vs polygenic) and across populations (pop-specific
+      vs shared branches).
+
+##### Block 2.7.3 — Population-specific vs shared-branch h²
+
+In structured demographies (Gravel OOA, AmericanAdmixture), what
+fraction of total h² is carried by post-split branches (population-
+specific variance) vs pre-split (shared variance)?  Compare across
+train/test pop pairs.  Informs the cross-ancestry portability story
+directly.
+
+- [ ] Per-cell summary statistic: fraction of total Δh² in pre-split
+      vs post-split edges.  Run on Block 1.1 v3 cells.
+- [ ] Manuscript reading: high pop-specific h² fraction → low
+      portability expected; cohort-specific kinship advantage maximal.
+
+##### Block 2.7.4 — Allele-age × population cross-tabulation
+
+Combine Block 2.1's age-binned variance with population-specific
+branches in structured demographies.  Does recent population-specific
+variance carry more h² than ancient shared variance?  (Tests
+Pickrell-style selection models on a polygenic substrate.)
+
+- [ ] 2D heatmap: age bin (recent / middle / ancient) × population
+      identity (shared / pop-A-specific / pop-B-specific) → h²
+      fraction.  Gated on Block 1.1 v3 (need structured demography +
+      pop-aware ARG annotations).
+
+##### Block 2.7.5 — Selection-signature features (stretch)
+
+Branches with anomalous length (short for their position, suggesting
+purifying selection) or anomalous topology (long external branches
+indicating recent purifying selection) — does Δh² concentrate or
+deplete in these regions?  Backs "SARGENT identifies selection-
+relevant regions" with quantitative h² evidence.  **Stretch goal;
+defer to follow-up paper** unless results are easy.
+
+##### Block 2.7.6 — Archaic-introgressed-edge h² (stretch, gated on Ragsdale demography)
+
+Among top-K Δh²-contributing edges in non-African individuals, what
+fraction sit on Neanderthal-introgressed branches?  A direct test of
+polygenic introgression contributions.  **Stretch goal; gated on
+Ragsdale archaic sweep landing.**
+
+**Recommended for v1**: 2.7.1 (ranked edges) + 2.7.2 (per-branch
+distribution) + 2.7.3 (pop-specific vs shared).  Defer 2.7.4–2.7.6
+to follow-up unless quick wins emerge.
+
 ### Block 3 — Manuscript rework (next week, Adam-led)
 
 **Goal**: triggered once Blocks 0 + 1 are far enough along to know what's
 defensible. Major restructure, not incremental edit.
 
-**New framing (per 2026-05-30 brainstorm)**: drop the prediction-headline
-emphasis where SARGENT does not differentiate (within-pop B2 falsified);
-keep the cross-ancestry portability case (Block 1.1, pending). Lead with
-**localization as "linkage analysis without pedigrees"** — the per-tree
-ws² primitive identifies trait-relevant genomic regions via the inferred
-genealogy, no family structure required. Use **allele-age decomposition**
-(Block 2.1) as the application that no other method can do directly.
+**Framing (v6 reframe, 2026-06-04 PM)**: drop the localization-headline
+framing (regime-dependent; Block 2.2 collinearity undercuts magnitude
+claims).  **Lead with cross-ancestry / portability** (Block 1.1 v2 +
+v3) as the primary novel result, with **unified-framework framing** as
+the methodological backbone.  Treat localization (Block 1.2 / Fig 4)
+as a *supporting application* (rank-based AUC works, magnitudes don't).
+Allele-age decomposition (Block 2.1) and the new evolutionary analyses
+(Block 2.7, headed by Adam's ranked-edge h² list) are
+SARGENT-distinctive applications that no SNP-based method can do.
+See REFRAME_NOTES v5/v6 in `~/newwriting/arg-mapping/` for the full
+strategic narrative + four title candidates.
+
+**v6 priority order** (per top-of-file 2026-06-04 PM entry):
+
+1. Block 1.1 v3a — clustered-architecture cross-ancestry test (FIRST;
+   30 cells, 2-3 h, cheap rescue test for per-tree ws² cross-pop claim).
+2. stdpopsim integration → Block 1.1 v3 (Gravel OOA + AmericanAdmixture
+   training + testing + optional Ragsdale archaic).
+3. Block 2.7.1 — ranked ARG-edge h² list (SARGENT-distinctive new
+   application).
+4. Block 3 manuscript drafting can start in parallel.
+
+**Deliverables:**
 
 - [ ] Skeleton + figure plan + drop-list / rebuild-list (from `CLAIMS.md`).
-- [ ] **Title / abstract reframe**: linkage-without-pedigrees + allele-age
-      partitioning, not prediction. Hybrid (BayesR + ARG-BLUP) becomes a
-      portability tool (Block 1.1), not a within-pop prediction tool.
+- [ ] **Title / abstract reframe** per REFRAME v6: drop "localization"
+      and "genetic architecture" from the title; pick one of the four
+      candidates (lean: original + cross-ancestry insertion).
+      Abstract: cross-ancestry headline + unified framework + allele-age
+      decomposition + evolutionary edge-h² ranking as primary
+      contributions.
 - [ ] **Methods**: fix the manuscript ↔ code mismatch on the `wₛ²` update
       (paper still derives a mixture update; code uses point-estimate
       REML + post-hoc ρ).  Document the sequential strategy as an
@@ -824,19 +1183,32 @@ genealogy, no family structure required. Use **allele-age decomposition**
       Add the ARG-kinship-centering note (Block 1.3 audit) as a
       methodological footnote — explains why per-tree REML EM is
       preferable to BLUP-style single-component fits for ARG kinship.
+      Add fused-lasso subsection (`--ws2-l2 0.5` is the recommended
+      localization default; `--ws2-l1 0.5` opt-in for oligogenic).
+      Brief scalability note: new binary v0.3.0 (EMMA Stage-2,
+      `.gall` cache, preconditioned CG).
 - [ ] **Comparison-table triage**: of the 9 baselines currently listed,
       decide which 2–3 are essential to implement, drop the rest.
-- [ ] **New figures**: region-scale local-`h²` Manhattan (Block 1.2);
-      cross-ancestry portability (Block 1.1, if positive); allele-age
-      partitioning (Block 2.1); **variance-capture curve per trait /
-      annotation / age bin (Block 2.5)** — strong candidate for Figure 1
-      as a one-glance trait-summary plot; possibly a reframed conceptual
-      figure that emphasizes the linkage-style localization story.
-- [ ] **Application bullet (in Discussion)**: ARG-derived partitioned
-      heritability with three estimators (Block 2.2 (A) typed-only,
-      (B) ARG-only, (C) hybrid typed×untyped); architecture cube
-      (age × annotation × polygenicity, Block 2.5 × 2.1 × 2.2); flag
-      ARG-aware fine-mapping (Block 2.3) as future work.
+- [ ] **New figures**:
+      - Fig 2 (within-pop coverage axis): h² + r²_calib together —
+        variance decomposition and prediction folded into one figure,
+        per v6.
+      - Fig 3 (cross-ancestry portability, 5 arms incl. SARGENT-W;
+        target-injection Panel A + F_ST ladder Panel B at mix=0.20).
+        Updated with v3 realistic-demography data when it lands.
+      - Fig 4 (localization with L2=0.5 default).  Demoted from
+        headline to supporting application.
+      - Fig 5 (architecture characterisation, 2 panels: WHEN + HOW).
+        WHERE dropped per Block 2.2 verdict; pipeline preserved
+        as future work.
+      - Fig 6 (NEW per v6, optional): ranked-edge h² visualization
+        from Block 2.7.1 (small panel or supplementary).
+- [ ] **Application bullet (in Discussion)**: allele-age decomposition
+      (Block 2.1); ranked-edge h² list (Block 2.7.1); pop-specific
+      vs shared-branch h² (Block 2.7.3); architecture cube
+      (variance-capture curves, Block 2.5).  Drop the
+      partitioned-h² three-estimator pitch — moves to future-work
+      paragraph per Block 2.2 verdict.
 
 ### Block 4 — Computational efficiency (deferred until story is locked)
 
