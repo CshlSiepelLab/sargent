@@ -103,3 +103,44 @@ $PYBIN scripts/simulate.py --annotation-genes --length 5e6 --n-indiv 400 \
   --bed-coverage 0.6 --causal-fraction 0.02 --seed 1 --out /tmp/g
 # inspect params.json -> h2_by_annotation
 ```
+
+## Phase B pilot (n=400, 1.5 Mb, big-signal) — findings
+
+End-to-end pilot of all three flavours (exon 5% τ=10, promoter τ=3.3, equal
+effects, common-only typed panel via --bed-maf-min 0.05, h2 split 0.35 typed /
+0.25 rare-untyped). Truth clean: exon h2_total 0.148 / promoter 0.043 /
+intergenic 0.354; ~75% untyped.
+
+Result table (truth | B | A | C-typed | C-untyped=B−A):
+
+| anno | tot | B(ARG) | typ | A(typed) | C-typed | C-unt(B−A) |
+|---|---|---|---|---|---|---|
+| exon | .148 | .063 | .034 | .140 | .000 | −.077 |
+| promoter | .043 | .042 | .008 | −.030 | .000 | .072 |
+| intergenic | .354 | .429 | .098 | .150 | .004 | .279 |
+
+Findings:
+1. **Flavour B attribution method matters decisively.** Span-FRACTION weighting
+   of ws² returns ~base_frac·h2_arg (NO enrichment) — a 150 bp exon gets ~3% of
+   its kb tree's ws² even when the exon variant elevated that tree. The
+   per-base RATE regression (E[ws²_s]=Σ_c ρ_c·bp_{s,c}) detects enrichment:
+   promoter recovered exactly (.042 vs .043), exon compressed (.063 vs .148).
+   Diagnostic: exon-containing trees carry 1.77× the ws² of others (signal is
+   real); the per-tree resolution smears a sub-tree annotation, so recovered
+   enrichment ≈ 2.7× when truth is 7.8× (documented compression). **Use the
+   regression.**
+2. **Flavour A (typed HE proxy) over-captures clustered annotations.** Exon
+   A-estimate (.140) ≈ exon TOTAL truth (.148), not typed-only (.034): typed
+   common SNPs in a tight 150 bp exon are in strong local LD with the exon's
+   rare variants and TAG them. So the array does NOT miss the rare fraction in
+   clustered annotations → B−A goes negative for exon. (Promoter A is pure noise
+   at n=400.) This is partly a real effect, partly n=400 power.
+3. **C-typed ≈ 0**: SARGENT shrinks the typed β̂ to ~0 at n=400, so the hybrid
+   typed slice is empty and the internal typed/untyped split is unusable — the
+   Block-1.1-style typed-vs-ARG separation difficulty, as predicted.
+
+Implication: the ARG primitive (B) is the viable leg; the typed leg (A) and the
+B−A subtraction break on (a) n=400 noise and (b) the real fact that clustered
+annotations are tagged by common SNPs. Open question for the manuscript framing:
+partitioned h² may work cleanly only for tree-scale-or-coarser annotations
+(gene bodies / regulatory domains), not individual 150 bp exons.

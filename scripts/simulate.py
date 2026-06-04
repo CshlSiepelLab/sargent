@@ -271,6 +271,12 @@ def main():
                     help="fraction of polymorphic SNPs to keep in the BED file (0 < f <= 1). "
                          "Hidden SNPs still contribute to y via their true β and remain in the "
                          "ARG/.trees output. Default: 1.0 (no hiding).")
+    ap.add_argument("--bed-maf-min", type=float, default=0.0,
+                    help="minimum MAF for a variant to enter the BED (typed) panel "
+                         "(default 0 = no filter).  Set ~0.05 to make the panel "
+                         "common-SNP / genotyping-array-like, so rare causal variants "
+                         "are untyped and only the ARG can see them (Block 2.2: this is "
+                         "what creates the flavour-A-vs-B gap).")
     ap.add_argument("--seed",        type=int,   default=42,   help="random seed")
     ap.add_argument("--out",         type=str,   default="sim", help="output prefix")
     # Phase 6b: SV-flavoured unobserved-variants class.  Variants are sampled
@@ -595,6 +601,13 @@ def main():
     if args.h2_unobs > 0:
         bed_mask[unobs_idx] = False
 
+    # Block 2.2: common-SNP / array-like typed panel.  Drop rare variants from
+    # the BED so they are untyped (only the ARG can see them).
+    if args.bed_maf_min > 0.0:
+        freq_all = dosage.mean(axis=1) / 2.0
+        maf_all  = np.minimum(freq_all, 1.0 - freq_all)
+        bed_mask &= (maf_all >= args.bed_maf_min)
+
     if not bed_mask.any():
         sys.exit("ERROR: bed mask produced an empty BED panel; raise --bed-coverage")
     n_bed = int(bed_mask.sum())
@@ -902,6 +915,7 @@ def main():
         "n_variants":      n_bed,
         "n_variants_full": p,
         "bed_coverage":    args.bed_coverage,
+        "bed_maf_min":     args.bed_maf_min,
         "n_causal":        n_causal,
         "n_causal_in_bed": int(bed_mask[causal_idx].sum()),
         "length":          args.length,
