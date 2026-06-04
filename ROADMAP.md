@@ -42,10 +42,30 @@ Last updated: 2026-06-04 PM.
 >    manuscript text should mirror.
 > 4. **Evolutionary analyses become a SARGENT-distinctive primary
 >    contribution.**  The ARG carries far more information than per-tree
->    ŵ² alone.  Highest-value addition: **ranked list of ARG edges by
->    per-edge Δh² = ℓ_b · ŵ²_s** (Adam's idea), annotated with time /
->    population / branch length.  No SNP-based method does this.  See
->    Block 2.7 below.
+>    ŵ² alone.  Originally proposed: **ranked list of ARG edges by
+>    per-edge Δh²** (Adam's idea).  Design pass on 2026-06-04 PM
+>    (`test/eval/edge_h2_design.md`, commit `47fbc3b`) refined this in
+>    two important ways:
+>
+>    a. **The naïve `Δh²_e = ℓ_e · ŵ²_s` is a prior expectation that
+>       tracks ŵ²_s — use the data-driven posterior** `Δh²_e^posterior =
+>       ‖m_e · E[α_e|y]‖² / (n · Var(y))` instead.  Cheap
+>       (descendant-sum of pre-computed BLUP residual `z`).  Identifies
+>       edges whose descendants have *consistently signed* phenotype
+>       residuals.
+>    b. **Per-edge SNP and ARG contributions decompose cleanly under
+>       infinite-sites**: every typed SNP sits on one branch in
+>       tskit's mutation table, so BayesR's β̂ accumulates to a
+>       per-edge `β_e`, giving `Δh²_e^SNP / Δh²_e^ARG / Δh²_e^total`
+>       at every readout level.  Per-edge SNP attribution is
+>       *identifiable* (perfectly co-inherited variants on the same
+>       branch contribute additively to a well-determined sum) —
+>       contrast with the Block 2.2 ARG-per-tree collinearity issue.
+>    c. **Three readouts from one calculation** (per-edge ranked list /
+>       per-age-bin / per-population-bin), each carrying the SNP/ARG/
+>       total triple.  Drops directly into Fig 3 Panel C + Fig 5 Panel A
+>       + Fig 6.  No SNP-based or summary-stats method produces any of
+>       these.  See Block 2.7 below.
 > 5. **Realistic demographies are required for the cross-ancestry
 >    headline.**  Current two-pop-split + admixture-pulse model is a
 >    methodological liability for any pop-gen-aware reviewer.  Need
@@ -1039,48 +1059,87 @@ sargent output; no new sargent fits needed (except where flagged).
 
 **Headed by Adam's idea (2026-06-04 PM)**:
 
-##### Block 2.7.1 — Ranked list of ARG edges by per-edge Δh² (highest priority)
+##### Block 2.7.1 — Per-edge posterior contribution (SNP + ARG + total) — DESIGN DONE 2026-06-04
 
-For each tree segment s with weight ŵ²_s and each edge b in tree s
-with branch length ℓ_b, the per-edge variance contribution is
+**Design doc**: `test/eval/edge_h2_design.md` (commit `47fbc3b`).
+Refines Adam's original ranked-edge idea after analytical pass +
+C-code verification.
 
-> Δh²_b  =  ℓ_b · ŵ²_s
+**Core insight after design pass**: the naïve per-edge prior
+`Δh²_b = ℓ_b · ŵ²_s` is uninteresting (tracks ŵ²_s × ℓ_b; doesn't
+use the data).  The data-driven posterior is much better:
 
-(exact formula depends on how branch length enters the per-tree
-kinship; needs a 1-day analytical check).  Aggregating across trees
-gives a per-edge h² rank.  Top-K edges become a list of "evolutionary
-moments that contributed most to phenotype variance," each annotated
-with:
+> E[α_e | y]   =  (σ² · ŵ²_s · ℓ_e / 2) · Σ_{i ∈ desc(b)} z_i,
+> z := V⁻¹(y − Xβ)  (already inside sargent's CG solve),
+> Δh²_e^ARG    =  ‖m_e · E[α_e | y]‖² / (n · Var(y)).
 
-- **Time** (the branch's age in generations).
-- **Population identity** (in structured demographies, which deme the
-  edge sits in — pre-split, post-split, admixed, archaic-introgressed).
-- **Branch length** (proxy for selective pressure: short in conserved
-  regions; long at neutral or selected loci).
-- **Position in the genome** (the tree segment's coordinates).
+Cost: descendant sums of z in single-pass O(n) per tree; total
+O(K · n) for top-K trees by ŵ²_s.  Negligible vs sargent main fit.
 
-**Why SARGENT-distinctive**: S-LDSC partitions h² by *fixed
-annotations*; partitioned GREML by *kinship slices*; eGRM and ARG-GRM
-give a single aggregated h² with no per-event breakdown.  No
-published method outputs a per-edge h² rank.  This is a uniquely
-ARG-based deliverable that ties h² inference to evolutionary history.
+**SNP/ARG decomposition (per Adam 2026-06-04 PM, second insight)**:
+under infinite sites each typed SNP sits on one branch in tskit's
+mutation table.  BayesR's β̂_j accumulates to a per-edge SNP
+contribution:
 
-**Manuscript treatment**: a small figure showing the top-K edges from
-a single representative simulation, annotated by time / population /
-length.  Could be visualized as a "Manhattan plot but with edges" —
-y-axis = Δh²_b, x-axis = position, color = branch time.  One
-representative cell with clear population-specific or selection-
-aligned edges would tell a sharp story.
+> β_e  :=  Σ_{j : SNP j sits on e}  β̂_j     (well-determined; multiple SNPs
+>                                              on same edge are perfectly
+>                                              correlated → sum is identifiable
+>                                              even when individual β_j's aren't)
+> Δh²_e^SNP   =  β_e² · Σ_i (c_i^u)² / (n · Var(y))
+> Δh²_e^total =  ‖m_e · (β_e + E[α_e | y])‖² / (n · Var(y))
 
-- [ ] `test/eval/edge_h2.py`: extracts per-edge Δh² from tree
-      sequence + `est.w2.tsv`; outputs ranked TSV with time / pop /
-      length / position annotation.
-- [ ] Validate the Δh² formula against a known-truth simulation
-      (~1 day).
-- [ ] Top-K visualization helper.
+Same descendant-count structure as the ARG side, so the two are on
+the same basis and unify cleanly per edge.
+
+**Three readouts from one calculation, each with SNP / ARG / total split**:
+
+| readout | aggregation | manuscript role |
+|---|---|---|
+| Per-edge ranked list (top-K) | per edge, no aggregation | Fig 6 / sup; SARGENT-distinctive primary contribution |
+| Per-age-bin Δh² (SNP, ARG, total) | bin by branch age | Fig 5 Panel A (refined WHEN axis; replaces Block 2.1 v2 panel) |
+| Per-population-bin Δh² (SNP, ARG, total) | bin by branch's pop identity | Fig 3 Panel C / sup; cross-ancestry decomposition |
+
+**Two new testable hypotheses** introduced by the SNP/ARG split:
+
+1. **Age-bin**: younger branches SNP-dominated (recent variation
+   well-tagged by typed SNPs); older branches ARG-dominated (deep
+   diversity captured only via kinship).  Direct quantitative
+   validation of "ARG captures untyped variance" at coalescent-time
+   resolution.
+2. **Population-bin × F_ST**: at high F_ST, the SNP contribution from
+   post-split pop-A-specific branches should NOT port to pop B
+   (the β cross-ancestry liability — Block 1.1 v2 verdict), while
+   the ARG contribution from the same branches SHOULD port via
+   shared kinship structure.  Direct branch-level mechanistic
+   validation of the SARGENT-W rescue test verdict.
+
+**Implementation tasks**:
+
+- [ ] `test/eval/edge_h2.py`: extracts per-edge `β_e`, `E[α_e|y]`,
+      and three Δh² components from tree sequence + `est.{beta,w2}.tsv`
+      + BLUP residual `z`.  Outputs ranked TSV with time / pop /
+      length / position annotation and SNP/ARG/total breakdown.
+      Day 1: implementation + analytical sanity checks.
+- [ ] Self-consistency validation: per-edge ARG sum within a tree
+      must equal sargent's `σ² ŵ²_s G_s z` matvec; per-edge SNP sum
+      must equal `predict_bayesR`'s output; per-edge total sum must
+      equal sargent's full prediction. ~Day 2.
+- [ ] Truth-side recovery on Block 1.2's sparse-3-block architecture
+      (top-K edges should concentrate in true active blocks); pure-SNP
+      and pure-ARG simulation sanity checks (only one component
+      dominates).  Day 2.
 - [ ] Apply to a representative Block 1.1 v3 cell (gated on
-      realistic demography sweeps); produce a Fig 5 panel or
-      supplementary figure.
+      structured-demography sweeps); produce per-population-bin Δh²
+      panel + per-age-bin Δh² panel + ranked-edge list.  Day 3.
+
+**Open extensions** (not v1-blocking):
+
+- Posterior variance per edge `Var(α_e | y)` for credible-interval
+  bands.
+- Leave-one-tree-out variant: replace `z` with `z_{-s}` to isolate the
+  unique per-tree contribution; tractable via Sherman-Morrison.
+- Position × time cross-tabulation (does a particular genomic region's
+  contribution come from recent or ancient ancestry?).
 
 ##### Block 2.7.2 — Per-branch effect-size distribution
 
