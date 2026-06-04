@@ -95,7 +95,14 @@ Last updated: 2026-06-04 PM.
 > 4. **Block 2.7 — Evolutionary analyses** (no new sims; runs on
 >    existing tree sequences + sargent outputs).  Headed by Adam's
 >    ranked-edge h² list.  ~1-2 days.
-> 5. **Block 3 — manuscript drafting** can start in parallel with the
+> 5. **Block 1.4 — Real-data analysis on AllOfUs (NEW 2026-06-04 PM)**.
+>    Provisional plan = **Option B + Option D in parallel** (multi-trait
+>    cross-ancestry PRS validation with per-population Δh² mechanism
+>    add-on; plus locus-focused per-edge Δh² showcase at 1–3 known
+>    selection sweeps).  AoU ARGs are already in tskit format; several
+>    operational questions still to settle.  Effort ~6–8 weeks; required
+>    for high-impact-journal submission.
+> 6. **Block 3 — manuscript drafting** can start in parallel with the
 >    above; sections will be revised as experiments land.
 >
 > Title and abstract: 4 candidates documented in REFRAME v6.
@@ -615,6 +622,107 @@ honest reporting of A1.
 - [x] Historical Phase 3 / Phase 6 R² tables: validated unchanged under
       the centering (R² is BLUP-shrinkage-invariant; the bias was in h²
       reporting only). No further action.
+
+#### Block 1.4 — Real-data analysis on AllOfUs (NEW 2026-06-04 PM)
+
+**Goal**: a real-data section for the manuscript.  Required for a
+high-impact-journal submission.  Adam's decision (2026-06-04 PM):
+**provisional plan = Option B AND Option D in parallel**, with scope
+flexibility based on operational answers to a handful of open
+questions.
+
+**Why AoU**: ~245 k WGS, ~50 % non-European ancestry, explicit
+admixed-population representation — the inverse of UK Biobank and
+the natural test bed for SARGENT's headline cross-ancestry
+framing.  ARGs **already in tskit format** for the AoU cohort (per
+Adam).
+
+##### Block 1.4a — Option B: multi-trait cross-ancestry PRS + per-population Δh² mechanism
+
+**Scope**: 2–3 well-studied continuous traits (provisional: height,
+BMI, LDL); 4 prediction arms (BayesR, GBLUP, SARGENT-U, optionally
+eGRM if a usable implementation is in hand); 4 ancestry strata for
+testing (EUR, AFR, AMR / admixed, EAS).  Training cohort: EUR-only
+WGS, ~5–10 k individuals.
+
+**Headline figure** (Real-data validation section in manuscript;
+likely Fig 3 Panel D or a standalone Fig 7):
+
+- **Sub-panel A**: held-out `r²_calib` × ancestry × trait grid;
+  bars for the 4 arms per (ancestry, trait) cell.  Validates the
+  Fig 3 simulation result on real data.
+- **Sub-panel B**: per-population Δh² stacked bars (SNP / ARG /
+  total) for one trait (probably height — biggest h²), using the
+  Block 2.7.1 calculation.  Shows that post-OOA EUR-specific
+  branches' SNP contribution doesn't port to AFR test individuals
+  while their ARG contribution does.  **Direct mechanistic
+  validation** of the β cross-ancestry liability finding (Block 1.1
+  v2 + SARGENT-W rescue verdict) on real data.
+
+**Tasks** (drafted; awaiting Adam's go to launch):
+
+- [ ] Confirm AoU ARG infrastructure and tskit-format input
+      compatibility on a small pilot (~100 individuals, 1 chromosome).
+- [ ] Set up the AoU phenotype QC pipeline (covariates: age, sex,
+      ancestry PCs, recruitment batch as relevant; medication-related
+      exclusion criteria per published GWAS protocols).
+- [ ] Build EUR training cohort + 4 ancestry test cohorts; record
+      sample-size table for each (trait × ancestry) cell.
+- [ ] Fit SARGENT on training cohort (one fit per trait); collect
+      `est.beta.tsv` + `est.w2.tsv` + BLUP residual `z`.
+- [ ] Run `predict.py` (4 arms) on each test cohort; aggregate to
+      Sub-panel A.
+- [ ] Apply Block 2.7.1's per-population Δh² calculation on the
+      height fit; aggregate to Sub-panel B; write up.
+
+##### Block 1.4b — Option D: locus-focused showcase at known selection sweeps
+
+**Scope**: 3 small genomic regions around known population-genetic
+sweep loci (provisional: LCT for European lactase persistence, EDAR
+for East Asian skin/hair architecture, MC1R for European
+pigmentation — or analogous well-characterised sweeps).  Apply Block
+2.7.1's per-edge Δh² ranked-list calculation to each region for a
+relevant trait (e.g., height near LCT; skin pigmentation if a clean
+AoU phenotype exists for EDAR / MC1R).
+
+**Headline figure** (likely Fig 6 — the SARGENT-distinctive
+evolutionary readout on real data):
+
+- 3-panel figure (one per locus): Manhattan plot with edges instead
+  of variants; y-axis = Δh²_total, x-axis = position, color = branch
+  time; SNP / ARG stacked bars per edge.  Annotated with the
+  population identity of each top-ranked edge.
+- The published selection literature gives us a "ground truth"
+  about which evolutionary events ought to dominate at each locus.
+  The figure is compelling if SARGENT's top edges align with those
+  events (e.g., post-OOA EUR-specific branches dominate the LCT
+  signal; post-OOA EAS-specific branches dominate the EDAR signal).
+
+**Tasks** (drafted; gated on 1.4a infrastructure):
+
+- [ ] For each locus, identify the relevant trait + ancestry split.
+- [ ] Sub-region SARGENT fit (small n, narrow window): cheap.
+- [ ] Apply Block 2.7.1 per-edge Δh² calculation; produce ranked-edge
+      list with annotations.
+- [ ] Cross-check top-K edges against published selection-signal
+      events for each locus.
+- [ ] Write up; assemble Fig 6 (or supplementary).
+
+##### Open operational questions (gating; Adam to settle)
+
+- **Maximum n** for SARGENT fits at current binary performance (sets
+  training cohort size and statistical power for 1.4a).
+- **eGRM (Fan et al.) availability** as a usable implementation
+  (determines whether the direct ARG-LMM baseline comparison
+  is in scope).
+- **AoU ancestry tier choice** (broad continental ancestry vs
+  self-reported vs inferred PC-based).
+- **Timeline target**: v1 submission (~6-week budget) vs v2 follow-up
+  paper (more ambitious scope possible).
+
+**Effort estimate** (Option B + D combined): 6–8 weeks total once
+infrastructure is in place; ~6 weeks if Option D is pruned to 1–2
+loci.
 
 ### Block 2 — Applications arc (the new methodological direction)
 
