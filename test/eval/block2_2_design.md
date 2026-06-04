@@ -10,6 +10,16 @@ Plan: **Stage 1** = a v1 Fig 5 Panel A draft (this doc), **Stage 2** = full
 validation across regimes + diffuse control + recovery-bias (later;
 `partitioned_h2.md`).
 
+> **STATUS (2026-06-04): Stage-1 premise FALSIFIED (honest negative, partial
+> rescue left open).** The full three-flavour pipeline was built and runs
+> end-to-end, but the science does not hold: SARGENT's per-tree ŵ² does **not
+> localize heritability to the correct trees** (corr ≈ 0 with true per-tree
+> variance, due to adjacent-tree collinearity), so per-annotation partitioning
+> recovers at most a weak, heavily-compressed signal. Flavours A and C also
+> break. See **"Verdict — Phase B"** at the bottom. One untested lever (high
+> n / very few trees + low ŵ²-ℓ2) could give a partial rescue; not yet run.
+> Manuscript implications deferred to a separate session (Adam).
+
 ## The three estimators (all yield per-annotation h²_c)
 
 | flavour | data it sees | what it captures |
@@ -144,3 +154,95 @@ B−A subtraction break on (a) n=400 noise and (b) the real fact that clustered
 annotations are tagged by common SNPs. Open question for the manuscript framing:
 partitioned h² may work cleanly only for tree-scale-or-coarser annotations
 (gene bodies / regulatory domains), not individual 150 bp exons.
+
+## Verdict — Phase B: honest negative (2026-06-04)
+
+**Bottom line: fine-scale ARG-based partitioned heritability (the Fig 5 Panel A
+headline as designed) is not supported with SARGENT's per-tree ŵ² primitive at
+any scale we can afford. The root cause is that ŵ² does not localize
+heritability to the correct trees — corr(ŵ², true per-tree variance) ≈ 0 —
+because adjacent ARG trees are near-identical genealogies (collinear), making
+per-tree variances ill-conditioned; the ŵ²-ℓ2 penalty then shrinks them toward
+uniform. This is the Phase 10 conclusion ("ŵ² is a localization tool, not a
+prediction tool") sharpened: for partitioning it barely localizes at all.**
+
+### What was built (works; reusable; the negative is about the science not the plumbing)
+- `simulate.py --annotation-genes` + `--bed-maf-min`: gene-structured
+  annotations (single-exon genes + upstream promoters + intergenic) with
+  per-base causal-DENSITY enrichment τ, and a common-only (array-like) typed
+  panel. Ground truth `h2_by_annotation` (LD-free Σβ² partition, typed/untyped
+  split) recorded in params.json. Verified correct (Phase A).
+- `partition_lib.py` + `run_ldsc.py` (A, typed HE/GREML proxy with an S-LDSC
+  stub for Stage 2) + `arg_ldsc.py` (B, per-base ŵ²-rate regression) +
+  `hybrid_ldsc.py` (C) + `aggregate_b22.py` (→ Fig 5 CSV). Full pipeline runs
+  end-to-end and is correct.
+
+### Evidence chain (all configurations consistent)
+
+| config | n | n_trees | n/n_tr | annotation | corr(ŵ²,true var) | genic/exon B recovery |
+|---|---|---|---|---|---|---|
+| pilot  | 400 | 4097 | 0.10 | 150 bp exon  | exon-trees 1.77× ŵ² | truth 7.8× → 2.7× (compressed) |
+| coarse | 400 | 4097 | 0.10 | 5 kb genic   | 0.001  | truth 2.3× → 0.85× (depleted!) |
+| short  | 400 | 273  | 1.47 | 1.5 kb genic | −0.015 | truth 4.1× → 1.47× (compressed) |
+
+Raising n/n_trees 15× (0.10 → 1.47) did **not** restore the correlation ⇒
+identifiability is not the binding constraint; collinearity is.
+
+### Why each flavour fails
+- **B (ARG-only).** Span-FRACTION weighting of ŵ² returns ≈ base_frac·ĥ²_arg
+  (no enrichment) — a 150 bp exon gets ~3% of its kb tree's ŵ² even when the
+  exon variant elevated that tree. The per-base RATE regression
+  (E[ŵ²_s]=Σ_c ρ_c·bp_{s,c}) is the correct method and recovers some signal,
+  but ŵ² itself does not track the true per-tree variance (corr ≈ 0), so the
+  aggregate enrichment is weak and heavily compressed. **Root failure.**
+- **A (typed HE/GREML proxy).** Unstable at n=400 (promoter h² estimated
+  negative). And in tight clustered annotations (150 bp exons) the common typed
+  SNPs are in strong local LD with the exon's rare variants and TAG them, so the
+  array does NOT miss the rare fraction there — the B−A subtraction goes
+  negative. A real effect (clustered annotations are well-tagged), not only n=400
+  noise.
+- **C (hybrid).** SARGENT shrinks the typed β̂ to ≈0 at this scale, so C-typed
+  is empty and the internal typed/untyped split is unusable — the same
+  typed-vs-ARG separation difficulty as the Block 1.1 h²_snp divergence.
+
+### Mechanism
+Per-tree variance estimation is over-determined in the count sense (~n²/2
+phenotype pairs ≫ n_trees parameters) but **ill-conditioned**: neighbouring
+trees share almost all of their genealogy, so their per-tree kinship matrices
+are nearly collinear and the individual per-tree variances cannot be separated.
+The ŵ²-ℓ2 regularisation resolves the ill-conditioning by shrinking toward a
+flat profile, which destroys exactly the localization that partitioning needs.
+More individuals raise SNR but leave the collinearity untouched — hence
+corr(ŵ², true) ≈ 0 across a 15× change in n/n_trees.
+
+### Open levers (possible PARTIAL rescue — untested, left for a future session)
+1. **High n / very few trees + low ŵ²-ℓ2.** n≈1500, L≈100 kb (n/n_trees ≈ 6)
+   with `--ws2-l2` → 0 (minimise shrinkage toward uniform). The single most
+   favourable regime; one ~30–60 min fit would settle whether a narrow operating
+   point exists. Read: collinearity makes a clean rescue unlikely, but this is
+   the honest remaining test.
+2. **Coarser / non-positional partition.** A 2-way genic/intergenic split at
+   large scale, or the non-positional allele-age partition (Block 2.1's
+   per-branch primitive), where the per-tree resolution demand is far lower than
+   150 bp–5 kb positional annotations.
+
+### Scope note
+This bears only on the partitioning APPLICATION (Block 2.2 / Fig 5 Panel A WHERE
+axis). The localization result (Block 1.2 / Phase 10) and the heritability /
+prediction results are unaffected. Manuscript implications to be considered
+separately (Adam, another session).
+
+### Reproduce (coarse premise check + the localization diagnostic)
+```bash
+PYBIN=/DATA/home/asiepel/miniforge3/envs/sargent/bin/python
+SG=build/src/progs/sargent; BASE=$HOME/test-sargent/block2_2_v1/coarse
+$PYBIN scripts/simulate.py --annotation-genes --gene-mean-exon-bp 5000 \
+  --gene-exon-frac 0.20 --gene-promoter-bp 2000 --gene-tau-exon 8 \
+  --length 1.5e6 --n-indiv 400 --h2-snp 0.5 --h2-arg 0.0 \
+  --sigma2-mix 0 1.0 --pi-mix 0 1 --causal-fraction 0.012 --seed 1 --out $BASE/case
+$SG --silent --nprobe 10 --arg-only --ws2-l2 0.5 --outroot $BASE/est_B \
+  $BASE/case.phen $BASE/case.trees $BASE/case
+$PYBIN test/eval/arg_ldsc.py --case-prefix $BASE/case --trees $BASE/case.trees \
+  --est-prefix $BASE/est_B --out $BASE/est
+# localization diagnostic (corr ŵ² vs true per-tree variance): /tmp/b22_short.sh
+```
