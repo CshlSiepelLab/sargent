@@ -95,15 +95,23 @@ Last updated: 2026-06-04 PM.
 > 4. **Block 2.7 — Evolutionary analyses** (no new sims; runs on
 >    existing tree sequences + sargent outputs).  Headed by Adam's
 >    ranked-edge h² list.  ~1-2 days.
-> 5. **Block 1.4 — Real-data analysis on AllOfUs (NEW 2026-06-04 PM)**.
->    Provisional plan = **Option B + Option D in parallel** (multi-trait
->    cross-ancestry PRS validation with per-population Δh² mechanism
->    add-on; plus locus-focused per-edge Δh² showcase at 1–3 known
->    selection sweeps).  AoU ARGs are already in tskit format; several
->    operational questions still to settle.  Effort ~6–8 weeks; required
->    for high-impact-journal submission.
-> 6. **Block 3 — manuscript drafting** can start in parallel with the
->    above; sections will be revised as experiments land.
+> 5. **Block 1.4b limited — single-locus real-data showcase**
+>    (bioRxiv v1 scope; Adam's 2026-06-04 PM update).  Pick one
+>    well-characterised selection sweep locus (LCT or EDAR), apply
+>    Block 2.7.1 per-edge Δh², validate against published evolutionary
+>    events.  ~2–3 weeks.
+> 6. **Block 3 v1 — bioRxiv preprint drafting**.  Sims + limited
+>    real-data showcase.  Sub-week target after item 5.
+> 7. **Block 1.4a full + 1.4b extended — journal-submission real-data
+>    analysis** (post-preprint).  Multi-trait cross-ancestry PRS +
+>    per-population Δh² mechanism + 3-locus per-edge showcase.  ~4–6
+>    weeks past bioRxiv.
+> 8. **Block 3 v2 — journal-submission manuscript** with full real-data
+>    section added.
+>
+> **Two-stage publication plan** (Adam 2026-06-04 PM): bioRxiv preprint
+> in ~6–8 weeks from now (sims + 1 real-data locus); journal submission
+> ~3–4 months from now (preprint + full Option B + extended Option D).
 >
 > Title and abstract: 4 candidates documented in REFRAME v6.
 > Decision deferred to Adam; lean is on "original + cross-ancestry
@@ -627,9 +635,25 @@ honest reporting of A1.
 
 **Goal**: a real-data section for the manuscript.  Required for a
 high-impact-journal submission.  Adam's decision (2026-06-04 PM):
-**provisional plan = Option B AND Option D in parallel**, with scope
-flexibility based on operational answers to a handful of open
-questions.
+**provisional plan = Option B AND Option D**, scope split between a
+faster bioRxiv preprint and a more complete journal submission.
+
+**Two-stage publication plan (REVISED 2026-06-04 PM)**:
+
+- **bioRxiv preprint (v1)**: simulation results + a **limited real-data
+  showcase** (Option D pruned to 1 well-characterised locus, e.g. LCT
+  or EDAR).  Faster turnaround; gets the framework + cross-ancestry
+  findings out into the community while the journal-scale real-data
+  work proceeds.  Target timeline: ~6–8 weeks from now.
+- **Journal submission (v2)**: bioRxiv content + **full Option B
+  multi-trait cross-ancestry PRS** with the per-population Δh²
+  mechanism + **extended Option D** to 3 loci.  Adds ~4–6 weeks past
+  the preprint.
+
+This staging keeps the preprint timeline tight without sacrificing
+the journal version's scope.  The Block 2.7.1 infrastructure used by
+both options is shared, so the per-locus work for the preprint is
+direct preparation for the journal version.
 
 **Why AoU**: ~245 k WGS, ~50 % non-European ancestry, explicit
 admixed-population representation — the inverse of UK Biobank and
@@ -638,6 +662,10 @@ framing.  ARGs **already in tskit format** for the AoU cohort (per
 Adam).
 
 ##### Block 1.4a — Option B: multi-trait cross-ancestry PRS + per-population Δh² mechanism
+
+**Stage**: **Journal submission only** (v2; not in bioRxiv v1).
+Adam's two-stage plan: full Option B deferred to allow a faster
+bioRxiv preprint with a limited real-data showcase (1.4b limited).
 
 **Scope**: 2–3 well-studied continuous traits (provisional: height,
 BMI, LDL); 4 prediction arms (BayesR, GBLUP, SARGENT-U, optionally
@@ -677,13 +705,24 @@ likely Fig 3 Panel D or a standalone Fig 7):
 
 ##### Block 1.4b — Option D: locus-focused showcase at known selection sweeps
 
-**Scope**: 3 small genomic regions around known population-genetic
-sweep loci (provisional: LCT for European lactase persistence, EDAR
-for East Asian skin/hair architecture, MC1R for European
-pigmentation — or analogous well-characterised sweeps).  Apply Block
-2.7.1's per-edge Δh² ranked-list calculation to each region for a
-relevant trait (e.g., height near LCT; skin pigmentation if a clean
-AoU phenotype exists for EDAR / MC1R).
+**Stages**:
+
+- **bioRxiv v1**: pruned to **1 locus** (provisional: LCT — best-
+  characterised European sweep with clean known biology and a clear
+  phenotype connection; or EDAR as backup if LCT data access is the
+  bottleneck).  Single-locus showcase backs the per-edge Δh²
+  methodology with real-data validation.  Acknowledged as a
+  representative demonstration in the v1 manuscript, with the full
+  3-locus version flagged as forthcoming.
+- **Journal v2**: extended to **3 loci** (LCT, EDAR, MC1R or
+  analogous well-characterised sweeps).  Adds robustness against the
+  "n=1 anecdote" critique.
+
+**Scope** (full version): 3 small genomic regions around known
+population-genetic sweep loci.  Apply Block 2.7.1's per-edge Δh²
+ranked-list calculation to each region for a relevant trait (e.g.,
+height near LCT; skin pigmentation if a clean AoU phenotype exists
+for EDAR / MC1R).
 
 **Headline figure** (likely Fig 6 — the SARGENT-distinctive
 evolutionary readout on real data):
@@ -1307,7 +1346,29 @@ Ragsdale archaic sweep landing.**
 distribution) + 2.7.3 (pop-specific vs shared).  Defer 2.7.4–2.7.6
 to follow-up unless quick wins emerge.
 
-### Block 3 — Manuscript rework (next week, Adam-led)
+### Block 3 — Manuscript rework (TWO-STAGE submission per 2026-06-04 PM)
+
+**Stage 1 — bioRxiv preprint (v1; target ~6–8 weeks from now)**:
+sims-only manuscript (Blocks 1.1 v2 + v3a + v3, 1.2, 2.1, 2.5, 2.6,
+2.7) **plus a limited real-data showcase** at 1 well-characterised
+selection sweep locus (Block 1.4b limited).  Validates the per-edge
+Δh² methodology against external biology while preserving a tight
+preprint timeline.  The limited real-data section is explicitly flagged
+as a representative demonstration with the full multi-trait analysis
+forthcoming.
+
+**Stage 2 — journal submission (v2; ~3–4 months from now)**: bioRxiv
+content + **full Block 1.4a Option B** (multi-trait cross-ancestry
+PRS validation with per-population Δh² mechanism) + **extended Block
+1.4b** (3-locus per-edge showcase).  Real-data section becomes a full
+Results subsection; methodological self-reinforcement between Option B
+(predictive performance) and Option D (mechanistic locus-level
+validation).
+
+Adam-led; the two stages share the same overall section structure,
+with the Real-data Validation subsection growing between v1 and v2.
+
+
 
 **Goal**: triggered once Blocks 0 + 1 are far enough along to know what's
 defensible. Major restructure, not incremental edit.
