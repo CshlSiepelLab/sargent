@@ -132,25 +132,99 @@ reproduce ŵ²_s.  Distinction is only at the second-decimal level
 manuscript figure** — included here for completeness and as a sanity-
 check sum target.
 
-### Per-age-bin posterior contribution (sharper WHEN-axis)
+### Per-age-bin posterior contribution (sharper WHEN-axis, with SNP/ARG split)
 
-Bin edges by their age (e.g., midpoint time, or child-node age).
-For each bin b:
-> u_b^posterior[i]  =  Σ_{e ∈ bin b} c_i^{u(e)} · E[α_e^s | y],
-> Δh²_b^posterior   =  ‖u_b^posterior‖² / (n · Var(y)).
+Bin edges by their age (child-node age or midpoint).  For each bin b
+compute the SNP, ARG, and total contributions **separately**:
 
-This **does not track ŵ²_s** because it aggregates edges across many
-trees (each tree's edges span multiple ages, so one tree contributes
-to several age bins; and one age bin draws on many trees).  It is the
-posterior, per-edge sharpening of Block 2.1 v2's per-tree-mean-age
-binning.
+> u_b^SNP[i]    =  Σ_{e ∈ bin b} c_i^{u(e)} · β_e
+> u_b^ARG[i]   =  Σ_{e ∈ bin b} c_i^{u(e)} · E[α_e^s | y]
+> u_b^total[i] =  Σ_{e ∈ bin b} c_i^{u(e)} · ( β_e + E[α_e^s | y] )
+>
+> Δh²_b^SNP   =  ‖u_b^SNP‖²  / (n · Var(y))
+> Δh²_b^ARG   =  ‖u_b^ARG‖²  / (n · Var(y))
+> Δh²_b^total =  ‖u_b^total‖² / (n · Var(y))
+
+Each of these aggregates across many trees and many edges, so none
+track ŵ²_s.  The per-age-bin readout is the posterior, per-edge
+sharpening of Block 2.1 v2's per-tree-mean-age binning, now resolved
+into the typed (SNP) and untyped (ARG-only) components.
 
 **Manuscript role**: replaces the current `figs2/fig5_pBC.png` Panel A
-(WHEN axis) with this sharper version.  Same age-bin scheme as Block
-2.1 v2 (recent ≤5 k gen, middle 5–20 k gen, ancient >20 k gen, or
-data-driven quantiles).
+(WHEN axis) with this sharper version.  The new panel can show
+stacked bars (SNP bottom, ARG top) per age bin, with the height
+giving total Δh² and the partition showing how much of the
+contribution at each timescale is typed vs untyped.
 
-### Per-population-bin posterior contribution (cross-ancestry decomposition)
+**Hypothesis worth testing**: under standard demographic models,
+*younger* branches should carry a larger fraction of their Δh² in the
+typed-SNP component (recent mutations are well-tagged by common typed
+SNPs), while *older* branches should be more ARG-dominated (deep
+diversity, including the rare-variant fraction, is captured by the ARG
+kinship and not the typed panel).  If this holds, it's a direct
+quantitative validation of the "ARG captures untyped variance"
+manuscript claim, at the resolution of evolutionary time.
+
+### Per-edge fixed-effect (SNP) contribution
+
+Under the infinite-sites assumption, every typed SNP `j` arose from a
+single mutation at one position on one branch of one local tree.
+`tskit` records this directly: each mutation has a `node` field that
+identifies the child node of the branch on which it sits.
+
+For SNP `j` arising on branch `e`, the genotype `x_{ij}` is exactly the
+descendant count `c_i^{u(e)}`: individual `i` carries the variant iff
+at least one of its haplotypes descends from `u(e)`, with copies
+matching the descendant count.
+
+So the BayesR fixed-effect contribution decomposes cleanly across
+branches.  Define the **per-edge cumulative SNP effect**
+> β_e  :=  Σ_{j : SNP j sits on edge e}  β̂_j
+> (β̂_j from sargent's `.beta.tsv`; un-typed SNPs are excluded by construction)
+
+Then the per-edge contribution to predicted phenotype via the fixed
+effect is
+> u_e^SNP[i]  =  c_i^{u(e)} · β_e,
+> ‖u_e^SNP‖²  =  β_e² · Σ_i (c_i^{u(e)})²,
+> Δh²_e^SNP   =  ‖u_e^SNP‖² / (n · Var(y)).
+
+This uses **exactly the same descendant-count structure** as the ARG
+contribution `Δh²_e^ARG`.  Per-edge, the two are on the same basis and
+can be summed or contrasted.
+
+**Identifiability check** (a key advantage over Block 2.2).  Multiple
+typed SNPs sitting on the same branch are perfectly correlated by
+construction (they're co-inherited by all descendants of the branch).
+BayesR's mixture prior assigns the signal to ONE of them with the rest
+≈ 0, but the **sum β_e is well-determined** — it's just the joint
+posterior expectation of the cumulative effect at branch e.  Per-edge
+SNP attribution is therefore clean, in contrast with the Block 2.2
+ARG-per-tree collinearity issue.  Different edges *within the same tree*
+have different descendant sets (different positions in the tree), so
+BayesR has signal to discriminate.
+
+### Per-edge total contribution: SNP + ARG
+
+Since `Δh²_e^SNP` and `Δh²_e^ARG` use the same descendant-count
+structure, the total is the squared norm of the combined contribution:
+
+> u_e^total[i]  =  c_i^{u(e)} · ( β_e + E[α_e^s | y] )
+> ‖u_e^total‖² =  ( β_e + E[α_e^s | y] )² · Σ_i (c_i^{u(e)})²
+> Δh²_e^total  =  ‖u_e^total‖² / (n · Var(y)).
+
+(NOT just `Δh²_e^SNP + Δh²_e^ARG`; the cross-term `2·β_e·E[α_e|y]` is
+non-trivial.  Edges with aligned SNP and ARG contributions have
+`Δh²_e^total > Δh²_e^SNP + Δh²_e^ARG`; edges with opposing contributions
+have `Δh²_e^total < Δh²_e^SNP + Δh²_e^ARG`.  Both readouts are
+manuscript-relevant.)
+
+**Manuscript composition for per-edge ranked list**: for each top-K
+edge report the triple `(SNP, ARG, total)` and the cross-term sign.
+A stacked-bar visualization (SNP component on bottom, ARG above)
+shows how typed and untyped contributions combine at the
+branch level.  No SNP-based or summary-stats method can produce this.
+
+### Per-population-bin posterior contribution (cross-ancestry decomposition with SNP/ARG split)
 
 In structured demographies (Block 1.1 v3 onward), bin edges by the
 population identity of their child node:
@@ -159,10 +233,15 @@ population identity of their child node:
 - **Post-split, pop B specific**: in the ancestral B lineage post-split.
 - (For admixed test individuals: also "introgressed from archaic.")
 
-Compute Δh²_{pop b}^posterior with the same formula.  The fraction of
-total h² in each bin is a **direct decomposition of phenotypic variance
-by evolutionary origin** — backs the cross-ancestry portability story
-quantitatively.
+Same formula structure as per-age-bin:
+> Δh²_{pop b}^SNP   =  ‖Σ_{e ∈ pop bin b} c_·^{u(e)} · β_e‖²    / (n · Var(y))
+> Δh²_{pop b}^ARG  =  ‖Σ_{e ∈ pop bin b} c_·^{u(e)} · E[α_e|y]‖² / (n · Var(y))
+> Δh²_{pop b}^total =  ‖Σ_{e ∈ pop bin b} c_·^{u(e)} · (β_e + E[α_e|y])‖² / (n · Var(y))
+
+The fraction of total h² in each bin is a **direct decomposition of
+phenotypic variance by evolutionary origin**, separated by whether the
+typed panel captured it (SNP component) or not (ARG component).  Backs
+the cross-ancestry portability story quantitatively.
 
 **Hypotheses to test under Block 1.1 v3**:
 - High pop-A-specific Δh² fraction → low portability A → B predicted.
@@ -171,6 +250,13 @@ quantitatively.
   Δh²-contribution split between AFR-ancestry, EUR-ancestry, NAT-
   ancestry branches → matches each individual's known admixture
   proportions?  Direct AoU pitch.
+- **NEW** with the SNP/ARG split: at high F_ST cross-pop, does the SNP
+  contribution from post-split pop-A-specific branches port to pop B?
+  Mechanistic prediction: NO (typed-SNP effects don't transfer
+  cross-pop, per Block 1.1 v2's β-liability finding), while the ARG
+  contribution from the same branches *does* port via shared kinship
+  structure.  Direct mechanistic validation of the cross-ancestry
+  result.
 
 ## Algorithm and cost
 
@@ -197,63 +283,88 @@ O(K · n).  For typical K = top-100 trees by ŵ²_s and n = 1000:
 `test/eval/edge_h2.py` — single-file Python helper:
 
 ```python
-def edge_h2(ts, ws2, z, sigma2, var_y, top_k_trees=None,
-            age_bins=None, pop_assignments=None, top_k_edges=None):
+def edge_h2(ts, ws2, beta, beta_snp_to_mutation, z, sigma2, var_y,
+            top_k_trees=None, age_bins=None, pop_assignments=None,
+            top_k_edges=None):
     """
-    Compute per-edge posterior contributions to phenotypic variance.
+    Compute per-edge posterior contributions to phenotypic variance,
+    separated into SNP and ARG components.
 
     Args:
         ts: tskit tree sequence
         ws2: per-tree variance weights (sargent output, length S)
+        beta: BayesR posterior means (sargent <outroot>.beta.tsv), length p
+        beta_snp_to_mutation: array of length p mapping SNP j -> mutation id in ts
+            (built from case.bim + ts.mutations cross-reference)
         z: BLUP residual V^{-1} (y - X beta), length n
         sigma2: sargent fitted sigma2
         var_y: phenotypic variance
         top_k_trees: int — restrict to trees with the K largest ws2 (None = all)
         age_bins: list of (lo, hi) tuples for age-bin aggregation
         pop_assignments: dict {node_id: pop_label} for per-population aggregation
-        top_k_edges: int — keep only the K largest-Δh² edges in the returned list
+        top_k_edges: int — keep only the K largest-Δh²_total edges in the returned list
 
     Returns:
         ranked_edges: pandas DataFrame with columns
             tree_idx, edge_child_node, length, child_age, n_descendants,
-            E_alpha, dh2_posterior, position_lo, position_hi, pop_label
-        age_summary: dict {bin: total_dh2}
-        pop_summary: dict {pop: total_dh2}
+            beta_e, E_alpha,
+            dh2_snp, dh2_arg, dh2_total,
+            position_lo, position_hi, pop_label
+        age_summary: dict {bin: {snp, arg, total}}
+        pop_summary: dict {pop: {snp, arg, total}}
     """
 ```
 
+**Key building block**: a per-edge `beta_e` accumulator.  For each
+tree s, iterate `ts.mutations()` restricted to mutations whose position
+falls in tree s's interval; for each mutation `m`, find the SNP index
+in the BED panel (via `m.site` and `case.bim` cross-reference), look up
+`beta[j]`, and accumulate `beta_e[m.node] += beta[j]`.  Untyped
+mutations are skipped (they have no BayesR estimate).
+
 ### Validation
 
-1. **Self-consistency**:
-   - Summed over all edges in a tree, the per-edge `u_e^posterior` must equal
-     the per-tree `u_s^posterior = σ² ŵ²_s G_s z`.  Test on a small simulation.
-   - Summed over all trees, `Σ u_s^posterior = E[u | y]` from sargent's BLUP.
+1. **Self-consistency** (both ARG and SNP sides):
+   - **ARG side**: summed over all edges in a tree, per-edge `u_e^ARG`
+     must equal the per-tree `u_s^ARG = σ² ŵ²_s G_s z`.  Test on a small
+     simulation.  Summed over all trees, `Σ u_s^ARG = E[u | y]`.
+   - **SNP side**: summed over all edges, `Σ_e u_e^SNP[i] = Σ_j x_{ij}·β̂_j`
+     (the BayesR fixed-effect prediction).  Test against
+     `predict_bayesR` in `predict.py`.
+   - **Total side**: `Σ_e u_e^total[i]` = sargent's full prediction `X β̂ + E[u|y]`.
 2. **Truth-side recovery on a known-architecture simulation**:
    - Block 1.2's sparse-3-block architecture has known true active blocks.
-     The top-K edges by Δh²_posterior should concentrate in those blocks.
-     Quantify with active-block AUC (analog of Block 1.2's per-tree AUC,
-     but at the edge level).
+     The top-K edges by Δh²_total should concentrate in those blocks.
+     Quantify with active-block AUC at the edge level.
+   - Pure-SNP simulation (h²_arg=0): Δh²_e^SNP should dominate; Δh²_e^ARG
+     should be near zero at convergence.
+   - Pure-ARG simulation (h²_snp=0): Δh²_e^ARG should dominate;
+     Δh²_e^SNP near zero (β̂≈0 from BayesR).
 3. **Cross-check vs Block 2.1 v2 age-binning**:
    - Aggregating per-edge to age bins should produce numbers comparable to
      Block 2.1 v2's per-tree-mean-age binning at the same age cuts.
-     Discrepancy = the sharpening (per-edge vs per-tree-mean-age).
+     Discrepancy = the sharpening (per-edge vs per-tree-mean-age) plus
+     the SNP component (new).
 4. **Diffuse-control**:
-   - On a panmictic, uniform-ŵ² simulation, no age bin or population bin
-     should dominate (all bins ≈ uniform-share Δh²).
+   - On a panmictic, uniform-ŵ² simulation with all-typed SNPs, no age
+     bin or population bin should dominate; SNP and ARG components
+     should be roughly co-distributed across bins.
 
 ## Manuscript composition
 
-Three figures or panels follow from this calculation:
+Three figures or panels follow from this calculation, each carrying
+the SNP / ARG / total decomposition:
 
 | readout | what it shows | manuscript role |
 |---|---|---|
-| Ranked-edge list (top-K) | top edges by posterior Δh², annotated time/pop/length/position | Fig 6 or supplementary; SARGENT-distinctive primary contribution |
-| Per-age-bin Δh² | fraction of h² by coalescent time | Fig 5 Panel A (replaces / sharpens existing WHEN panel from Block 2.1 v2) |
-| Per-population-bin Δh² | fraction of h² by evolutionary origin | Fig 3 Panel C (or sup); backs cross-ancestry portability story |
+| Ranked-edge list (top-K) | top edges by posterior Δh²_total, annotated time/pop/length/position; per-edge stacked SNP+ARG bars | Fig 6 or supplementary; SARGENT-distinctive primary contribution |
+| Per-age-bin Δh² (SNP / ARG / total) | fraction of h² by coalescent time, partitioned typed vs untyped | Fig 5 Panel A (replaces / sharpens existing WHEN panel from Block 2.1 v2) |
+| Per-population-bin Δh² (SNP / ARG / total) | fraction of h² by evolutionary origin × typed/untyped | Fig 3 Panel C (or sup); backs cross-ancestry portability story with a mechanistic decomposition |
 
-All three are produced by the same single calculation; the only
-difference is the aggregation step.  Total marginal cost beyond sargent
-fit is ~1 day of implementation + validation.
+All three are produced by the same single calculation (descendant
+sums of `z` and `β_e` per edge); only the aggregation step differs.
+Total marginal cost beyond sargent fit is ~1 day of implementation +
+validation.
 
 ## Open questions and possible extensions
 
