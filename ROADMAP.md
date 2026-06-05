@@ -572,22 +572,25 @@ toy.
 
 **Infrastructure (Phase 0 — must precede the sweeps):**
 
-- [ ] Add `--demography stdpopsim --model <name>` to `scripts/simulate.py`
-      wrapping stdpopsim's pre-built demographic models.
-- [ ] Add `--train-pop <name>` and `--test-pop <name>` for explicit
-      population sampling.
-- [ ] For admixed-cohort tests, sample test individuals from the
-      admixed deme (ASW / MXL / PEL).
-- [ ] Verify msprime-compatibility: simulate trees + drop into existing
-      sargent + predict.py pipeline without modification.
+- [x] Add `--demography stdpopsim --model <name>` to `scripts/simulate.py`
+      wrapping stdpopsim's pre-built demographic models. ✅ 2026-06-05
+- [x] Add `--train-pop <name>` and `--test-pop <name>` for explicit
+      population sampling. ✅ 2026-06-05
+- [x] Add `--train-pop-time` / `--test-pop-time` for archaic sampling
+      (Neanderthal@t=1000 gives F_ST ≈ 0.4-0.5 vs CEU). ✅ 2026-06-05
+- [x] For admixed-cohort tests, sample test individuals from the
+      admixed deme (`ADMIX` in `AmericanAdmixture_4B18`; ASW/MXL/PEL
+      are not distinct demes in stdpopsim 0.3 — all map to `ADMIX`). ✅ 2026-06-05
+- [x] Verify msprime-compatibility: simulate trees + drop into existing
+      sargent + predict.py pipeline without modification. ✅ smoke PASS=5/5
 
 **Sweeps:**
 
 | sub | demography | grid | cells |
 |---|---|---|---|
 | 1.1 v3.OOA | `OutOfAfrica_3G09` (Gravel et al. 2011) | 3 pop-pairs × 2 typed × 2 mix_B × 5 seeds | 60 |
-| 1.1 v3.ADM-tr | `AmericanAdmixture_4B11` (training: admixed cohort, test: pop B) | 1 admixed pop × 2 typed × 2 mix_B × 5 seeds | 20 |
-| 1.1 v3.ADM-te | `AmericanAdmixture_4B11` (test individuals from admixed deme — the AoU/HARC reality) | 3 admixed pops (ASW / MXL / PEL) × 2 typed × 5 seeds | 30 |
+| 1.1 v3.ADM-tr | `AmericanAdmixture_4B18` (training: admixed cohort, test: pop B) | 1 admixed pop × 2 typed × 2 mix_B × 5 seeds | 20 |
+| 1.1 v3.ADM-te | `AmericanAdmixture_4B18` (test individuals from admixed deme — the AoU/HARC reality) | 3 admixed pops (ASW / MXL / PEL) × 2 typed × 5 seeds | 30 |
 | 1.1 v3.ARC | `OutOfAfricaArchaicAdmixture_5R19` (Ragsdale & Gravel 2019; stretch) | 1 pop-pair × 5 seeds (small panel) | 5–10 |
 
 Total ~120 cells.  ~1.5–2.5 days wall on the server with new binary +
@@ -610,12 +613,13 @@ parallelism.
 
 **Deliverables:**
 
-- [ ] stdpopsim integration in `simulate.py` (~1-2 days).
-- [ ] OOA sweep (60 cells, ~1 day server).
-- [ ] AmericanAdmixture training sweep (20 cells, ~half-day).
-- [ ] AmericanAdmixture testing sweep (30 cells, ~half-day).
-- [ ] Optional Ragsdale archaic sweep (10 cells, ~quarter-day).
-- [ ] Block 1.1 v3 writeup at `block1_1_design.md`.
+- [x] stdpopsim integration in `simulate.py` + smoke test (PASS=5/5). ✅ 2026-06-05
+      Driver: `test/eval/portability_stdpopsim.sh`
+- [x] Block 1.1 v3 writeup at `block1_1_design.md`. ✅ 2026-06-05
+- [ ] OOA sweep (60 cells, ~1 day server). *Pending authorization.*
+- [ ] AmericanAdmixture training sweep (20 cells, ~half-day). *Pending.*
+- [ ] AmericanAdmixture testing sweep (10 cells mix=0, ~quarter-day). *Pending.*
+- [ ] Ragsdale archaic / Neanderthal sweep (10 cells, ~quarter-day). *Pending.*
 - [ ] Re-render Fig 3 with v3 data; x-axis switches from abstract
       split-time to realistic F_ST values.
 

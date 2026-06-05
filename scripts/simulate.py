@@ -524,12 +524,32 @@ def main():
             avail = [m.id for m in _species.demographic_models]
             sys.exit(f"ERROR: unknown stdpopsim model {args.stdpopsim_model!r}: {e}\n"
                      f"Available HomSap models: {avail}")
-        # Validate population names against the model's population list.
+        # Validate population names against the model's population list, and
+        # warn when an archaic population (default_sampling_time=None) is
+        # requested at time 0 — msprime will sample from a near-empty lineage.
         _pop_names = {p.name for p in _sps_model.populations}
         for _pn in filter(None, [args.train_pop, args.test_pop]):
             if _pn not in _pop_names:
                 sys.exit(f"ERROR: population {_pn!r} not in {args.stdpopsim_model!r}. "
                          f"Available: {sorted(_pop_names)}")
+        for _pn, _pt, _label in [
+                (args.train_pop, args.train_pop_time, "train"),
+                (args.test_pop,  args.test_pop_time,  "test")]:
+            if _pn is None:
+                continue
+            _pop_obj = next((p for p in _sps_model.populations
+                             if p.name == _pn), None)
+            if (_pop_obj is not None
+                    and getattr(_pop_obj, "default_sampling_time", 0) is None
+                    and _pt == 0.0):
+                print(
+                    f"  WARNING: {_pn!r} has no defined present-day sampling "
+                    f"time (default_sampling_time=None in stdpopsim). "
+                    f"Sampling at t=0 may produce empty or unexpected results. "
+                    f"Consider --{_label}-pop-time N "
+                    f"(e.g. --{_label}-pop-time 1000 for Neanderthal ~28 kya).",
+                    file=sys.stderr,
+                )
         # Layout (same convention as transfer):
         #   [0 .. n_train_A-1]          from train_pop  (at train_pop_time)
         #   [n_train_A .. n_total-1]    from test_pop   (at test_pop_time)

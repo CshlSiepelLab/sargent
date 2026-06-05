@@ -197,6 +197,10 @@ for jf in sorted(glob.glob(os.path.join(base, "*mix*_typed*_s*", "est.predict.js
     rows.append({
         "cell": cell, "split": split, "mix": mix, "typed": typed, "seed": seed,
         "n_train_A": params.get("n_train_A"), "n_train_B": params.get("n_train_B"),
+        "fst":         params.get("fst_train_test"),   # present for stdpopsim cells
+        "demography":  params.get("demography"),
+        "train_pop":   params.get("train_pop"),
+        "test_pop":    params.get("test_pop"),
         "h2_snp_real": params.get("h2_snp_realised"),
         "h2_arg_real": params.get("h2_arg_realised"),
         "bayesR_r2":   d.get("bayesR", {}).get("r2"),
@@ -215,13 +219,19 @@ print(f"Aggregated {len(rows)} cells from `{base}`.\n")
 
 # Per-cell table
 print("## Per-seed table\n")
-print("| mix_B | typed | seed | BayesR R² | GBLUP R² | ARG-BLUP-uni R² | SARGENT R² | SARGENT u-r |")
-print("|---|---|---|---|---|---|---|---|")
+has_fst = any(isinstance(r["fst"], (int, float)) for r in rows)
 def fnum(x, fmt="{:+.3f}"):
     return fmt.format(x) if isinstance(x, (int, float)) and not (isinstance(x, float) and math.isnan(x)) else "—"
+if has_fst:
+    print("| mix_B | typed | seed | F_ST | BayesR R² | GBLUP R² | ARG-BLUP-uni R² | SARGENT R² | SARGENT u-r |")
+    print("|---|---|---|---|---|---|---|---|---|")
+else:
+    print("| mix_B | typed | seed | BayesR R² | GBLUP R² | ARG-BLUP-uni R² | SARGENT R² | SARGENT u-r |")
+    print("|---|---|---|---|---|---|---|---|")
 for r in rows:
-    print(f"| {r['mix']:.2f} | {r['typed']:.2f} | {r['seed']} "
-          f"| {fnum(r['bayesR_r2'])} | {fnum(r['gblup_r2'])} "
+    fst_col = f" {fnum(r['fst'], '{:.3f}')} |" if has_fst else ""
+    print(f"| {r['mix']:.2f} | {r['typed']:.2f} | {r['seed']} |{fst_col}"
+          f" {fnum(r['bayesR_r2'])} | {fnum(r['gblup_r2'])} "
           f"| {fnum(r['argunif_r2'])} | {fnum(r['sargent_r2'])} "
           f"| {fnum(r['sargent_u_r'])} |")
 
