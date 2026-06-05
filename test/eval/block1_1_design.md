@@ -609,13 +609,15 @@ Per-cell data: `test/eval/block1_1_v3a_results.csv` (`arch=sparse`; arms
 (F_ST ladder via `SPLITS='1500 3500 7000'`), then `sargent_variants_v2.sh`
 (VARIANTS=W). Honest report; Adam to weigh the v6 framing.
 
-**Inference caveat (important):** the ŵ² fits here used **ridge** regularisation
-(`--ws2-l2 0.5` for the W arm; SARGENT defaults for full), which shrinks ŵ²
-*toward uniform* — so the estimator structurally cannot exploit the clustered
-sparsity in the truth. Clustering was injected into the **simulation** only, not
-matched by a sparse/fused **prior** at inference. The proper test of "does
-clustering help ŵ²" needs a sparsity (`--ws2-l1`) or **fused-lasso**
-(adjacent-tree difference) penalty matched to the sparse-block truth — the fused
-lasso is currently parked (not implemented). So the v3a "W≈U" verdict is
-*conditional on ridge inference*; an L1/fused estimator is the natural **v3b**
-follow-up that could still let W exceed U on clustered truth.
+**Inference note (fused-lasso prior — important):** the W arm used `--ws2-l2 0.5`,
+which is **already the fused-lasso total-variation penalty**
+(λ·Σ_s |log w²_{s+1} − log w²_s|) — the prior SARGENT documents as "matches a
+contiguous-block architecture." So the fused smoothing **was active** for W on
+the clustered truth, and W still ≈ U at λ=0.5. The full arm used **no** ŵ²
+penalty (defaults `ws2_l1 = ws2_l2 = 0`). What was **not** done: the `--ws2-l1`
+sparsity-on-levels penalty (shrinks inactive trees to a floor, sharpening the
+few active ones — the natural match to `block_frac=0.05`), and any **tuning** of
+(λ₁, λ₂) to the sparse-3-block parameters. So the proper "best case for
+clustering" is **v3b = `--ws2-l1` + `--ws2-l2` tuned to the truth** — that is the
+remaining lever that could let W exceed U; it is cheap (re-fit the 30 existing
+clustered cells with `--arg-only`, no re-sim).
