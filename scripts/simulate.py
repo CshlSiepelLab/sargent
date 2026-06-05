@@ -112,31 +112,54 @@ def sim_random_effect(ts, hap_ranks, n_indiv, ws2_vec, rng):
 
 
 def build_ws2_architecture(kind, n_trees, n_blocks, block_frac, contrast,
-                           rng=None):
+                           rng=None, ts=None):
     """Phase 10 / Block 2.6 — construct a per-tree ws² profile.
 
-    'diffuse'   : constant ws² across all trees (flat landscape). Oracle K is then
-                  proportional to the uniform K, so the oracle BLUP coincides
-                  with ARG-BLUP-uniform — the control that should show no advantage.
-    'sparse'    : floor + `n_blocks` evenly-spaced, contiguous runs of trees set
-                  high. `block_frac` of all trees are active; block:floor ratio
-                  is `contrast`. This is the large-contiguous-region regime that
-                  matches the fused-lasso prior; reviewers will read this as the
-                  best-case for sparsity-on-differences.
-    'scattered' : floor + `block_frac · n_trees` *individually scattered* active
-                  trees (Bernoulli-style draw, no contiguity). The robustness
-                  check on the sparse architecture — confirms that any per-segment
-                  amplitude advantage isn't an artifact of "fused-lasso prior
-                  matches the truth shape". `n_blocks` is ignored. Requires `rng`.
+    'diffuse'    : constant ws² across all trees (flat landscape).
+    'sparse'     : floor + `n_blocks` evenly-spaced, contiguous runs of trees set
+                   high. `block_frac` of all trees are active; block:floor ratio
+                   is `contrast`.
+    'scattered'  : floor + `block_frac · n_trees` individually scattered active
+                   trees (Bernoulli-style draw, no contiguity). `n_blocks` ignored.
+    'age_recent' : binary spike on the youngest third of trees by mean branch age.
+    'age_middle' : binary spike on the middle third of trees by mean branch age.
+    'age_ancient': binary spike on the oldest third of trees by mean branch age.
+                   Requires `ts` (tskit.TreeSequence). Designed for Fig 5 Panel B
+                   — gives maximum age-bin separability (pure 0/1 truth profile).
 
-    Absolute scale is arbitrary — the caller renormalises ws2_vec so that the
-    realised var(u) matches h2_arg, and the BLUP re-fits the overall variance
-    scale, so only the *relative* profile matters downstream.
+    Absolute scale is arbitrary — caller renormalises ws2_vec so realised var(u)
+    matches h2_arg; only the relative profile matters downstream.
     """
     if n_trees <= 0:
         return np.zeros(0, dtype=float)
     if kind == "diffuse":
         return np.ones(n_trees, dtype=float)
+
+    if kind.startswith("age_"):
+        if ts is None:
+            raise ValueError("age_* architectures require ts=<TreeSequence>")
+        # Import here to avoid adding tskit as a top-level dependency for callers
+        # that don't use age modes.
+        import os as _os, sys as _sys
+        _eval = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)),
+                              "..", "test", "eval")
+        if _eval not in _sys.path:
+            _sys.path.insert(0, _eval)
+        from arch_metrics import per_tree_mean_branch_age
+        ages = per_tree_mean_branch_age(ts)
+        # Use equal-count tertile edges (robust to any age distribution).
+        q33, q67 = float(np.nanpercentile(ages, 33.33)), float(np.nanpercentile(ages, 66.67))
+        if kind == "age_recent":
+            active = ages <= q33
+        elif kind == "age_middle":
+            active = (ages > q33) & (ages <= q67)
+        elif kind == "age_ancient":
+            active = ages > q67
+        else:
+            raise ValueError(f"Unknown age architecture: {kind!r}")
+        ws2 = np.where(active & ~np.isnan(ages), 1.0, 0.0)
+        return ws2
+
     floor = 1.0 / max(contrast, 1.0)
     ws2 = np.full(n_trees, floor, dtype=float)
     if kind == "scattered":
@@ -325,7 +348,8 @@ def main():
     # (control: oracle ≈ uniform) with a sparse contiguous large-effect landscape
     # (the regime that should favour per-segment weights, if anything does).
     ap.add_argument("--ws2-architecture", type=str, default=None,
-                    choices=["diffuse", "sparse", "scattered"],
+                    choices=["diffuse", "sparse", "scattered",
+                             "age_recent", "age_middle", "age_ancient"],
                     help="directly build the per-tree ws² profile (Phase 10 / Block 2.6), "
                          "overriding the --regime mixture draw.  "
                          "'diffuse' = flat constant ws²; "
@@ -705,7 +729,7 @@ def main():
         ws2_vec = build_ws2_architecture(
             args.ws2_architecture, n_trees, args.ws2_n_blocks,
             args.ws2_block_frac, args.ws2_block_contrast,
-            rng=rng)
+            rng=rng, ts=ts)
     else:
         mix_draw = rng.choice(M, size=n_trees, p=phi_mix)
         ws2_vec  = tau2_mix[mix_draw]       # shape (n_trees,)

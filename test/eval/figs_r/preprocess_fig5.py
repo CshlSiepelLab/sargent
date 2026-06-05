@@ -71,77 +71,76 @@ def sample_curve_log(k_arr, capt, S_total, n_points):
 # ---------------------------------------------------------------------------
 
 def process_panelB():
-    base = os.path.expanduser("~/test-sargent/block2_1_v2_nscan")
-    seeds = [1, 2, 3]
+    # New data: age_* architecture sweep (fig5_panelB cells).
+    # ws2 is assigned by the simulator to the target age tertile only, so we
+    # compute the within-bin capture curves using the ACTUAL tree-sequence ages
+    # (not the simulator's assignment tertiles) to reproduce what the estimator sees.
+    base = os.path.expanduser("~/test-sargent/fig5_panelB")
+    archs = ["age_recent", "age_middle", "age_ancient"]
+    seeds = [1, 2, 3, 4, 5]
     out_path = os.path.join(CACHE, "fig5_panelB.tsv")
 
     writer_rows = []
 
-    for seed in seeds:
-        cell = os.path.join(base, f"n1000_s{seed}")
-        ts_path   = os.path.join(cell, "case.trees")
-        est_path  = os.path.join(cell, "est.w2.tsv")
-        true_path = os.path.join(cell, "case.true_ws2.tsv")
+    for arch in archs:
+        for seed in seeds:
+            cell = os.path.join(base, f"{arch}_s{seed}")
+            ts_path   = os.path.join(cell, "case.trees")
+            est_path  = os.path.join(cell, "est.w2.tsv")
+            true_path = os.path.join(cell, "case.true_ws2.tsv")
 
-        if not os.path.exists(ts_path):
-            print(f"  [B] seed={seed}: case.trees not found, skipping")
-            continue
+            if not os.path.exists(ts_path):
+                print(f"  [B] {arch} s{seed}: case.trees not found, skipping")
+                continue
 
-        print(f"  [B] seed={seed}: loading tree sequence …", flush=True)
-        ts = tskit.load(ts_path)
-        S  = ts.num_trees
+            print(f"  [B] {arch} s{seed}: loading ts (S=?)", end="", flush=True)
+            ts = tskit.load(ts_path)
+            S  = ts.num_trees
+            print(f" S={S}", flush=True)
 
-        print(f"  [B] seed={seed}: computing per-tree mean branch age (S={S}) …", flush=True)
-        ages = per_tree_mean_branch_age(ts)
+            print(f"  [B] {arch} s{seed}: computing ages …", flush=True)
+            ages = per_tree_mean_branch_age(ts)
 
-        sources = {}
-        if os.path.exists(est_path):
-            w2 = load_ws2(est_path)
-            if len(w2) == S:
-                sources["est"] = w2
-            else:
-                print(f"  [B] seed={seed}: est length {len(w2)} != S={S}, skipping est")
-        if os.path.exists(true_path):
-            w2 = load_ws2(true_path)
-            if len(w2) == S:
-                sources["truth"] = w2
-            else:
-                print(f"  [B] seed={seed}: truth length {len(w2)} != S={S}, skipping truth")
-
-        for kind, w2 in sources.items():
-            for bi, label in enumerate(AGE_LABELS):
-                lo = AGE_EDGES[bi]
-                hi = AGE_EDGES[bi + 1]
-                if hi == np.inf:
-                    mask = ages >= lo
-                else:
-                    mask = (ages >= lo) & (ages < hi)
-                valid_mask = mask & ~np.isnan(ages)
-                S_bin = int(valid_mask.sum())
-
-                if S_bin == 0:
-                    print(f"  [B] seed={seed} kind={kind} bin={label}: 0 trees, skipping")
+            sources = {}
+            for kind, path in [("est", est_path), ("truth", true_path)]:
+                if not os.path.exists(path):
                     continue
-                if S_bin < 5:
-                    print(f"  [B] seed={seed} kind={kind} bin={label}: only {S_bin} trees")
+                w2 = load_ws2(path)
+                if len(w2) == S:
+                    sources[kind] = w2
+                else:
+                    print(f"  [B] {arch} s{seed}: {kind} length {len(w2)} != S={S}, skipping")
 
-                bin_w2 = w2[valid_mask]
-                k_arr, capt = variance_capture_curve(bin_w2)
-                pts = sample_curve_linear(k_arr, capt, S_bin, N_CURVE_POINTS_B)
-                for k_frac, captured_frac in pts:
-                    writer_rows.append({
-                        "age_bin": label,
-                        "kind": kind,
-                        "k_frac": f"{k_frac:.6f}",
-                        "captured_frac": f"{captured_frac:.6f}",
-                        "seed": seed,
-                        "S_bin": S_bin,
-                    })
+            for kind, w2 in sources.items():
+                for bi, label in enumerate(AGE_LABELS):
+                    lo = AGE_EDGES[bi]
+                    hi = AGE_EDGES[bi + 1]
+                    mask = (ages >= lo) & (ages < hi) if hi < np.inf else (ages >= lo)
+                    valid_mask = mask & ~np.isnan(ages)
+                    S_bin = int(valid_mask.sum())
 
-        print(f"  [B] seed={seed}: done", flush=True)
+                    if S_bin == 0:
+                        print(f"  [B] {arch} s{seed} kind={kind} bin={label}: 0 trees")
+                        continue
+
+                    bin_w2 = w2[valid_mask]
+                    k_arr, capt = variance_capture_curve(bin_w2)
+                    pts = sample_curve_linear(k_arr, capt, S_bin, N_CURVE_POINTS_B)
+                    for k_frac, captured_frac in pts:
+                        writer_rows.append({
+                            "arch": arch,
+                            "age_bin": label,
+                            "kind": kind,
+                            "k_frac": f"{k_frac:.6f}",
+                            "captured_frac": f"{captured_frac:.6f}",
+                            "seed": seed,
+                            "S_bin": S_bin,
+                        })
+
+            print(f"  [B] {arch} s{seed}: done", flush=True)
 
     with open(out_path, "w", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=["age_bin", "kind", "k_frac",
+        w = csv.DictWriter(f, fieldnames=["arch", "age_bin", "kind", "k_frac",
                                           "captured_frac", "seed", "S_bin"],
                            delimiter="\t")
         w.writeheader()
@@ -166,11 +165,13 @@ def process_panelC():
         for demog in demogs:
             for seed in seeds:
                 cell = os.path.join(base, f"bf{bf}_d{demog}_s{seed}")
-                est_path  = os.path.join(cell, "est.w2.tsv")
-                true_path = os.path.join(cell, "case.true_ws2.tsv")
+                est_path    = os.path.join(cell, "est_fl05.w2.tsv")
+                est_nfl_path = os.path.join(cell, "est.w2.tsv")
+                true_path   = os.path.join(cell, "case.true_ws2.tsv")
 
                 sources = {}
-                for kind, path in [("est", est_path), ("truth", true_path)]:
+                for kind, path in [("est_fl", est_path), ("est", est_nfl_path),
+                                   ("truth", true_path)]:
                     if not os.path.exists(path):
                         print(f"  [C] bf={bf} {demog} s={seed}: {kind} missing")
                         continue
