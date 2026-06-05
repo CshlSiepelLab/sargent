@@ -77,19 +77,36 @@ def write_plink(prefix, dosage, positions, n_indiv, n_variants):
 #   u_s[i] = (1/√2) · (node_val[hap_a(i)] + node_val[hap_b(i)])
 # ---------------------------------------------------------------------------
 
-def sim_random_effect(ts, hap_ranks, n_indiv, ws2_vec, rng):
+def sim_random_effect(ts, hap_ranks, n_indiv, ws2_input, rng):
     """Return u vector (length n_indiv) for all trees.
 
-    ws2_vec: array of ws² values, one per tree (length ts.num_trees).
+    ws2_input: either
+      (a) array of ws² values, one per tree (length ts.num_trees), in which case
+          every edge in tree s uses the same per-tree ws²_s; or
+      (b) dict {(tree_idx, child_node) → ws²_e} for per-edge architectures
+          (Block 2.7.1).  Edges absent from the dict get ws²_e = 0.
+
     hap_ranks: shape (n_indiv, 2) — sample ranks for each individual's two haplotypes.
     """
     u = np.zeros(n_indiv)
     node_val = np.zeros(ts.num_nodes)
+    samples = ts.samples()
+    per_edge = isinstance(ws2_input, dict)
 
     for tree_idx, tree in enumerate(ts.trees()):
-        ws2 = ws2_vec[tree_idx]
-        if ws2 == 0.0:
-            continue
+        if per_edge:
+            # Skip trees with no active edges
+            has_any = any(
+                ws2_input.get((tree_idx, int(u_)), 0.0) > 0.0
+                for u_ in tree.nodes() if tree.parent(u_) != tskit.NULL
+            )
+            if not has_any:
+                continue
+            ws2_tree_lookup = ws2_input  # dict lookup per edge
+        else:
+            ws2_tree = ws2_input[tree_idx]
+            if ws2_tree == 0.0:
+                continue
 
         node_val[:] = 0.0
         # Preorder: root first, then children — parent value is ready before children
@@ -98,14 +115,19 @@ def sim_random_effect(ts, hap_ranks, n_indiv, ws2_vec, rng):
             if parent == tskit.NULL:
                 node_val[nd] = 0.0
             else:
+                if per_edge:
+                    ws2_e = ws2_tree_lookup.get((tree_idx, int(nd)), 0.0)
+                else:
+                    ws2_e = ws2_tree
+                if ws2_e == 0.0:
+                    node_val[nd] = node_val[parent]
+                    continue
                 bl = tree.branch_length(nd)
-                node_val[nd] = node_val[parent] + rng.normal(0.0, math.sqrt(ws2 * bl))
+                node_val[nd] = node_val[parent] + rng.normal(0.0, math.sqrt(ws2_e * bl))
 
         # Accumulate into u: (1/√2) · (val[hap0] + val[hap1])
         h0 = hap_ranks[:, 0]
         h1 = hap_ranks[:, 1]
-        # hap_ranks are sample ranks; convert to node IDs via ts.samples()
-        samples = ts.samples()
         u += (1.0 / math.sqrt(2.0)) * (node_val[samples[h0]] + node_val[samples[h1]])
 
     return u
@@ -124,8 +146,19 @@ def build_ws2_architecture(kind, n_trees, n_blocks, block_frac, contrast,
     'age_recent' : binary spike on the youngest third of trees by mean branch age.
     'age_middle' : binary spike on the middle third of trees by mean branch age.
     'age_ancient': binary spike on the oldest third of trees by mean branch age.
-                   Requires `ts` (tskit.TreeSequence). Designed for Fig 5 Panel B
-                   — gives maximum age-bin separability (pure 0/1 truth profile).
+                   Requires `ts` (tskit.TreeSequence).
+
+    Per-edge variants (Block 2.7.1; 2026-06-05).  Return a *dict* keyed by
+    (tree_idx, child_node) → ws² rather than a 1-D per-tree array.  Downstream
+    sim_random_effect dispatches on the return type.  Intended for the WHEN
+    axis where per-edge age is the natural binning, since trees span many
+    ages and per-tree-mean-age is too coarse a summary.
+
+    'age_recent_edges' : binary spike on edges whose midpoint age is in the
+                         youngest tertile of edge ages (across the whole
+                         tree sequence).
+    'age_middle_edges' : same, for the middle tertile of edge ages.
+    'age_ancient_edges': same, for the oldest tertile of edge ages.
 
     Absolute scale is arbitrary — caller renormalises ws2_vec so realised var(u)
     matches h2_arg; only the relative profile matters downstream.
@@ -135,7 +168,11 @@ def build_ws2_architecture(kind, n_trees, n_blocks, block_frac, contrast,
     if kind == "diffuse":
         return np.ones(n_trees, dtype=float)
 
-    if kind.startswith("age_"):
+    # Per-edge age tertile architectures must be checked BEFORE the per-tree
+    # age_* branch because both share the "age_" prefix.
+    if kind.startswith("age_") and kind.endswith("_edges"):
+        pass  # handled below, after the per-tree age block
+    elif kind.startswith("age_"):
         if ts is None:
             raise ValueError("age_* architectures require ts=<TreeSequence>")
         # Import here to avoid adding tskit as a top-level dependency for callers
@@ -159,6 +196,41 @@ def build_ws2_architecture(kind, n_trees, n_blocks, block_frac, contrast,
             raise ValueError(f"Unknown age architecture: {kind!r}")
         ws2 = np.where(active & ~np.isnan(ages), 1.0, 0.0)
         return ws2
+
+    if kind.startswith("age_") and kind.endswith("_edges"):
+        # Per-edge age tertile architectures (Block 2.7.1 design).  Return a
+        # dict {(tree_idx, child_node) → ws²_e}.  sim_random_effect dispatches.
+        if ts is None:
+            raise ValueError(f"{kind!r} requires ts=<TreeSequence>")
+        node_times = ts.tables.nodes.time
+        # Collect (tree_idx, child_node, midpoint_age) for every edge.
+        edge_entries = []
+        for ti, tree in enumerate(ts.trees()):
+            for u in tree.nodes():
+                p = tree.parent(u)
+                if p == tskit.NULL:
+                    continue
+                age_child  = float(node_times[u])
+                age_parent = float(node_times[p])
+                mid        = 0.5 * (age_child + age_parent)
+                edge_entries.append((ti, int(u), mid))
+        if not edge_entries:
+            return {}
+        mids = np.array([e[2] for e in edge_entries], dtype=float)
+        q33  = float(np.nanpercentile(mids, 33.33))
+        q67  = float(np.nanpercentile(mids, 66.67))
+        if kind == "age_recent_edges":
+            active_fn = lambda m: m <= q33
+        elif kind == "age_middle_edges":
+            active_fn = lambda m: (m > q33) & (m <= q67)
+        elif kind == "age_ancient_edges":
+            active_fn = lambda m: m > q67
+        else:
+            raise ValueError(f"Unknown per-edge age architecture: {kind!r}")
+        ws2_per_edge = {}
+        for ti, u, mid in edge_entries:
+            ws2_per_edge[(ti, u)] = 1.0 if active_fn(mid) else 0.0
+        return ws2_per_edge
 
     floor = 1.0 / max(contrast, 1.0)
     ws2 = np.full(n_trees, floor, dtype=float)
@@ -379,15 +451,22 @@ def main():
     # (the regime that should favour per-segment weights, if anything does).
     ap.add_argument("--ws2-architecture", type=str, default=None,
                     choices=["diffuse", "sparse", "scattered",
-                             "age_recent", "age_middle", "age_ancient"],
-                    help="directly build the per-tree ws² profile (Phase 10 / Block 2.6), "
+                             "age_recent", "age_middle", "age_ancient",
+                             "age_recent_edges", "age_middle_edges",
+                             "age_ancient_edges"],
+                    help="directly build the ws² profile (Phase 10 / Block 2.6), "
                          "overriding the --regime mixture draw.  "
                          "'diffuse' = flat constant ws²; "
                          "'sparse' = floor + n_blocks evenly-spaced contiguous blocks; "
                          "'scattered' = floor + block_frac·n_trees individually scattered "
                          "active trees (n_blocks ignored). The 'scattered' option is the "
                          "fused-lasso robustness check: confirms that any per-segment "
-                         "advantage isn't an artifact of the prior matching contiguous truth.")
+                         "advantage isn't an artifact of the prior matching contiguous truth. "
+                         "'age_{recent,middle,ancient}' = binary spike on the tertile of "
+                         "TREES by mean branch age. "
+                         "'age_{recent,middle,ancient}_edges' = binary spike on the tertile "
+                         "of EDGES by midpoint age (Block 2.7.1; finer-grained per-edge "
+                         "ground truth used by Fig 5 Panel B).")
     ap.add_argument("--ws2-n-blocks", type=int, default=3,
                     help="number of contiguous large-effect blocks (--ws2-architecture sparse)")
     ap.add_argument("--ws2-block-frac", type=float, default=0.05,
@@ -879,10 +958,17 @@ def main():
     if var_random > 0 and args.h2_arg > 0:
         scale_r   = math.sqrt(args.h2_arg / var_random)
         y_random *= scale_r
-        ws2_vec  *= scale_r ** 2        # scale the variance parameters accordingly
+        # scale the variance parameters accordingly — array or per-edge dict
+        if isinstance(ws2_vec, dict):
+            ws2_vec = {k: v * (scale_r ** 2) for k, v in ws2_vec.items()}
+        else:
+            ws2_vec  *= scale_r ** 2
     elif args.h2_arg == 0:
         y_random[:] = 0.0
-        ws2_vec[:]  = 0.0
+        if isinstance(ws2_vec, dict):
+            ws2_vec = {k: 0.0 for k in ws2_vec}
+        else:
+            ws2_vec[:]  = 0.0
 
     # ---- 4b. Unobserved (SV-style) class (Phase 6b; default off) ----------
     # Variants are carved out of the BED and contribute to y via heavier-tail
@@ -1035,26 +1121,88 @@ def main():
             f.write(f"{j}\t{positions[j]}\t{beta[j]:.8g}\t{in_bed}\t"
                     f"{bed_idx_of[j] if in_bed else -1}\t{ages[j]:.6g}\n")
 
-    # ws2_vec is defined on the FULL ARG's trees (or on the only ARG if no test split).
-    # If there is a test split, we also record train-tree ws² indexed by the simplified
-    # train tree sequence. Each train tree inherits ws² from the full-ARG tree containing
-    # its midpoint.
-    with open(args.out + ".true_ws2.tsv", "w") as f:
-        f.write("tree_idx\tws2\n")
-        if has_test:
+    # ws2 ground truth.  For per-tree architectures (ws2_vec is a numpy array),
+    # writes .true_ws2.tsv as before.  For per-edge architectures (ws2_vec is a
+    # dict {(tree_idx, child_node) → ws²_e}, Block 2.7.1), writes
+    # .true_ws2_per_edge.tsv (sparse per-edge ground truth) AND a derived
+    # per-tree summary (sum of per-edge ws²_e · ℓ_e / sum ℓ_e — the
+    # average ws² weight in tree s) as .true_ws2.tsv so downstream tools
+    # that expect the per-tree format still get a sensible aggregate.
+    if isinstance(ws2_vec, dict):
+        node_times_full = ts.tables.nodes.time
+        # Per-edge file: tree_idx, child_node, parent_age, child_age, length, ws2_e
+        with open(args.out + ".true_ws2_per_edge.tsv", "w") as f:
+            f.write("tree_idx\tchild_node\tparent_age\tchild_age\tlength\tws2_e\n")
+            for ti, tree in enumerate(ts.trees()):
+                for u_node in tree.nodes():
+                    p = tree.parent(u_node)
+                    if p == tskit.NULL:
+                        continue
+                    w_e = float(ws2_vec.get((ti, int(u_node)), 0.0))
+                    if w_e == 0.0:
+                        continue
+                    f.write(f"{ti}\t{int(u_node)}\t"
+                            f"{float(node_times_full[p]):.6g}\t"
+                            f"{float(node_times_full[u_node]):.6g}\t"
+                            f"{float(node_times_full[p]-node_times_full[u_node]):.6g}\t"
+                            f"{w_e:.8g}\n")
+        # Derived per-tree summary: ws²_tree = (sum ws²_e · ℓ_e) / (sum ℓ_e)
+        # over edges in tree s; gives a single per-tree value matching the
+        # per-tree-architecture output convention.
+        def per_tree_summary(ts_in):
+            out = np.zeros(ts_in.num_trees, dtype=float)
             full_breaks = list(ts.breakpoints())
-            for s, tr in enumerate(ts_train.trees()):
-                mid = 0.5 * (tr.interval.left + tr.interval.right)
-                full_s = max(0, min(len(ws2_vec) - 1,
-                                    np.searchsorted(full_breaks, mid, side="right") - 1))
-                f.write(f"{s}\t{ws2_vec[full_s]:.8g}\n")
+            for ti, tree in enumerate(ts_in.trees()):
+                if ts_in is ts:
+                    src_ti = ti
+                else:
+                    mid = 0.5 * (tree.interval.left + tree.interval.right)
+                    src_ti = max(0, min(ts.num_trees - 1,
+                                np.searchsorted(full_breaks, mid, side="right") - 1))
+                num = 0.0; denom = 0.0
+                for u_node in tree.nodes():
+                    p = tree.parent(u_node)
+                    if p == tskit.NULL:
+                        continue
+                    ell = float(node_times_full[p] - node_times_full[u_node])
+                    w_e = float(ws2_vec.get((src_ti, int(u_node)), 0.0))
+                    num += w_e * ell
+                    denom += ell
+                out[ti] = (num / denom) if denom > 0 else 0.0
+            return out
+        train_summary = per_tree_summary(ts_train) if has_test else per_tree_summary(ts)
+        with open(args.out + ".true_ws2.tsv", "w") as f:
+            f.write("tree_idx\tws2\n")
+            for s, w in enumerate(train_summary):
+                f.write(f"{s}\t{w:.8g}\n")
+        if has_test:
+            full_summary = per_tree_summary(ts)
             with open(args.out + ".full.true_ws2.tsv", "w") as g:
                 g.write("tree_idx\tws2\n")
-                for s, w in enumerate(ws2_vec):
+                for s, w in enumerate(full_summary):
                     g.write(f"{s}\t{w:.8g}\n")
-        else:
-            for s, w in enumerate(ws2_vec):
-                f.write(f"{s}\t{w:.8g}\n")
+    else:
+        # Per-tree architecture (legacy):
+        # ws2_vec is defined on the FULL ARG's trees (or on the only ARG if no
+        # test split).  If there is a test split, we also record train-tree ws²
+        # indexed by the simplified train tree sequence; each train tree inherits
+        # ws² from the full-ARG tree containing its midpoint.
+        with open(args.out + ".true_ws2.tsv", "w") as f:
+            f.write("tree_idx\tws2\n")
+            if has_test:
+                full_breaks = list(ts.breakpoints())
+                for s, tr in enumerate(ts_train.trees()):
+                    mid = 0.5 * (tr.interval.left + tr.interval.right)
+                    full_s = max(0, min(len(ws2_vec) - 1,
+                                        np.searchsorted(full_breaks, mid, side="right") - 1))
+                    f.write(f"{s}\t{ws2_vec[full_s]:.8g}\n")
+                with open(args.out + ".full.true_ws2.tsv", "w") as g:
+                    g.write("tree_idx\tws2\n")
+                    for s, w in enumerate(ws2_vec):
+                        g.write(f"{s}\t{w:.8g}\n")
+            else:
+                for s, w in enumerate(ws2_vec):
+                    f.write(f"{s}\t{w:.8g}\n")
 
     # ---- Block 2.2: annotation outputs -------------------------------------
     if var_ann is not None:
