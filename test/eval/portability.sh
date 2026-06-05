@@ -36,7 +36,9 @@
 
 set -euo pipefail
 
-ROOT=${ROOT:-/Users/acs/git-src/sargent}
+# Auto-detect the repo root from this script's own location (portable across
+# the laptop and the server); override with ROOT=... if needed.
+ROOT=${ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}
 SARGENT=${SARGENT:-$ROOT/build/src/progs/sargent}
 SIM=${SIM:-$ROOT/scripts/simulate.py}
 PRED=${PRED:-$ROOT/test/eval/predict.py}
@@ -57,6 +59,11 @@ MIX_FRAC_B=${MIX_FRAC_B:-"0.00 0.05 0.20"}
 TYPED_FRACS=${TYPED_FRACS:-"0.7 0.1"}
 SEEDS=${SEEDS:-"1 2 3 4 5"}
 SARGENT_EXTRA=${SARGENT_EXTRA:-""}
+# Extra flags passed to simulate.py (NOT the sargent binary).  Used e.g. for
+# Block 1.1 v3a to set the per-tree ws² truth architecture
+# (--ws2-architecture sparse --ws2-block-frac ... --ws2-block-contrast ...),
+# which is a SIMULATION property, not an inference flag.
+SIM_EXTRA=${SIM_EXTRA:-""}
 
 # Resolve a `python` that has msprime/tskit. Order of preference:
 #   1. $PYBIN if set
@@ -87,6 +94,7 @@ echo "  trait  : h2_snp=$H2_SNP h2_arg=$H2_ARG causal_frac=$CAUSAL_FRAC"
 echo "  demog  : transfer SPLITS={$SPLITS} gen"
 echo "  python : $PY"
 echo "  sargent: $SARGENT $SARGENT_EXTRA"
+echo "  sim-extra: ${SIM_EXTRA:-(none)}"
 echo
 
 # Sanity: sargent binary present?
@@ -134,7 +142,7 @@ for split in $SPLITS; do
           --length "$LENGTH" --Ne "$NE" \
           --h2-snp "$H2_SNP" --h2-arg "$H2_ARG" \
           --causal-fraction "$CAUSAL_FRAC" \
-          --bed-coverage "$typed" \
+          --bed-coverage "$typed" $SIM_EXTRA \
           --seed "$seed" --out "$dir/case" \
           > "$dir/sim.log" 2>&1 || { echo "  sim FAILED, see $dir/sim.log"; tail -10 "$dir/sim.log"; continue; }
 
