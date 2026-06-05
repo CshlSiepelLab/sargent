@@ -1,6 +1,36 @@
 # SARGENT — Development Roadmap
 
-Last updated: 2026-06-04 PM.
+Last updated: 2026-06-05.
+
+> **2026-06-05 — per-figure simulation framework decision (Adam).**
+> Each manuscript figure tests a different mechanism, so the demography
+> family is chosen per figure rather than globally.  Captions must
+> state explicitly which simulation framework backs each figure.
+>
+> | fig | tests | sim framework (v1) |
+> |---|---|---|
+> | Fig 2 | within-pop h² + prediction vs typed coverage | simple panmictic (msprime) |
+> | Fig 3 | cross-ancestry portability | stdpopsim Gravel OOA + Browning AmericanAdmixture (Block 1.1 v3) |
+> | Fig 4 | localization at recombination-aware resolution | simple panmictic + admixture-pulse (msprime); Block 1.2 v1 cells |
+> | Fig 5 | architecture characterisation (WHEN + HOW) | simple panmictic (msprime) |
+> | Fig 6 | per-edge / per-population Δh² (Block 2.7.1 readout) | stdpopsim OOA + AmericanAdmixture (gated on Block 1.1 v3) |
+>
+> **Rationale**: simple demographies are controlled experiments for
+> within-pop mechanisms — adding realistic structure obscures the
+> test.  Cross-ancestry figures (3 + 6) require realistic demography
+> to be defensible.  Supplementary OOA panels for Figs 2 and 4 are
+> deferred to the journal version (v2); reviewer "test under realistic
+> demography" requests for within-pop results are absorbable during
+> journal review.
+>
+> Manuscript-writing standing rule: every figure caption explicitly
+> names the simulation framework used (e.g., "n = 600 simulated under
+> a panmictic msprime model" vs "n = 500 simulated under the Gravel
+> OutOfAfrica_3G09 stdpopsim model").  This applies to existing
+> captions in `~/newwriting/arg-mapping/figs2/captions.md` and any
+> new ones.
+
+> **2026-06-04 PM — Block 2.2 honest negative + strategic reframe (REFRAME v5/v6).**
 
 > **2026-06-04 PM — Block 2.2 honest negative + strategic reframe (REFRAME v5/v6).**
 > Two major developments in one afternoon:
