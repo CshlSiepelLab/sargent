@@ -84,9 +84,27 @@ descendant-sum of `z` per edge, plus bookkeeping for the aggregation.
 
 ### Per-edge posterior mean
 
-By the standard linear-Gaussian conditional formula:
-> E[α_e^s | y]  =  (σ² · ŵ²_s · ℓ_e / 2) · m_eᵀ · z
->                =  (σ² · ŵ²_s · ℓ_e / 2) · Σ_{i: c_i^{u(e)} > 0} c_i^{u(e)} · z_i.
+By the standard linear-Gaussian conditional formula (corrected against
+the in-code parameterisation `V = σ² I + Σ ŵ²_s · G_s`, so per-tree
+`Var(u_s) = ŵ²_s · G_s` with **no extra σ² factor**; verified by the
+self-consistency identity in `test/eval/edge_h2.py`, max residual 9e-15
+on a Block 1.2 cell):
+
+> E[α_e^s | y]  =  (ŵ²_s · ℓ_e / 2) · m_eᵀ · z
+>                =  (ŵ²_s · ℓ_e / 2) · Σ_{i: c_i^{u(e)} > 0} c_i^{u(e)} · z_i
+>                =  ŵ²_s · ℓ_e · S_z[u(e)],
+
+where `S_z[u] = ½ · m_eᵀ · z` follows the matvec post-order accumulator
+convention.
+
+**Implementation note**: the Python helpers `streaming_combined_kinship`
+(in `test/eval/predict.py`) and `hap_to_indiv_2d` together return *half*
+the matvec-scale `G_s`, because the helper uses `0.5 · bl` at every
+branch AND the `hap_to_indiv_2d` collapse contributes another `0.5`.
+`edge_h2.py` accordingly doubles the Python-side kinship before
+assembling `V` (and again when computing the self-consistency check's
+expected per-tree contribution).  Document this here because future
+extensions that reuse the Python helpers will need to do the same.
 
 ### Per-edge posterior contribution to predicted phenotype
 
