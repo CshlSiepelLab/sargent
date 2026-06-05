@@ -464,3 +464,92 @@ for the cross-ancestry figure, not SARGENT-full or SARGENT-W.
 Per-cell data: `test/eval/block1_1_v2_variants_results.csv`
 (`sargentW_r2`, `sargentW_r2c`, `sargentW_h2arg`). Driver:
 `test/eval/sargent_variants_v2.sh` (VARIANTS=W). Provisional framing — Adam-led.
+
+## Block 1.1 v3 — Realistic demographies (infrastructure done 2026-06-05)
+
+**Status:** infrastructure complete and smoke-tested. Sweeps pending.
+
+### Goal
+
+Re-run the v1/v2 verdict under standard pop-gen-aware demographic models
+(stdpopsim HomSap catalog: Gravel OOA, Browning AmericanAdmixture,
+Ragsdale archaic).  Required for journal submission where reviewers
+expect realistic simulations (AJHG, Genome Research, Nature Genetics).
+
+### Infrastructure
+
+`scripts/simulate.py` gains `--demography stdpopsim` with three
+companion flags:
+
+| flag | purpose |
+|---|---|
+| `--stdpopsim-model NAME` | stdpopsim HomSap model ID (e.g. `OutOfAfrica_3G09`) |
+| `--train-pop NAME` | population sampled for training (e.g. `CEU`) |
+| `--test-pop NAME` | population sampled for testing (e.g. `YRI`, `ADMIX`) |
+
+`--mix-fraction-B` still controls the target-population injection fraction
+(same as v1/v2 `transfer` demography).  Individual layout in the tree
+sequence is identical to `transfer`:
+`[0..n_train_A-1]` from `train_pop`, `[n_train_A..n_total-1]` from `test_pop`.
+All downstream code (sargent, predict.py, portability.sh aggregator) is
+unchanged.
+
+`params.json` additions:
+- `stdpopsim_model`, `train_pop`, `test_pop` — model / population provenance
+- `fst_train_test` — Hudson F_ST between all train-pop and test-pop samples
+  (computed via `ts.Fst()` from the full post-mutation tree sequence)
+
+stdpopsim 0.3.0 installed in the `sargent` mamba env.  Models available:
+
+| model ID | pops relevant to v3 |
+|---|---|
+| `OutOfAfrica_3G09` | YRI, CEU, CHB |
+| `AmericanAdmixture_4B18` | AFR, EUR, ASIA, ADMIX |
+| `OutOfAfricaArchaicAdmixture_5R19` | YRI, CEU, CHB (modern only) |
+
+### Smoke-test results (2026-06-05, n_train=100, n_test=50, L=300 kb, seed=1)
+
+4 cells, PASS=4, FAIL=0.  Driver: `test/eval/block1_1_v3_smoke.sh`.
+
+| cell | model | train→test | F_ST | ARG-BLUP-uni r²_calib |
+|---|---|---|---|---|
+| OOA_3G09_CEU_YRI | OutOfAfrica_3G09 | CEU→YRI mix=0 | 0.0842 | 0.0007 |
+| OOA_3G09_CEU_YRI_mix05 | OutOfAfrica_3G09 | CEU→YRI mix=0.05 | 0.0986 | 0.1832 |
+| ADM_4B18_EUR_ADMIX | AmericanAdmixture_4B18 | EUR→ADMIX mix=0 | 0.0110 | 0.2285 |
+| ARC_5R19_CEU_YRI | OutOfAfricaArchaicAdmixture_5R19 | CEU→YRI mix=0 | 0.1052 | 0.0175 |
+
+Notes:
+- Pure CEU→YRI transfer (mix=0): F_ST≈0.08, prediction near zero — consistent
+  with v2 pure-transfer behaviour.
+- 5% YRI injection into training: r²_calib 0.001 → 0.183 at this tiny n,
+  showing target-population injection mechanism works under realistic OOA demography.
+- AmericanAdmixture EUR→ADMIX: low F_ST (0.011) as expected; r²_calib 0.23
+  at n=100 (European ancestry dominates admixed test cohort).
+- Ragsdale archaic model simulates identically to OOA for modern-pop samples.
+
+### Planned sweeps (pending authorization)
+
+See ROADMAP.md § "Block 1.1 v3" for the full grid:
+
+| sub | demography | cells |
+|---|---|---|
+| v3.OOA | `OutOfAfrica_3G09`, 3 pop-pairs × 2 typed × 2 mix_B × 5 seeds | 60 |
+| v3.ADM-tr | `AmericanAdmixture_4B18`, EUR train → ADMIX test | 20 |
+| v3.ADM-te | `AmericanAdmixture_4B18`, test from ADMIX | 30 |
+| v3.ARC | `OutOfAfricaArchaicAdmixture_5R19` (stretch) | 5–10 |
+
+The existing `portability.sh` driver is compatible without modification.
+For the stdpopsim cells, call:
+
+```bash
+BASE=$HOME/test-sargent/block1_1_v3_ooa
+tmux new -s b11v3 -d "
+  BASE=$BASE \
+  DEMOG_ARGS='--demography stdpopsim --stdpopsim-model OutOfAfrica_3G09 --train-pop CEU --test-pop YRI' \
+  bash test/eval/portability_stdpopsim.sh 2>&1 | tee $BASE/run.log
+"
+```
+
+(A thin `portability_stdpopsim.sh` wrapper around `portability.sh` that
+substitutes `--demography stdpopsim ...` for `--demography transfer ...`
+is needed; write it at launch time.)

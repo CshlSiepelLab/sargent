@@ -237,7 +237,7 @@ def main():
     ap.add_argument("--mut-rate",    type=float, default=1e-8, help="mutation rate per bp per gen")
     ap.add_argument("--Ne",          type=float, default=1e4,  help="effective population size")
     ap.add_argument("--demography",  type=str,   default="panmictic",
-                    choices=["panmictic", "admixed", "transfer"],
+                    choices=["panmictic", "admixed", "transfer", "stdpopsim"],
                     help="population model. 'panmictic' = single constant-size pop; "
                          "'admixed' = two diverged sources + recent admixture pulse, "
                          "giving local-ancestry heterogeneity along the genome (the "
@@ -245,7 +245,25 @@ def main():
                          "genuinely different relatedness so per-segment ws² can help); "
                          "'transfer' = two diverged pops A and B (no admixture pulse) "
                          "with training drawn from A + optional B fraction (--mix-fraction-B) "
-                         "and test drawn entirely from B (Block 1.1 cross-ancestry PRS).")
+                         "and test drawn entirely from B (Block 1.1 cross-ancestry PRS); "
+                         "'stdpopsim' = use a named stdpopsim HomSap demographic model "
+                         "(requires --stdpopsim-model, --train-pop, --test-pop).")
+    ap.add_argument("--stdpopsim-model", type=str, default=None,
+                    help="stdpopsim HomSap demographic model name "
+                         "(only with --demography stdpopsim). "
+                         "E.g. 'OutOfAfrica_3G09', 'AmericanAdmixture_4B18', "
+                         "'OutOfAfricaArchaicAdmixture_5R19'.")
+    ap.add_argument("--train-pop", type=str, default=None,
+                    help="population name for training samples "
+                         "(only with --demography stdpopsim). "
+                         "Must match a population ID in the stdpopsim model "
+                         "(e.g. 'CEU', 'YRI', 'EUR'). "
+                         "--mix-fraction-B controls target-pop injection into training.")
+    ap.add_argument("--test-pop", type=str, default=None,
+                    help="population name for test samples "
+                         "(only with --demography stdpopsim). "
+                         "For admixed-cohort test, use an admixed deme name "
+                         "(e.g. 'ADMIX', 'ASW', 'MXL', 'PEL').")
     ap.add_argument("--admix-split-time", type=float, default=4000.0,
                     help="generations since the two source pops split (--demography admixed; "
                          "larger ⇒ stronger structure, F_ST ≈ 1-exp(-T/2Ne))")
@@ -427,9 +445,18 @@ def main():
     # which preserves the existing convention that train = ts[:n_train], test = ts[n_train:].
     n_train_A = args.n_indiv
     n_train_B = 0
-    if args.demography == "transfer":
+    if args.demography in ("transfer", "stdpopsim"):
         n_train_B = int(round(args.mix_fraction_B * args.n_indiv))
         n_train_A = args.n_indiv - n_train_B
+
+    if args.demography == "stdpopsim":
+        if not args.stdpopsim_model:
+            sys.exit("ERROR: --stdpopsim-model is required with --demography stdpopsim")
+        if not args.train_pop:
+            sys.exit("ERROR: --train-pop is required with --demography stdpopsim")
+        if not args.test_pop and (args.n_test > 0 or n_train_B > 0):
+            sys.exit("ERROR: --test-pop is required with --demography stdpopsim "
+                     "when n_test > 0 or mix-fraction-B > 0")
 
     print(f"Simulating ARG: n_train={args.n_indiv} + n_test={args.n_test} "
           f"= {n_total} individuals, L={args.length:.0f} bp ...", flush=True)
@@ -472,6 +499,46 @@ def main():
         )
         print(f"  transfer composition: train A={n_train_A} B={n_train_B}, "
               f"test B={args.n_test}", flush=True)
+    elif args.demography == "stdpopsim":
+        try:
+            import stdpopsim as _stdpopsim
+        except ImportError:
+            sys.exit("ERROR: stdpopsim is not installed. "
+                     "Install with: pip install stdpopsim")
+        _species = _stdpopsim.get_species("HomSap")
+        try:
+            _sps_model = _species.get_demographic_model(args.stdpopsim_model)
+        except Exception as e:
+            avail = [m.id for m in _species.demographic_models]
+            sys.exit(f"ERROR: unknown stdpopsim model {args.stdpopsim_model!r}: {e}\n"
+                     f"Available HomSap models: {avail}")
+        # Validate population names against the model's population list.
+        _pop_names = {p.name for p in _sps_model.populations}
+        for _pn in filter(None, [args.train_pop, args.test_pop]):
+            if _pn not in _pop_names:
+                sys.exit(f"ERROR: population {_pn!r} not in {args.stdpopsim_model!r}. "
+                         f"Available: {sorted(_pop_names)}")
+        # Layout (same convention as transfer):
+        #   [0 .. n_train_A-1]          from train_pop
+        #   [n_train_A .. n_total-1]    from test_pop  (n_train_B + n_test)
+        _sample_spec = {args.train_pop: n_train_A}
+        _n_test_pop = n_train_B + args.n_test
+        if _n_test_pop > 0:
+            _sample_spec[args.test_pop] = _n_test_pop
+        ts = msprime.sim_ancestry(
+            samples=_sample_spec,
+            demography=_sps_model.model,
+            sequence_length=args.length,
+            recombination_rate=args.recomb_rate,
+            random_seed=args.seed,
+        )
+        print(f"  stdpopsim {args.stdpopsim_model}: "
+              f"train_pop={args.train_pop} ({n_train_A}), "
+              f"test_pop={args.test_pop} ({_n_test_pop})", flush=True)
+        if n_train_B > 0:
+            print(f"  mixed training: {n_train_A} from {args.train_pop} + "
+                  f"{n_train_B} from {args.test_pop} "
+                  f"({args.mix_fraction_B:.0%})", flush=True)
     else:
         ts = msprime.sim_ancestry(
             samples=n_total,
@@ -481,6 +548,33 @@ def main():
             random_seed=args.seed,
         )
     ts = msprime.sim_mutations(ts, rate=args.mut_rate, random_seed=args.seed + 1)
+
+    # F_ST between train_pop and test_pop (stdpopsim only, computed on the
+    # full tree sequence using tskit's Hudson estimator).
+    fst_train_test = None
+    if args.demography == "stdpopsim" and args.train_pop and args.test_pop:
+        _pop_name_to_id = {}
+        for _p in ts.populations():
+            _pname = (_p.metadata.get("name", str(_p.id))
+                      if _p.metadata else str(_p.id))
+            _pop_name_to_id[_pname] = _p.id
+        _train_pid = _pop_name_to_id.get(args.train_pop, -1)
+        _test_pid  = _pop_name_to_id.get(args.test_pop,  -1)
+        _train_nodes, _test_nodes = [], []
+        for _ind in ts.individuals():
+            _pid = ts.node(_ind.nodes[0]).population
+            if _pid == _train_pid:
+                _train_nodes.extend(_ind.nodes)
+            elif _pid == _test_pid:
+                _test_nodes.extend(_ind.nodes)
+        if _train_nodes and _test_nodes:
+            try:
+                fst_train_test = round(float(ts.Fst(
+                    [_train_nodes, _test_nodes])), 6)
+                print(f"  F_ST ({args.train_pop} vs {args.test_pop}): "
+                      f"{fst_train_test:.4f}", flush=True)
+            except Exception as _e:
+                print(f"  F_ST computation failed: {_e}", flush=True)
     print(f"  {ts.num_individuals} individuals, {ts.num_trees} trees, "
           f"{ts.num_sites} sites", flush=True)
 
@@ -871,6 +965,16 @@ def main():
                 f.write("idx\tpop\n")
                 for i in range(n_test):
                     f.write(f"{i}\tB\n")
+        elif args.demography == "stdpopsim":
+            with open(args.out + ".train.anc.tsv", "w") as f:
+                f.write("idx\tpop\n")
+                for i in range(n_train):
+                    pop = args.train_pop if i < n_train_A else args.test_pop
+                    f.write(f"{i}\t{pop}\n")
+            with open(args.out + ".test.anc.tsv", "w") as f:
+                f.write("idx\tpop\n")
+                for i in range(n_test):
+                    f.write(f"{i}\t{args.test_pop}\n")
     else:
         ts.dump(args.out + ".trees")
         np.savetxt(args.out + ".phen", y, fmt="%.8g")
@@ -951,9 +1055,13 @@ def main():
         "admix_time":       args.admix_time       if args.demography == "admixed" else None,
         "admix_alpha":      args.admix_alpha      if args.demography == "admixed" else None,
         "transfer_split_time": args.transfer_split_time if args.demography == "transfer" else None,
-        "mix_fraction_B":     args.mix_fraction_B     if args.demography == "transfer" else None,
-        "n_train_A":          n_train_A               if args.demography == "transfer" else None,
-        "n_train_B":          n_train_B               if args.demography == "transfer" else None,
+        "mix_fraction_B":     args.mix_fraction_B     if args.demography in ("transfer", "stdpopsim") else None,
+        "n_train_A":          n_train_A               if args.demography in ("transfer", "stdpopsim") else None,
+        "n_train_B":          n_train_B               if args.demography in ("transfer", "stdpopsim") else None,
+        "stdpopsim_model":    args.stdpopsim_model    if args.demography == "stdpopsim" else None,
+        "train_pop":          args.train_pop           if args.demography == "stdpopsim" else None,
+        "test_pop":           args.test_pop            if args.demography == "stdpopsim" else None,
+        "fst_train_test":     fst_train_test,
         "seed":            args.seed,
         "h2_snp_target":   args.h2_snp,
         "h2_arg_target":   args.h2_arg,
