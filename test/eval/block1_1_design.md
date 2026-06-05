@@ -559,3 +559,63 @@ tmux new -s b11v3 -d "
 (A thin `portability_stdpopsim.sh` wrapper around `portability.sh` that
 substitutes `--demography stdpopsim ...` for `--demography transfer ...`
 is needed; write it at launch time.)
+## Block 1.1 v3a — Clustered-architecture cross-ancestry rescue (2026-06-05)
+
+**Question:** v2/v3 used the default diffuse/scattered ws² architecture, where
+SARGENT-W sat a mild drag *below* SARGENT-U. Does a **clustered** truth — active
+ws² concentrated in a few contiguous genomic blocks — make per-tree weighting
+help cross-ancestry (Nurdan's preliminary signal)? Re-ran the transfer ladder at
+**sparse-3-block** architecture (`--ws2-architecture sparse --ws2-block-frac 0.05
+--ws2-block-contrast 1000`: 5% of trees active, 1000× contrast). Grid: 3 F_ST ×
+2 mix × typed 0.70 × 5 seeds = **30/30 cells, 0 failures** (new EMMA binary).
+
+#### Result — r²_calib, mean over 5 seeds (the three SARGENT flavours)
+
+| F_ST | mix | **SARGENT-U** | SARGENT-W | SARGENT-full | W−U | full−U |
+|---|---|---|---|---|---|---|
+| 0.07 | 0.00 | 0.117 | 0.140 | 0.154 | +0.023 | +0.037 |
+| 0.07 | 0.20 | 0.209 | 0.230 | 0.162 | +0.021 | −0.047 |
+| 0.16 | 0.00 | 0.063 | 0.039 | 0.074 | −0.023 | +0.011 |
+| 0.16 | 0.20 | 0.230 | 0.230 | 0.137 | +0.001 | −0.092 |
+| 0.30 | 0.00 | 0.038 | 0.052 | 0.050 | +0.014 | +0.012 |
+| 0.30 | 0.20 | 0.269 | 0.274 | 0.180 | +0.005 | −0.088 |
+
+Pooled (n=30): **W−U = +0.007 ± 0.035**, full−U = −0.028 ± 0.127.
+
+#### Verdict: NEUTRAL — no rescue, but clustering removes the v2 ŵ² drag
+
+- **SARGENT-W ≈ SARGENT-U** (pooled W−U = +0.007 ± 0.035; signs mixed across the
+  grid, all within noise). Per-tree ŵ² confers **no positive cross-pop benefit
+  over uniform even at clustered architecture** — the regime designed to favour
+  it. This is the v2 verdict reproduced (outcome 2, clean negative for a rescue).
+- **But architecture genuinely matters for ŵ².** At matched F_ST the W−U gap
+  moved from clearly *negative* under diffuse (v2: −0.012 / −0.028 / −0.019 at
+  0.07 / 0.16 / 0.30) to ≈ *zero* under clustered (v3a: +0.022 / −0.011 / +0.010
+  averaged over mix). So **clustering removes the per-tree-ŵ² drag** seen in v2 —
+  a real effect that **partially corroborates Nurdan's direction** (clustering
+  lifts ŵ² toward uniform), just not far enough to **beat** uniform. It does not
+  reproduce a positive "clustering helps" if that meant W > U.
+- **SARGENT-full still collapses under target-injection**: full−U = −0.05 to
+  −0.09 at mix=0.20 (the β liability, exactly as v2), and is only ≈neutral at
+  mix=0.00. So β remains a cross-pop liability regardless of architecture.
+- **SARGENT-U remains the cross-population representative** (W ties it; full is
+  worse at injection). Fig 3's cross-ancestry panel stays ARG-BLUP-uniform; a
+  clustered-architecture inset would show ŵ² *catching up to* but not *passing*
+  uniform — an honest "architecture removes the drag" note rather than a rescue.
+
+Per-cell data: `test/eval/block1_1_v3a_results.csv` (`arch=sparse`; arms
+`argunif_*`, `sargentW_*`, `sargent_*`). Driver: `test/eval/portability.sh` with
+`SIM_EXTRA='--ws2-architecture sparse --ws2-block-frac 0.05 --ws2-block-contrast 1000'`
+(F_ST ladder via `SPLITS='1500 3500 7000'`), then `sargent_variants_v2.sh`
+(VARIANTS=W). Honest report; Adam to weigh the v6 framing.
+
+**Inference caveat (important):** the ŵ² fits here used **ridge** regularisation
+(`--ws2-l2 0.5` for the W arm; SARGENT defaults for full), which shrinks ŵ²
+*toward uniform* — so the estimator structurally cannot exploit the clustered
+sparsity in the truth. Clustering was injected into the **simulation** only, not
+matched by a sparse/fused **prior** at inference. The proper test of "does
+clustering help ŵ²" needs a sparsity (`--ws2-l1`) or **fused-lasso**
+(adjacent-tree difference) penalty matched to the sparse-block truth — the fused
+lasso is currently parked (not implemented). So the v3a "W≈U" verdict is
+*conditional on ridge inference*; an L1/fused estimator is the natural **v3b**
+follow-up that could still let W exceed U on clustered truth.

@@ -113,8 +113,10 @@ for split in $SPLITS; do
  # name (no sp${split}_ prefix) so v1 outputs remain resumable. When
  # multiple SPLITS are swept, prefix with sp${split}_ to keep cells
  # separate per F_ST.
- sptag_prefix=""
- if [ "$N_SP" -gt 1 ]; then sptag_prefix="sp${split}_"; fi
+ # Always encode the split in the cell name so single-split instances can run
+ # in parallel without colliding (enables full per-cell parallelism). Legacy
+ # single-split v1/v2 runs used no prefix; they are complete so this is safe.
+ sptag_prefix="sp${split}_"
  for mix in $MIX_FRAC_B; do
   mtag=$(printf "%.2f" "$mix")
   for typed in $TYPED_FRACS; do
