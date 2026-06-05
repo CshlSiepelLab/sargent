@@ -517,6 +517,7 @@ stdpopsim 0.3.0 installed in the `sargent` mamba env.  Models available:
 | OOA_3G09_CEU_YRI_mix05 | OutOfAfrica_3G09 | CEU→YRI mix=0.05 | 0.0986 | 0.1832 |
 | ADM_4B18_EUR_ADMIX | AmericanAdmixture_4B18 | EUR→ADMIX mix=0 | 0.0110 | 0.2285 |
 | ARC_5R19_CEU_YRI | OutOfAfricaArchaicAdmixture_5R19 | CEU→YRI mix=0 | 0.1052 | 0.0175 |
+| ARC_5R19_CEU_Nean1000 | OutOfAfricaArchaicAdmixture_5R19 | CEU→Nean@t=1000gen | 0.3919 | 0.0004 |
 
 Notes:
 - Pure CEU→YRI transfer (mix=0): F_ST≈0.08, prediction near zero — consistent
@@ -526,6 +527,11 @@ Notes:
 - AmericanAdmixture EUR→ADMIX: low F_ST (0.011) as expected; r²_calib 0.23
   at n=100 (European ancestry dominates admixed test cohort).
 - Ragsdale archaic model simulates identically to OOA for modern-pop samples.
+- **Neanderthal probe**: F_ST≈0.39–0.54 (varies with L and seed), well above
+  the modern-human ceiling (~0.15 in Gravel OOA). ARG-BLUP-uni r²_calib≈0
+  as expected — prediction at extreme divergence. Used via
+  `--test-pop Neanderthal --test-pop-time 1000`. Scenario 2 (archaic-ancestry
+  mapping with non-zero `--train-pop-time`) uses the same flags.
 
 ### Planned sweeps (pending authorization)
 

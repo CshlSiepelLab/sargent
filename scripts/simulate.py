@@ -264,6 +264,18 @@ def main():
                          "(only with --demography stdpopsim). "
                          "For admixed-cohort test, use an admixed deme name "
                          "(e.g. 'ADMIX', 'ASW', 'MXL', 'PEL').")
+    ap.add_argument("--train-pop-time", type=float, default=0.0,
+                    help="sampling time in generations before present for train "
+                         "individuals (--demography stdpopsim; default 0 = present). "
+                         "Non-zero enables sampling ancient or archaic haplotypes as "
+                         "training data (scenario 2: archaic-ancestry mapping).")
+    ap.add_argument("--test-pop-time", type=float, default=0.0,
+                    help="sampling time in generations before present for test "
+                         "individuals (--demography stdpopsim; default 0 = present). "
+                         "Set to ~1000 to sample Neanderthal haplotypes near "
+                         "Vindija timing (~28 kya) from OutOfAfricaArchaicAdmixture_5R19; "
+                         "gives F_ST ≈ 0.54 vs CEU, well above the modern-human range. "
+                         "Must be < the population's split/merge time in the model.")
     ap.add_argument("--admix-split-time", type=float, default=4000.0,
                     help="generations since the two source pops split (--demography admixed; "
                          "larger ⇒ stronger structure, F_ST ≈ 1-exp(-T/2Ne))")
@@ -519,22 +531,34 @@ def main():
                 sys.exit(f"ERROR: population {_pn!r} not in {args.stdpopsim_model!r}. "
                          f"Available: {sorted(_pop_names)}")
         # Layout (same convention as transfer):
-        #   [0 .. n_train_A-1]          from train_pop
-        #   [n_train_A .. n_total-1]    from test_pop  (n_train_B + n_test)
-        _sample_spec = {args.train_pop: n_train_A}
+        #   [0 .. n_train_A-1]          from train_pop  (at train_pop_time)
+        #   [n_train_A .. n_total-1]    from test_pop   (at test_pop_time)
+        #
+        # Use msprime.SampleSet unconditionally so non-zero sampling times
+        # work for archaic populations (e.g. Neanderthal@t=1000 gen).
         _n_test_pop = n_train_B + args.n_test
+        _sample_sets = [msprime.SampleSet(
+            n_train_A, population=args.train_pop,
+            time=args.train_pop_time)]
         if _n_test_pop > 0:
-            _sample_spec[args.test_pop] = _n_test_pop
+            _sample_sets.append(msprime.SampleSet(
+                _n_test_pop, population=args.test_pop,
+                time=args.test_pop_time))
         ts = msprime.sim_ancestry(
-            samples=_sample_spec,
+            samples=_sample_sets,
             demography=_sps_model.model,
             sequence_length=args.length,
             recombination_rate=args.recomb_rate,
             random_seed=args.seed,
         )
+        _train_time_str = (f"@t={args.train_pop_time:.0f}gen"
+                           if args.train_pop_time > 0 else "")
+        _test_time_str  = (f"@t={args.test_pop_time:.0f}gen"
+                           if args.test_pop_time  > 0 else "")
         print(f"  stdpopsim {args.stdpopsim_model}: "
-              f"train_pop={args.train_pop} ({n_train_A}), "
-              f"test_pop={args.test_pop} ({_n_test_pop})", flush=True)
+              f"train_pop={args.train_pop}{_train_time_str} ({n_train_A}), "
+              f"test_pop={args.test_pop}{_test_time_str} ({_n_test_pop})",
+              flush=True)
         if n_train_B > 0:
             print(f"  mixed training: {n_train_A} from {args.train_pop} + "
                   f"{n_train_B} from {args.test_pop} "
@@ -1061,6 +1085,8 @@ def main():
         "stdpopsim_model":    args.stdpopsim_model    if args.demography == "stdpopsim" else None,
         "train_pop":          args.train_pop           if args.demography == "stdpopsim" else None,
         "test_pop":           args.test_pop            if args.demography == "stdpopsim" else None,
+        "train_pop_time":     args.train_pop_time      if args.demography == "stdpopsim" else None,
+        "test_pop_time":      args.test_pop_time       if args.demography == "stdpopsim" else None,
         "fst_train_test":     fst_train_test,
         "seed":            args.seed,
         "h2_snp_target":   args.h2_snp,

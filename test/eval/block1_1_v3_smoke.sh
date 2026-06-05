@@ -139,6 +139,17 @@ run_cell "ARC_5R19_CEU_YRI" \
   --stdpopsim-model OutOfAfricaArchaicAdmixture_5R19 \
   --train-pop CEU --test-pop YRI
 
+# ---- Cell 5: Neanderthal extreme F_ST probe (scenario 1) ---------------
+# Samples Neanderthal haplotypes at t=1000 gen (~28 kya, near Vindija)
+# from the Ragsdale archaic model. Expect F_ST ≈ 0.50-0.55 vs CEU.
+# Prediction near chance is expected; this is an infrastructure / F_ST
+# range probe, not a power test.
+run_cell "ARC_5R19_CEU_Nean1000" \
+  --demography stdpopsim \
+  --stdpopsim-model OutOfAfricaArchaicAdmixture_5R19 \
+  --train-pop CEU --test-pop Neanderthal \
+  --test-pop-time 1000
+
 echo
 echo "============================================================"
 echo "Smoke test complete:  PASS=$PASS  FAIL=$FAIL"
