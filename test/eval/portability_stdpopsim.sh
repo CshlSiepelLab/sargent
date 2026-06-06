@@ -31,6 +31,7 @@
 #   SEEDS        space-sep seeds                  ("1 2 3 4 5")
 #   NEAN_TIME    Neanderthal sampling time (gen)  (1000)
 #   SARGENT_EXTRA  extra args to sargent          ("")
+#   NPAR           parallel cells                  (8)
 #
 # Usage:
 #   # Full v3 (all sweeps):
@@ -65,6 +66,7 @@ TYPED_FRACS=${TYPED_FRACS:-"0.7 0.1"}
 SEEDS=${SEEDS:-"1 2 3 4 5"}
 NEAN_TIME=${NEAN_TIME:-1000}
 SARGENT_EXTRA=${SARGENT_EXTRA:-""}
+NPAR=${NPAR:-8}
 
 if [ -n "${PYBIN:-}" ]; then
   PY="$PYBIN"
@@ -139,18 +141,16 @@ echo "  scale  : n_train=$N_TRAIN n_test=$N_TEST L=$LENGTH"
 echo "  trait  : h2_snp=$H2_SNP h2_arg=$H2_ARG causal_frac=$CAUSAL_FRAC"
 echo "  python : $PY"
 echo "  sargent: $SARGENT $SARGENT_EXTRA"
+echo "  parallel: $NPAR workers"
 echo
 
 t_start=$(date +%s)
-cell_n=0
-skipped=0
 
-for entry in "${CELLS[@]}"; do
+# Per-cell worker — called by xargs -P
+run_one_cell() {
+  entry="$1"
   IFS='|' read -r model train_pop test_pop test_time mix typed seed <<< "$entry"
 
-  cell_n=$((cell_n + 1))
-
-  # Short model tag for directory name
   case "$model" in
     OutOfAfrica_3G09)                      mtag="OOA3G09" ;;
     AmericanAdmixture_4B18)                mtag="ADM4B18" ;;
@@ -168,15 +168,13 @@ for entry in "${CELLS[@]}"; do
   mkdir -p "$dir"
 
   if [ -s "$dir/est.predict.json" ]; then
-    echo "[$cell_n/$N_CELLS] SKIP $dir"
-    skipped=$((skipped + 1))
-    continue
+    echo "SKIP  $mtag_full mix=$mix_fmt typed=$typed_fmt seed=$seed"
+    return 0
   fi
 
-  echo "[$cell_n/$N_CELLS] $mtag_full mix=$mix_fmt typed=$typed_fmt seed=$seed"
+  echo "START $mtag_full mix=$mix_fmt typed=$typed_fmt seed=$seed"
   cstart=$(date +%s)
 
-  # Build optional test-pop-time arg
   time_arg=""
   if [ "$test_time" != "0" ] && [ "$test_time" != "0.0" ]; then
     time_arg="--test-pop-time $test_time"
@@ -198,33 +196,38 @@ for entry in "${CELLS[@]}"; do
       --bed-coverage "$typed" \
       --seed "$seed" --out "$dir/case" \
       > "$dir/sim.log" 2>&1 \
-    || { echo "  sim FAILED  →  $dir/sim.log"; tail -6 "$dir/sim.log"; continue; }
+    || { echo "FAIL  $mtag_full s=$seed  sim → $dir/sim.log"; tail -4 "$dir/sim.log"; return 1; }
 
   # 2. sargent
   # shellcheck disable=SC2086
   $SARGENT --silent --nprobe 10 --outroot "$dir/est" $SARGENT_EXTRA \
       "$dir/case.phen" "$dir/case.trees" "$dir/case" \
       > "$dir/sargent.log" 2>&1 \
-    || { echo "  sargent FAILED  →  $dir/sargent.log"; tail -6 "$dir/sargent.log"; continue; }
+    || { echo "FAIL  $mtag_full s=$seed  sargent → $dir/sargent.log"; tail -4 "$dir/sargent.log"; return 1; }
 
   # 3. predict
   $PY "$PRED" \
       --case-prefix "$dir/case" --sargent-prefix "$dir/est" \
       > "$dir/predict.log" 2>&1 \
-    || { echo "  predict FAILED  →  $dir/predict.log"; tail -6 "$dir/predict.log"; continue; }
+    || { echo "FAIL  $mtag_full s=$seed  predict → $dir/predict.log"; tail -4 "$dir/predict.log"; return 1; }
 
   cend=$(date +%s)
-  celapsed=$(( cend - cstart ))
-  total_elapsed=$(( cend - t_start ))
-  done_cells=$(( cell_n - skipped ))
-  avg=$(( done_cells > 0 ? total_elapsed / done_cells : 0 ))
-  eta=$(( (N_CELLS - cell_n) * avg ))
-  printf "    done in %ds  (avg %ds/cell, ETA %dm)\n" \
-    "$celapsed" "$avg" "$(( eta / 60 ))"
-done
+  printf "DONE  %s mix=%s typed=%s seed=%s  (%ds)\n" \
+    "$mtag_full" "$mix_fmt" "$typed_fmt" "$seed" "$(( cend - cstart ))"
+}
 
+export -f run_one_cell
+export BASE PY SIM PRED SARGENT SARGENT_EXTRA \
+       N_TRAIN N_TEST LENGTH H2_SNP H2_ARG CAUSAL_FRAC
+
+printf '%s\n' "${CELLS[@]}" \
+  | xargs -P "$NPAR" -I{} bash -c 'run_one_cell "$@"' _ {}
+
+t_end=$(date +%s)
+DONE=$(ls "$BASE"/*/est.predict.json 2>/dev/null | wc -l | tr -d ' ')
 echo
-echo "All cells processed (${cell_n} total, ${skipped} skipped)."
+echo "All cells dispatched. Completed: $DONE / $N_CELLS"
+echo "Wall time so far: $(( (t_end - t_start) / 60 )) min"
 
 # ---- aggregate -----------------------------------------------------------------
 echo "Aggregating into $BASE/portability_table_v3.md ..."

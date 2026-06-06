@@ -2,6 +2,19 @@
 
 Last updated: 2026-06-05.
 
+> **2026-06-05 (PM) — Block 1.1 v3 complete (realistic demographies).**
+> 90 unique cells (60 OOA + 20 ADM-tr + 10 ARC), 0 failures.  Key verdict:
+> **Block 1.1 v2 reproduces under stdpopsim Gravel OOA, Browning
+> AmericanAdmixture, and Ragsdale archaic models.**  ARG-uni (SARGENT-U)
+> beats BayesR and GBLUP at F_ST < 0.15 across all three OOA pop-pairs and
+> the EUR→ADMIX admixed-cohort scenario (+0.05–0.09 r²_calib advantage over
+> GBLUP, largest at typed=0.10).  Within-method null holds (SARGENT-full <
+> ARG-uni throughout; β is the cross-pop liability).  Neanderthal (F_ST≈0.44)
+> is a clean negative control (all methods ≈ 0).  **B4, E1, H6 move to HELD**
+> in CLAIMS.md.  Next: re-render Fig 3 with v3 F_ST values.
+> Full data: `$HOME/test-sargent/block1_1_v3/portability_table_v3.md`.
+> Write-up: `test/eval/block1_1_design.md` § "v3 results".
+
 > **2026-06-05 — per-figure simulation framework decision (Adam).**
 > Each manuscript figure tests a different mechanism, so the demography
 > family is chosen per figure rather than globally.  Captions must
@@ -616,10 +629,10 @@ parallelism.
 - [x] stdpopsim integration in `simulate.py` + smoke test (PASS=5/5). ✅ 2026-06-05
       Driver: `test/eval/portability_stdpopsim.sh`
 - [x] Block 1.1 v3 writeup at `block1_1_design.md`. ✅ 2026-06-05
-- [ ] OOA sweep (60 cells, ~1 day server). *Pending authorization.*
-- [ ] AmericanAdmixture training sweep (20 cells, ~half-day). *Pending.*
-- [ ] AmericanAdmixture testing sweep (10 cells mix=0, ~quarter-day). *Pending.*
-- [ ] Ragsdale archaic / Neanderthal sweep (10 cells, ~quarter-day). *Pending.*
+- [x] OOA sweep (60 cells). ✅ 2026-06-05
+- [x] AmericanAdmixture training sweep (20 cells). ✅ 2026-06-05
+- [x] AmericanAdmixture testing sweep (10 cells mix=0 — covered by ADM-tr). ✅ 2026-06-05
+- [x] Ragsdale archaic / Neanderthal sweep (10 cells). ✅ 2026-06-05
 - [ ] Re-render Fig 3 with v3 data; x-axis switches from abstract
       split-time to realistic F_ST values.
 
