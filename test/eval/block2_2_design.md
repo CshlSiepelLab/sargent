@@ -523,6 +523,34 @@ Defer until simulation validation is complete. Engineering for biobank
 scale (stochastic trace estimators, CG solves) is well-trodden territory
 but not on the methods-paper critical path.
 
+### Downstream follow-on if A3a lands cleanly: revisit Fig 5 Panel C
+
+The current Fig 5 Panel C (variance-capture curves from Block 2.5.2)
+has an honest but weak story: truth-side separates the three bf regimes
+(0.005 / 0.05 / 0.5) by ~100× in M_e, but estimator-side ŵ² is flat at
+M_e ≈ 12–20 across all regimes — the panel as drawn shows the gap
+without recovering it.  If A3a confirms the multi-component REML engine
+works, two candidate Panel C v2 directions become available:
+
+- **(a) Spatial-bin variance-capture under GREML.**  Partition the
+  genome into ~K coarse spatial bins (50–100 contiguous trees each;
+  finer than annotation but coarser than per-tree).  Build K_b per
+  bin, fit multi-component REML, sort σ̂²_b descending, cumulative-sum
+  → variance-capture curve.  Same conceptual axis as the current
+  panel; identifiable where per-tree ŵ² isn't.  Rerun on Block 2.5.2
+  cells to see if regime separation recovers.
+
+- **(b) Frequency-tertile variance-capture using A3b.**  Reframe the
+  HOW axis from "spatial polygenicity" to "rare-vs-common variance
+  concentration" — variance-capture curves binned by edge DAF instead
+  of by spatial position.  Much more SARGENT-distinctive and tightly
+  coupled to flagships F2/F4; reuses A3b infrastructure once it lands.
+
+**Not blocking v1.**  Gated on A3a feasibility report.  Current Panel C
+stays as fallback.  Decision: post-A3a, pick (a) or (b) (or keep
+current as the honest baseline) based on which produces the cleanest
+story alongside Panel A and Panel B v2.
+
 ### Reproduce (provisional — implementation pending)
 
 ```bash
