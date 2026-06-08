@@ -59,9 +59,20 @@ def run_cell(cell):
     Karg = ka._reference_k_arg(ts, n)
     rel_err = float(np.linalg.norm(Ksum - Karg) / (np.linalg.norm(Karg) + 1e-12))
 
-    # GREML-MS convention: normalise EACH K_b to mean diagonal 1, so σ̂²_b is the
-    # variance explained by bin b and (y standardised) σ̂²_b ≈ h²_b, Σ_b σ̂²_b ≈ total h².
-    Ksn = [K / (float(np.mean(np.diag(K))) or 1.0) for K in Ks]
+    # GREML processing: CENTER each K_b (H K H, H = I - 11ᵀ/n) to remove the
+    # intercept-aligned component, then normalise to mean diagonal 1. Centering
+    # is essential for deep bins: ancient edges' descendant indicators align with
+    # the all-ones vector, which REML projects out — without centering that mass
+    # inflates σ̂²_b (Vp >> Var(y)). After centering, σ̂²_b and h²_b = σ̂²_b/Vp are
+    # clean across all age bins, and this matches centered SNP-GRMs in Acts I-II.
+    def _center(K):
+        rm = K.mean(axis=0, keepdims=True)
+        return K - rm - rm.T + K.mean()
+    Ksn = []
+    for K in Ks:
+        Kc = _center(K)
+        md = float(np.mean(np.diag(Kc)))
+        Ksn.append(Kc / md if md > 0 else Kc)
 
     res = srm.reml_mc(y, Ksn, em_warmup=3, max_iter=200)
     truth = truth_per_bin(cell, q33, q67)
@@ -80,26 +91,26 @@ def main():
 
     rows = []
     print(f"A3a — per-age-bin ARG-REML on {len(cells)} cells\n")
-    print(f"{'cell':>24} {'sumrule':>8} {'sig_rec':>8} {'sig_mid':>8} {'sig_anc':>8} "
+    print(f"{'cell':>24} {'sumrule':>8} {'h2_rec':>8} {'h2_mid':>8} {'h2_anc':>8} "
           f"{'sig_e':>7} {'tot_h2':>7} {'conv':>5}")
     for cell in cells:
         res, truth, rel_err, n = run_cell(cell)
         name = os.path.basename(cell)
         arch = name.rsplit("_s", 1)[0]
         seed = int(name.rsplit("_s", 1)[1])
-        s = res["sigma2"]
-        print(f"{name:>24} {rel_err:>8.1e} {s[0]:>8.3f} {s[1]:>8.3f} {s[2]:>8.3f} "
+        s, h = res["sigma2"], res["h2"]
+        print(f"{name:>24} {rel_err:>8.1e} {h[0]:>8.3f} {h[1]:>8.3f} {h[2]:>8.3f} "
               f"{res['sigma2_e']:>7.3f} {res['total_h2']:>7.3f} {str(res['converged']):>5}")
         for i, b in enumerate(BINS):
             rows.append({"true_arch": arch, "observed_bin": b, "seed": seed,
-                         "sigma2_hat": s[i], "se": res["se"][i],
+                         "h2": h[i], "sigma2_hat": s[i], "se": res["se"][i],
                          "sigma2_e": res["sigma2_e"], "total_h2": res["total_h2"],
                          "truth_per_bin": truth[b], "sumrule_relerr": rel_err})
 
     os.makedirs(os.path.dirname(args.out), exist_ok=True)
     with open(args.out, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=["true_arch", "observed_bin", "seed",
-                                          "sigma2_hat", "se", "sigma2_e", "total_h2",
+                                          "h2", "sigma2_hat", "se", "sigma2_e", "total_h2",
                                           "truth_per_bin", "sumrule_relerr"], delimiter="\t")
         w.writeheader()
         w.writerows(rows)
@@ -107,11 +118,11 @@ def main():
 
     # 3x3 mean sigma2_hat matrix (arch x observed bin) + pass check
     archs = ["age_recent_edges", "age_middle_edges", "age_ancient_edges"]
-    print("\nMean sigma2_hat by (true_arch, observed_bin)  [diagonal should dominate]:")
+    print("\nMean h2_b by (true_arch, observed_bin)  [diagonal should dominate]:")
     print(f"  {'true_arch':>20} {'recent':>9} {'middle':>9} {'ancient':>9}  {'diag-2nd':>9} {'PASS':>5}")
     overall = True
     for ai, a in enumerate(archs):
-        means = {b: np.mean([r["sigma2_hat"] for r in rows
+        means = {b: np.mean([r["h2"] for r in rows
                              if r["true_arch"] == a and r["observed_bin"] == b]) for b in BINS}
         diagb = BINS[ai]
         diag = means[diagb]
