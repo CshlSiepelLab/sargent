@@ -1,6 +1,120 @@
 # SARGENT — Development Roadmap
 
-Last updated: 2026-06-08.
+Last updated: 2026-06-08 (PM).
+
+> **2026-06-08 (PM) — Manuscript pivot: biology-first framing, four flagship
+> findings, stratified GREML as the unifying engine.**
+>
+> Strategic discussion with Adam.  Net trajectory of v6.0–v6.4 was a
+> competently-defended methods paper: variance components (A3),
+> within-pop prediction (B2), polygenicity (D2) all narrowed under
+> triage; cross-ancestry prediction (B4, the surviving headline) is
+> functionally indistinguishable from eGRM / ARG-GRM at the framework
+> level.  Methodological elegance is real (fused-lasso, residual-based
+> ŵ², VI+CG+EMMA+tskit); biological contribution is thin.
+>
+> **Pivot: biology in the lead, method underneath.**  Reframe the
+> manuscript as **"a 4D decomposition of complex-trait variance through
+> evolutionary history, enabled by SARGENT"** — position × time ×
+> population × mechanism.  SARGENT is the engine; per-trait biological
+> findings are the deliverable.  Frame for reviewers: **within-species
+> phylogenetic comparative methods** — Felsenstein-style tree-aware
+> trait analysis, applied at within-species resolution for the first
+> time because ARGs give us the gene tree at every locus.
+>
+> **Unifying engine: Phase C stratified GREML** (committed today,
+> commit `359c695`).  All four flagship findings below are instances of
+> the same estimator (multi-component REML on per-bin K_b) with
+> different per-bin covariates.  The "signal weak per edge / per
+> segment" intuition that motivates the Phase C pivot is what makes
+> biology-first viable: coarser bins indexed by *evolutionary
+> covariates* are statistically tractable where per-edge / per-tree
+> attribution isn't.
+>
+> **Four flagship findings (Adam-prioritized 2026-06-08 PM)**:
+>
+> 1. **(F1) Cross-ancestry PRS failure has an evolutionary signature**
+>    — population-stratified GREML (Phase C **A3c**) decomposes the
+>    cross-pop PRS gap into shared-ancestral vs population-specific
+>    branch contributions.  Mechanistically explains Block 1.1 v3
+>    headline.  No SNP/summary-stats method produces this attribution.
+>    *Highest priority.*
+>
+> 2. **(F2) Trait heritability is age-stratified, and the
+>    stratification differs across traits** — age-stratified GREML
+>    (Phase C **A3a**) on a real-trait panel reveals distinct
+>    age × h² profiles: anthropometric → bottom-heavy in deep
+>    branches; immune / pigmentation / lactase persistence →
+>    top-heavy in recent population-specific branches.  First
+>    per-trait readout of long-term vs recent selection on complex
+>    traits at scale.  *Second priority.*
+>
+> 3. **(F4) Missing heritability lives in identifiable evolutionary
+>    compartments** — frequency-stratified GREML (Phase C **A3b**)
+>    plus the MAF-stratified-typing arm of Acts I-II (Regime 3)
+>    localize the WGS-vs-typed h² gap to specific branch classes
+>    (recent, short, rare-DAF, population-specific).  Turns
+>    "missing heritability" from a search problem into an attribution
+>    problem.  *Third priority.*
+>
+> 4. **(F3) Polygenic adaptation leaves a per-branch h² signature,
+>    trait by trait** — cross-product analysis on top of A3a + A3c
+>    outputs: test correlation of per-bin σ²_b with per-bin coalescent
+>    rate / branch-length distribution / population specificity.
+>    Trait-specific signal sidesteps the stratification confounds of
+>    Berg-Coop / Sohail-style summary-stats approaches (branch
+>    identity *is* the population label).  Highest variance, biggest
+>    if it lands.  *Lowest priority; new* [Block 2.8].
+>
+> **Two-stage publication plan PRESERVED** (per Adam 2026-06-08 PM),
+> with the biology-first reframe redistributing what lands when:
+>
+> - **bioRxiv v1 (~6-8 weeks)**: **all four flagships demonstrated
+>   in-silico**, anchored by the Phase C Acts I-II + III validation
+>   arc.  Real-data section limited to the existing plan: 1 well-
+>   characterized selection sweep locus (Block 1.4b limited) plus
+>   ranked-edge / per-population descriptive readouts on Block 1.1
+>   v3 data.  Manuscript message: "here are four readouts of complex-
+>   trait architecture no SNP-based method can produce; we validate
+>   each in-silico and demonstrate at one locus".  Same wall-clock
+>   target as the previous v6.3 plan — Phase C is cheaper than the
+>   per-edge regression apparatus it replaces, and the four flagships
+>   are repackaging of work already in flight.
+> - **Journal v2 (~3-4 months)**: **real-data deployment of F1 + F2**
+>   on AoU or comparable biobank cohort.  F1 = cross-ancestry
+>   mechanism for one or a few well-characterized traits (height,
+>   LDL, etc.); F2 = age × h² profiles across a multi-trait panel
+>   (the "trait architecture catalog" deliverable).  F4 real-data
+>   extension is v2 stretch.  F3 deferred to follow-up paper unless
+>   in-silico signal is exceptionally clean.
+>
+> **Plan consequences**:
+>
+> - **Block 2.1** (allele-age decomposition) — superseded by Phase C
+>   **A3a**.  Per-tree-ws²-weighted bin score was the precursor;
+>   stratified GREML is the manuscript-grade estimator.  Simulation
+>   infrastructure carries over; the standalone Block 2.1 estimator is
+>   not the inferential primitive any longer.
+> - **Block 2.2 Phase C** — the unified engine.  Committed three-Act
+>   arc (Acts I-II SNP-REML calibration; Act III A3a + A3b + A3c) is
+>   preserved verbatim; this entry only reframes its role from
+>   "partitioned-h² for Fig 5 Panel A" to "engine for the four
+>   flagship findings".
+> - **Block 1.4** (real-data on AoU) — flagship-prioritized for the
+>   v2 journal arm: F1 first, F2 second, F4 third, F3 deferred.
+>   Block 1.4b limited (1-locus showcase) stays in v1 bioRxiv.
+> - **Block 2.7.1** (per-edge posterior) — descriptive Manhattan-with-
+>   edges visualization for top-K hypothesis generation only.  Not
+>   the inferential primitive for any per-bin claim.
+> - **New Block 2.8** — Polygenic-adaptation signature (F3).  Gated on
+>   A3a + A3c landing in-silico; design after both report.  In-silico
+>   F3 stays in v1 bioRxiv if it lands cleanly; real-data F3 is
+>   follow-up.
+>
+> **Title implication**: see REFRAME_NOTES v6.6 (2026-06-08 PM); a
+> fifth title candidate is added that leads with the biological
+> framing ("evolutionary architecture of complex traits") and
+> demotes SARGENT to the subtitle.
 
 > **2026-06-08 — Block 2.2 Phase C pivot: direct stratified GREML on per-bin
 > ARG kinship.** After three failed attempts to make per-edge attribution
@@ -901,7 +1015,20 @@ Strategic frame (2026-05-30 brainstorm):
 
 Ordered by SARGENT-native differentiation:
 
-#### Block 2.1 — Allele-age decomposition (highest priority)
+#### Block 2.1 — Allele-age decomposition — ↺ FOLDED INTO BLOCK 2.2 PHASE C A3a (2026-06-08 PM)
+
+**Status (2026-06-08 PM)**: superseded as a standalone estimator by
+**Block 2.2 Phase C A3a** (stratified GREML on age tertile bins).
+The biological question (per-trait age × h² profile, = flagship **F2**)
+is unchanged and central to the biology-first reframe; only the
+estimator changes from per-tree-ws²-weighted bin score to multi-
+component REML on K_age-bin matrices.  Simulation infrastructure (per-
+edge age-stratified architectures in `simulate.py`) carries over to
+A3a unmodified.  See the 2026-06-08 PM top-of-file entry.
+
+(Original Block 2.1 design preserved below for traceability.)
+
+---
 
 **Goal**: partition h² by causal-variant age, using per-branch ages from
 the ARG. No existing method does this cleanly (MAF-stratified GREML / GREML-LDMS
@@ -1486,24 +1613,118 @@ Ragsdale archaic sweep landing.**
 distribution) + 2.7.3 (pop-specific vs shared).  Defer 2.7.4–2.7.6
 to follow-up unless quick wins emerge.
 
-### Block 3 — Manuscript rework (TWO-STAGE submission per 2026-06-04 PM)
+#### Block 2.8 — Polygenic-adaptation signature (NEW 2026-06-08 PM)
+
+**Status (2026-06-08 PM)**: design placeholder for flagship **F3**.
+Gated on Block 2.2 Phase C **A3a** (age) and **A3c** (population)
+landing in-silico.  Design pass after both report.
+
+**Goal**: per trait, test whether the per-bin σ²_b distribution from
+stratified GREML carries a signature of polygenic adaptation.
+Concretely: test correlation of σ²_b with per-bin evolutionary
+covariates that proxy selection — coalescent rate (rapid lineage
+turnover under positive selection), mean branch length (shortness
+under purifying or recent positive selection), population specificity
+(post-split branches under directional selection in one population).
+A significant per-trait signal is direct evidence for polygenic
+selection on that trait, *without* the stratification confounds that
+have bedeviled summary-stats approaches (Berg & Coop 2014, Sohail et
+al. 2019, Berg et al. 2019, O'Connor et al. 2019) — because branch
+identity *is* the population label.
+
+**Why this is novel vs A3c alone**: A3c (per-population stratified
+GREML) answers "how much of trait X's h² lives on pop-specific
+branches?".  Block 2.8 asks the next question: "is the per-bin h²
+distribution *predicted* by branch-level evolutionary statistics in
+a way that distinguishes selected from neutral traits?".  The first
+is a decomposition; the second is a hypothesis test on the
+decomposition.
+
+**Test design (provisional)**:
+
+- Inputs: per-trait σ̂²_b vector from A3a (across age tertiles) and
+  A3c (across population labels); per-bin coalescent-rate /
+  branch-length / pop-specificity statistics computed from the same
+  tree sequence + bin assignments.
+- Null: σ²_b independent of branch covariates within their bin (h²
+  proportional to branch material, no selection-coupled enrichment).
+- Test: weighted regression of σ̂²_b on covariates; bootstrap CIs over
+  trees; per-trait p-value with multiple-testing correction over the
+  trait panel.
+- Calibration: simulated neutral traits should show no signal;
+  simulated traits under polygenic selection on subsets of branches
+  should show signal in the corresponding bins.
+
+**Manuscript role (bioRxiv vs journal)**:
+
+- bioRxiv v1: in-silico signal demonstration on 2–3 simulated trait
+  architectures (neutral / selection-on-recent / selection-on-pop-
+  specific).  Goes in only if signal cleanly distinguishes the three;
+  otherwise deferred to v2 or follow-up.
+- Journal v2: real-trait application (height as headline; immune /
+  pigmentation traits as positive controls expected to show signal;
+  one trait as expected-neutral negative control).
+- Follow-up paper: trait-panel scan + biological synthesis.
+
+**Status: NO IMPLEMENTATION YET.**  Block 2.8 opens for design only
+after Phase C A3a and A3c report.  Cost estimate (post-A3c): ~1 week
+analysis + ~1 week write-up if simulation calibrations exist; longer
+if new simulation architectures are needed.
+
+### Block 3 — Manuscript rework (TWO-STAGE submission per 2026-06-04 PM, biology-first reframe 2026-06-08 PM)
 
 **Stage 1 — bioRxiv preprint (v1; target ~6–8 weeks from now)**:
-sims-only manuscript (Blocks 1.1 v2 + v3a + v3, 1.2, 2.1, 2.5, 2.6,
-2.7) **plus a limited real-data showcase** at 1 well-characterised
-selection sweep locus (Block 1.4b limited).  Validates the per-edge
-Δh² methodology against external biology while preserving a tight
-preprint timeline.  The limited real-data section is explicitly flagged
-as a representative demonstration with the full multi-trait analysis
-forthcoming.
+**all four flagship findings demonstrated in-silico** under the
+biology-first reframe (2026-06-08 PM top-of-file entry).  Concretely:
+
+- **F1 in-silico**: A3c (population-stratified GREML) on Block 1.1
+  v3 cells decomposes cross-pop PRS gap into shared vs population-
+  specific branch contributions.
+- **F2 in-silico**: A3a (age-stratified GREML) on existing Fig 5
+  Panel B per-edge architecture cells recovers the age × h² diagonal.
+- **F4 in-silico**: A3b (frequency-stratified GREML) + Acts I-II
+  Regime 3 (MAF-stratified typing) show the WGS-vs-typed h² gap
+  localized to specific branch classes.
+- **F3 in-silico (conditional)**: Block 2.8 polygenic-adaptation
+  signature in v1 if 2–3-architecture calibration cleanly
+  distinguishes neutral / selection-on-recent / selection-on-pop-
+  specific; otherwise deferred to v2.
+- **Limited real-data showcase**: 1 well-characterized selection
+  sweep locus (Block 1.4b limited) + ranked-edge / per-population
+  descriptive readouts on Block 1.1 v3 data — anchors the in-silico
+  arc with a biological example.
+
+Underlying machinery: Blocks 1.1 v2 + v3a + v3, 1.2, 2.2 Phase C
+(Acts I-II + A3a + A3b + A3c), 2.5, 2.6, 2.7.1–2.7.3 + 2.8
+conditional.  Block 2.1 superseded by A3a.  Same wall-clock target
+as the previous v6.3 plan (Phase C is cheaper than the per-edge
+regression apparatus it replaces; the biology-first reframe is
+mostly repackaging rather than new work).
 
 **Stage 2 — journal submission (v2; ~3–4 months from now)**: bioRxiv
-content + **full Block 1.4a Option B** (multi-trait cross-ancestry
-PRS validation with per-population Δh² mechanism) + **extended Block
-1.4b** (3-locus per-edge showcase).  Real-data section becomes a full
-Results subsection; methodological self-reinforcement between Option B
-(predictive performance) and Option D (mechanistic locus-level
-validation).
+content + **real-data deployment of F1 + F2** as the headline
+additions, sequenced by flagship priority:
+
+- **F1 real-data**: cross-ancestry mechanism for 1 (height) or a
+  few well-characterized traits on AoU or comparable cohort.  Builds
+  on **full Block 1.4a Option B** (multi-trait cross-ancestry PRS
+  validation), now with the per-population Δh² mechanism interpretation
+  attached.
+- **F2 real-data**: age × h² profiles across a multi-trait panel —
+  the "trait architecture catalog" deliverable.  Anthropometric (deep
+  bottom-heavy) vs immune / pigmentation / lactase (top-heavy in
+  recent population-specific) as the headline contrast.
+- **F4 real-data extension**: stretch — frequency-stratified h² on
+  the same biobank cohort, scoped if time permits.
+- **F3 real-data**: deferred to follow-up paper unless in-silico
+  signal exceptionally clean.
+- **Extended Block 1.4b**: 3-locus per-edge showcase, as in v6.3 plan.
+
+Real-data section becomes the headline Results subsection; the
+in-silico arc moves to Methods + supplementary validation.
+Methodological self-reinforcement between F1 (cross-ancestry
+mechanism) and Option B (predictive performance) provides
+predictive-power + mechanism-evidence pairing within the same trait.
 
 Adam-led; the two stages share the same overall section structure,
 with the Real-data Validation subsection growing between v1 and v2.
