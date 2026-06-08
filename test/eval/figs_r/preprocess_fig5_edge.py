@@ -34,16 +34,38 @@ EVAL_DIR   = os.path.dirname(SCRIPT_DIR)
 CACHE      = os.path.join(SCRIPT_DIR, "_cache")
 os.makedirs(CACHE, exist_ok=True)
 
-AGE_EDGES  = [0.0, 5_000.0, 20_000.0, np.inf]
 AGE_LABELS = ["recent", "middle", "ancient"]
 
 
-def bin_age(mid):
-    for i, label in enumerate(AGE_LABELS):
-        lo, hi = AGE_EDGES[i], AGE_EDGES[i + 1]
-        if lo <= mid < hi:
-            return label
-    return AGE_LABELS[-1]
+def per_cell_tertiles(ts):
+    """Compute per-cell tertile cutoffs (q33, q67) over the edge-midpoint
+    distribution.  Matches the simulator's build_ws2_architecture
+    convention for age_*_edges so truth and estimator are binned on the
+    same axis.
+
+    Returns (q33, q67).
+    """
+    import tskit
+    nt = ts.tables.nodes.time
+    mids = []
+    for tree in ts.trees():
+        for u in tree.nodes():
+            p = tree.parent(u)
+            if p == tskit.NULL:
+                continue
+            mids.append(0.5 * (float(nt[p]) + float(nt[u])))
+    mids = np.asarray(mids, dtype=float)
+    if mids.size == 0:
+        return 5_000.0, 20_000.0
+    return float(np.nanpercentile(mids, 33.33)), float(np.nanpercentile(mids, 66.67))
+
+
+def bin_age_quantile(mid, q33, q67):
+    if mid <= q33:
+        return "recent"
+    if mid <= q67:
+        return "middle"
+    return "ancient"
 
 
 def main():
@@ -94,17 +116,20 @@ def main():
                 print(f"  FAIL: {r.stderr.decode()[:200]}", file=sys.stderr)
                 continue
 
-        # Read per-edge data and aggregate
+        # Per-cell tertile cutoffs from this cell's tree sequence
+        import tskit
+        ts = tskit.load(case + ".trees")
+        q33, q67 = per_cell_tertiles(ts)
+
+        # Read per-edge data and aggregate using per-cell tertiles
         per_bin = {b: {"dh2_total": 0.0, "dh2_arg": 0.0, "dh2_snp": 0.0}
                    for b in AGE_LABELS}
         with open(edge_tsv) as f:
             rd = csv.DictReader(f, delimiter="\t")
             for row in rd:
-                age = 0.5 * (float(row["child_age"]) +
-                             float(row["child_age"]) + 2 * float(row["length"]) / 2.0)
                 # midpoint = child_age + length/2 (parent_age = child_age + length)
                 age = float(row["child_age"]) + 0.5 * float(row["length"])
-                b   = bin_age(age)
+                b   = bin_age_quantile(age, q33, q67)
                 per_bin[b]["dh2_total"] += float(row["dh2_total"])
                 per_bin[b]["dh2_arg"]   += float(row["dh2_arg"])
                 per_bin[b]["dh2_snp"]   += float(row["dh2_snp"])
@@ -122,7 +147,8 @@ def main():
                 "dh2_total_norm":    (per_bin[b]["dh2_total"] / total) if total > 0 else 0.0,
             })
 
-        # Truth-side per-bin sums (from .true_ws2_per_edge.tsv)
+        # Truth-side per-bin sums (from .true_ws2_per_edge.tsv) using the
+        # same per-cell tertile cutoffs
         truth_path = os.path.join(cell, "case.true_ws2_per_edge.tsv")
         if os.path.exists(truth_path):
             truth_data = np.loadtxt(truth_path, skiprows=1, ndmin=2)
@@ -131,7 +157,7 @@ def main():
             ell        = truth_data[:, 4]
             truth_per_bin = {b: 0.0 for b in AGE_LABELS}
             for i, m in enumerate(mids):
-                truth_per_bin[bin_age(float(m))] += ws2_e[i] * ell[i]
+                truth_per_bin[bin_age_quantile(float(m), q33, q67)] += ws2_e[i] * ell[i]
             t_total = sum(truth_per_bin.values())
             for b in AGE_LABELS:
                 out_truth_rows.append({

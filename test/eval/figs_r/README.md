@@ -23,10 +23,23 @@ the parent `test/eval/`).
 - `fig4.R` — localization headline, 4 panels (Manhattan / variance
   capture / AUC across architectures / fused-lasso polygenic-vs-
   oligogenic).  Reads cache TSVs built by `preprocess_fig4.py`.
-- `fig5.R` — architecture characterization (placeholder Panel A
-  pending Block 2.2; Panels B = WHEN axis from Block 2.1 v2 data; C =
-  HOW axis variance-capture curves from Block 2.5.2).  Reads cache TSVs
-  built by `preprocess_fig5.py`.
+- `fig5.R` — architecture characterization.
+  - **Panel A** (WHERE / partitioned-h²): was dropped after Block 2.2
+    Phase B negative verdict (2026-06-04); **provisionally returns under
+    Block 2.2 Phase C** (stratified GREML vs SNP-REML on functional
+    annotations; design at `test/eval/block2_2_design.md` § Phase C
+    Acts I-II).  Pending Phase C implementation.
+  - **Panel B** (WHEN axis): pivoted 2026-06-08 from per-edge posterior
+    (collapses to ancient bin under ℓ² × descendant-count scaling) to
+    **stratified GREML on age tertile bins** (Phase C Act III A3a).
+    Re-uses the existing 9-cell per-edge architecture sweep; replaces
+    `preprocess_fig5_edge.py` per-edge posterior aggregation with a
+    multi-component REML σ̂²_b recovery.  Pending Phase C engine.
+  - **Panel C** (HOW axis variance-capture curves from Block 2.5.2):
+    unchanged.
+  Reads cache TSVs built by `preprocess_fig5.py` (existing Panel C path)
+  + `preprocess_fig5_edge.py` (Panel B per-edge cache — to be replaced
+  by Phase C stratified-REML cache once implemented).
 - `preprocess_fig4.py` — emits `_cache/fig4_panel{A,B,C,D}.tsv` from
   case + est files (uses tskit for tree midpoints in Panel A).
 - `preprocess_fig5.py` — emits `_cache/fig5_panel{B,C}.tsv` from the

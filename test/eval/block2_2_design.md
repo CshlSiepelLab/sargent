@@ -246,3 +246,300 @@ $PYBIN test/eval/arg_ldsc.py --case-prefix $BASE/case --trees $BASE/case.trees \
   --est-prefix $BASE/est_B --out $BASE/est
 # localization diagnostic (corr ŵ² vs true per-tree variance): /tmp/b22_short.sh
 ```
+
+---
+
+## Phase C — Direct stratified GREML on per-bin ARG kinship (2026-06-08 pivot)
+
+**Method change.** Phase B failed because it relied on **ŵ²-then-regress**:
+SARGENT estimated a per-segment variance ŵ²_s, and per-annotation h² was
+recovered via per-base regression of ŵ²_s on annotation coverage. The
+mechanism that broke it (`corr(ŵ², true per-tree var) ≈ 0`) was not a coding
+bug — it is a structural property of per-tree variance estimation under
+adjacent-tree collinearity, and the ŵ²-ℓ2 regulariser that fixes the
+ill-conditioning destroys the localization that the regression needs.
+
+**Phase C bypasses ŵ² entirely.** Instead of estimating per-segment
+variances and aggregating them, we partition **edges** by annotation
+directly, build one ARG-kinship matrix per bin, and fit a **multi-component
+REML** for the per-bin variance components. Standard machinery (Yang et al.
+2011 GREML-MS, Speed et al. 2017 LDAK-Cat, GCTA `--reml --mgrm`), exact ML
+under the model, no per-tree intermediate.
+
+### Why this avoids the Phase B failure
+
+Phase B asked the data to do something it cannot: localize each tree's
+contribution to phenotype variance. With adjacent trees sharing >99% of
+genealogy, the per-tree variances are jointly ill-conditioned — the
+estimator can identify *sums* across nearby trees but not the trees
+individually.
+
+Phase C asks a strictly easier question: identify variance components
+across **partitions of edges** that are aggregated *before* estimation.
+K_b = Σ_{e ∈ bin_b} (ℓ_e/2)·m_e·m_eᵀ is exact, deterministic, and well-
+conditioned as long as the bins are chunky enough that K_b's eigenstructure
+is well-separated from the other K_b'. The estimator is the standard
+multi-component REML — the same one used by every published partitioned-
+heritability method. It does not need ŵ² to localize; it does not need
+per-tree resolution at all.
+
+| | Phase B (regression on ŵ²) | Phase C (direct stratified REML) |
+|---|---|---|
+| Per-segment variance estimate needed? | **Yes** — ŵ²_s must localize | **No** — bypass entirely |
+| Per-bin kinship K_b | Implicit (via regression) | **Explicit** (sum over edges) |
+| Estimator | OLS regression of ŵ² on annotation coverage | Multi-component REML on (K_1, …, K_K) |
+| Identifiability | Collinear (Phase B failure) | Well-posed for chunky bins |
+| Literature precedent | None | Yang/Speed multi-component GREML |
+
+### Validation strategy: simulation first, real data deferred
+
+The new method needs careful in-silico validation before any real-data
+application. We validate against **SNP-stratified REML** (not S-LDSC):
+same statistical machinery (REML), same data requirements (individual-
+level), same sample-size regime (n ≥ 200 works). The only thing differing
+between SNP-REML and ARG-REML is how K_b is constructed — from typed
+genotypes vs from ARG edges. Any gap is attributable to feature space, not
+to estimator differences.
+
+S-LDSC is parked as a future comparison once we deploy at biobank n; in our
+n ≤ 1000 sim regime its asymptotic regression is too noisy to be a fair
+calibration partner.
+
+### Two-act experimental arc
+
+**Act I (Acts I-II) — Validation against SNP-stratified REML** (calibration
++ gap-opening + bias-correction story; site-level annotations).
+
+**Act III — ARG-distinctive evolutionary annotations** (age, frequency,
+population; only-ARG-can-do).
+
+Acts I and II share data (one annotated sim + one estimator pipeline, three
+typing regimes). Act III is three separate sub-experiments.
+
+### Acts I-II: three regimes against SNP-stratified REML
+
+All three regimes use one simulation framework (`simulate.py
+--annotation-genes`, already in place from Phase A) with three different
+**typed-SNP panel ascertainment** policies. Causal variants and per-
+annotation h² truth are fixed across regimes; only the typed/untyped split
+moves.
+
+#### Regime 1 — Full typing (concordance)
+
+- **Typed panel**: every causal variant present.
+- **Prediction**: SNP-REML and ARG-REML give the same σ²_b per annotation.
+- **Pass criterion**: per-bin |σ²_b,SNP − σ²_b,ARG| < 0.05 (averaged over
+  seeds), for every annotation.
+- **Message**: under the conditions where SNP-REML is well-specified,
+  ARG-REML recovers the same answer. *No statistical loss from changing
+  the feature space.*
+
+#### Regime 2 — Partial typing (gap-opening)
+
+- **Typed panel**: random 50% of variants typed (no AF correlation —
+  isolates the feature-coverage axis from the AF-bias axis).
+- **Prediction**: SNP-REML under-estimates total h²; per-annotation
+  estimates compressed toward zero. ARG-REML recovers full truth (uses
+  all variation).
+- **Pass criterion**: ARG-REML closer to truth than SNP-REML on all
+  annotations; mean gap on the rare-enriched annotation ≥ 0.10.
+- **Message**: as soon as typed coverage is incomplete, ARG-REML captures
+  heritability SNP-REML cannot see.
+
+#### Regime 3 — MAF-stratified typing (bias-correction)
+
+- **Typed panel**: variants typed iff MAF ≥ 5% (array-like ascertainment).
+- **Prediction**: SNP-REML *mis-allocates* — over-estimates annotations
+  with low rare-variant load (intergenic) by absorbing common-only
+  signal, under-estimates annotations enriched for rare variants
+  (exon/LoF-like). ARG-REML unbiased on both.
+- **Pass criterion**: sign of bias error opposite between enriched and
+  unenriched annotations in SNP-REML; ARG-REML unbiased within sim
+  noise (|bias| < 0.05).
+- **Message**: SNP-REML partitioned-h² estimates are not just under-
+  powered for rare-enriched annotations — they're systematically *mis-
+  allocated*. ARG-REML fixes the bias, not just the variance.
+
+#### Act I/II simulation parameters (provisional)
+
+- n = 400, L = 5 Mb (matches Phase A reference sim; tractable REML).
+- Annotation model: gene-structured (`--annotation-genes`); exon
+  τ_e = 10, promoter τ_p ≈ 3.3, intergenic baseline (existing Phase A
+  defaults).
+- h² split: total h² = 0.5; per-annotation h² truth from
+  `params.json:h2_by_annotation`.
+- Seeds per regime: 5 (enough for SE on h² estimates with σ ≈ 0.03).
+- 3 regimes × 5 seeds = **15 cells per Acts I-II**.
+
+#### Site-to-edge annotation mapping
+
+For site-level (genomic) annotations like exon/promoter, each ARG edge
+carries 0 or more mutations, each at a specific genomic position with a
+specific annotation. Mapping choice: **per-mutation rank-1
+decomposition** — each mutation contributes one rank-1 kinship piece
+(ℓ_e/2)·m_e·m_eᵀ to the bin of its annotation; edges with mutations in
+multiple annotations contribute proportionally to each bin's K_b.
+
+This is the cleanest mapping (each *mutation* sits in exactly one
+annotation, just as S-LDSC and SNP-REML are per-mutation). It also
+reduces to SNP-REML in the limit where every mutation is typed: the same
+K_b assembled from the same mutations gives the same kinship matrix.
+
+(Rejected: edge-majority assignment, which is ambiguous for edges with
+mutations in multiple annotations; edge-weight = annotation-fraction,
+which double-counts via shared edges.)
+
+### Act III: ARG-distinctive evolutionary annotations
+
+Three sub-experiments, each on its own simulation framework. Each tests
+whether ARG-REML recovers a per-bin h² diagonal under a per-bin
+architecture — the same recovery test as Fig 5 Panel B Phase B, but with
+the stratified-REML aggregation instead of the per-edge posterior.
+
+#### A3a — Allele age (edge midpoint age)
+
+- **Simulation**: per-edge architectures with per-cell tertile age bins —
+  **reuse the existing Fig 5 Panel B sims** (9 cells, n=300, L=200kb,
+  3 archs × 3 seeds). No new simulations needed.
+- **Estimator**: ARG-REML with K_recent / K_middle / K_ancient built from
+  edges in each age tertile.
+- **Pass criterion**: per-bin σ̂²_b matches simulated h² diagonal; per-cell
+  total h² ≥ 0.5 (i.e., method recovers the bulk of h² even when
+  architecture is per-edge — the failure mode of the per-edge posterior
+  in Phase B was missing total h², not just mis-allocation).
+- **Headline plot**: Fig 5 Panel B redo with a recovered diagonal.
+
+#### A3b — Allele frequency (edge DAF)
+
+- **Simulation**: new sweep, per-AF-bin architectures. Causal effects
+  concentrated in edges with DAF in [0, 5%], [5%, 25%], [25%, 50%]
+  respectively, three architectures.
+- Suggested parameters: n=400, L=300 kb, 3 archs × 3 seeds = 9 cells.
+- **Estimator**: ARG-REML with K_rare / K_low / K_common built from
+  edges by descendant count.
+- **Pass criterion**: per-bin σ̂²_b matches diagonal; **bonus**: head-
+  to-head against SNP-REML on AF-binned typed genotypes — ARG-REML
+  should outperform on the rare bin (rare variants partly untyped).
+- **Headline plot**: per-AF-bin σ̂²_b recovery, ARG vs SNP.
+
+#### A3c — Population identity (per-edge population label)
+
+- **Simulation**: multi-population sim, e.g., 2-pop split or OOA-style.
+  Reuse Block 1.1 v3 cells, or new stdpopsim cells if Block 1.1's are not
+  per-edge-annotated.
+- Suggested parameters: n=400 admixed, OOA or 2-pop with admixture pulse;
+  edges labeled by descendant population. Causal effects in three bins:
+  pre-split shared, post-split pop-A, post-split pop-B.
+- **Estimator**: ARG-REML with K_shared / K_popA / K_popB built from
+  edges by population assignment.
+- **Pass criterion**: per-bin σ̂²_b matches diagonal; per-population h²
+  recovery aligns with cross-ancestry portability findings from Block
+  1.1 (shared variance portable; pop-specific variance not).
+- **Headline plot**: per-population σ̂²_b recovery; ties back to Fig 6
+  (cross-ancestry portability) with a mechanistic decomposition.
+
+### Engineering checklist
+
+Code that exists and we can reuse:
+- `simulate.py --annotation-genes` (Phase A, verified).
+- Per-edge streaming (used by `edge_h2.py`).
+- Per-tree REML EM (`predict.py`).
+- Phase B's `partition_lib.py` — site→edge mapping primitives (the
+  mapping itself is reusable; the regression-on-ŵ² wrapper is not).
+
+New code to write:
+- **Multi-component REML** (in-house, or wrap GCTA). In-house first for
+  control; GCTA wrapper added for review-defensibility.
+  - Inputs: list of K_b matrices (as dense or as edge-stream specs), y, X.
+  - Outputs: σ²_ε, σ²_1...σ²_K with REML log-lik and per-component SE.
+  - Use AI-REML (average information) for efficiency at small K.
+- **K_b assembly from edge stream + annotation lookup**. For site
+  annotations: per-mutation iteration with site→annotation lookup. For
+  evolutionary annotations: per-edge property (age, descendant count,
+  population label) computed during the same edge pass.
+- **SNP-REML head-to-head wrapper**. Build K_b,SNP from typed
+  genotypes restricted to annotation b; same multi-component REML
+  engine.
+- **Aggregator** (`aggregate_b22c.py`) — tidy CSV across regimes/seeds
+  with columns: `regime, annotation, true_h2, est_h2_ARG, est_h2_SNP,
+  estimator_se, seed`.
+
+Estimated implementation work: ~3–5 days of coding + validation.
+
+### Pass/fail criteria summary
+
+Acts I-II all pass → Phase C validated against SNP-REML on site
+annotations. Greenlight Act III.
+
+Act III all pass → manuscript-ready partitioned-h² framework with
+ARG-distinctive evolutionary annotations.
+
+Any fail mode triggers a write-up + diagnostic before the next regime.
+
+### Open risks
+
+- **Multi-component REML at n=400, K=3 may be under-powered.** σ²_b
+  estimates can have SE ~0.05–0.10 per bin. Mitigation: 5+ seeds per
+  cell, and report mean ± SE not point estimates. If still noisy, scale
+  to n=1000.
+- **Site-to-edge mapping has subtleties.** Mutations on the same edge in
+  different annotations split the edge's kinship contribution across
+  bins — fine in principle, but the resulting K_b are sums of *fractional*
+  rank-1 pieces, which is numerically unusual. Validate by sanity-
+  checking that Σ_b K_b = K_ARG (total ARG kinship) within numerical
+  tolerance.
+- **Population-edge assignment is tree-by-tree.** An edge may have
+  descendants in multiple populations (admixture, incomplete sorting).
+  Mapping choice: weight edge contribution to K_b by fraction of
+  descendants in population b. Validate that this aggregates sensibly.
+- **REML convergence with shrinkage near zero.** When a bin's true σ²_b
+  is small, REML can hit the σ² ≥ 0 boundary and report 0. Standard
+  fix: report unconstrained estimates alongside constrained for
+  diagnostic clarity.
+
+### Suggested implementation order
+
+1. **Prototype A3a (age) first** — reuses existing Fig 5 Panel B sims, no
+   new simulation needed. Smallest engineering ask. Tests the
+   multi-component REML on a known-architecture per-edge sim. Sanity
+   check: does ARG-REML recover the diagonal that the per-edge posterior
+   couldn't? If yes, framework validated; if no, the new method shares
+   Phase B's failure mode and we need to diagnose.
+2. **Acts I-II validation against SNP-REML** — builds the calibration
+   arc with the multi-component REML now known to work.
+3. **A3b (frequency)** — new simulations, modest engineering.
+4. **A3c (population)** — adapts multi-population sims; bridges to
+   Block 1.1 / Fig 6.
+
+Total Phase C effort: ~2–3 weeks of implementation + sweeps. Lighter than
+Phase B's regression apparatus, because the estimator is standard
+multi-component REML rather than a custom regression-on-ŵ² pipeline.
+
+### Real data: explicitly deferred
+
+Once Phase C passes in-silico validation across Acts I-II and III, a
+real-data deployment (UK Biobank, AllOfUs) becomes the natural next paper.
+Defer until simulation validation is complete. Engineering for biobank
+scale (stochastic trace estimators, CG solves) is well-trodden territory
+but not on the methods-paper critical path.
+
+### Reproduce (provisional — implementation pending)
+
+```bash
+# A3a (age) prototype — re-uses existing Fig 5 Panel B cells
+PYBIN=/Users/acs/mambaforge/envs/sargent/bin/python
+BASE=$HOME/test-sargent/fig5_panelB_edges
+$PYBIN test/eval/stratified_reml.py \
+  --base $BASE --annotation age-tertile \
+  --out test/eval/figs_r/_cache/block2_2_phaseC_A3a.tsv
+
+# Acts I-II — concordance + gap-opening + bias-correction
+$PYBIN test/eval/stratified_reml_sweep.py \
+  --base $HOME/test-sargent/block2_2_phaseC \
+  --regimes full,partial,maf-strat \
+  --n-seeds 5 \
+  --out test/eval/figs_r/_cache/block2_2_phaseC_actsI-II.tsv
+```
+
+(These scripts do not exist yet — they're the engineering deliverables
+of Phase C.)

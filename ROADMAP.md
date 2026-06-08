@@ -1,6 +1,81 @@
 # SARGENT — Development Roadmap
 
-Last updated: 2026-06-05.
+Last updated: 2026-06-08.
+
+> **2026-06-08 — Block 2.2 Phase C pivot: direct stratified GREML on per-bin
+> ARG kinship.** After three failed attempts to make per-edge attribution
+> work as the Fig 5 Panel B WHEN-axis primitive (per-edge posterior Δh²
+> collapses to ancient bin under ℓ² × descendant-count scaling and
+> ancestor bias; naïve Felsenstein PIC and PIC-LDSC variants all
+> structurally over-weight recent bins), pivot to **direct multi-component
+> REML on per-bin ARG kinship matrices** as the partitioned-h² estimator.
+>
+> **Method**: V = σ²_ε·I + Σ_b σ²_b·K_b where K_b = Σ_{e ∈ bin_b}
+> (ℓ_e/2)·m_e·m_eᵀ is the sum of per-edge kinship contributions in
+> annotation bin b.  Standard REML (GREML-MS / GCTA `--reml --mgrm` /
+> LDAK-Cat); no ŵ² intermediate, no localization requirement.  **Bypasses
+> the Phase B failure mode** (corr(ŵ², true per-tree variance) ≈ 0): the
+> new estimator works at annotation-bin resolution, not per-tree
+> resolution, so adjacent-tree collinearity does not bite.
+>
+> **Three-Act experimental arc** (design doc:
+> `test/eval/block2_2_design.md` § Phase C):
+>
+> - **Acts I-II — validation against SNP-stratified REML on site
+>   annotations**.  Three regimes: full typing (concordance), partial
+>   typing (gap-opening), MAF-stratified typing (bias-correction).  S-LDSC
+>   is *not* the calibration partner (n ≤ 1000 sim regime too small for
+>   its asymptotic regression); SNP-stratified REML is — same estimator,
+>   same data requirements, only K_b construction differs.
+> - **Act III — ARG-distinctive evolutionary annotations**: age,
+>   frequency, **and population** (all three per Adam 2026-06-08).
+>   A3a (age) re-uses existing Fig 5 Panel B per-edge architecture cells;
+>   A3b (frequency) needs new per-AF-bin sims; A3c (population) adapts
+>   Block 1.1 v3 cells.
+>
+> **Validation strategy: simulation first, real data deferred**.  Per
+> Adam 2026-06-08: full in-silico calibration arc (Acts I-II + III) before
+> any AoU/biobank application.  Block 1.4a/b real-data work unaffected.
+>
+> **Manuscript impact** (preliminary; depends on Phase C validation
+> outcome):
+>
+> - **Fig 5 Panel A** (WHERE / partitioned-h²) — was DROPPED after Phase
+>   B verdict; **provisionally returns under Phase C Acts I-II** if
+>   ARG-REML and SNP-REML agree on functional annotations and ARG-REML
+>   opens a gap under MAF-stratified typing.
+> - **Fig 5 Panel B** (WHEN axis) — pivots from per-edge posterior
+>   (collapses to ancient) to **stratified GREML on age tertile bins**
+>   (A3a; uses existing 9-cell sims).
+> - **Fig 6** (per-edge / per-population Δh²) — per-edge ranked list
+>   remains useful as a descriptive Manhattan-with-edges visualization
+>   (the *ranking* primitive is sound; the diagonal recovery is what
+>   failed).  Per-population-bin Δh² (Panel C) replaced by stratified
+>   GREML on population (A3c).  Per-age-bin Δh² (Panel B) replaced by
+>   stratified GREML on age (A3a).
+>
+> **Effort estimate**: ~3-5 days coding for the multi-component REML +
+> K_b assembly + SNP-REML head-to-head; then sweeps as authorized.
+> Cheaper than Phase B's regression apparatus (standard estimator instead
+> of custom regression-on-ŵ²).
+>
+> **Per-edge posterior status**: code from Block 2.7.1 is preserved as a
+> **descriptive visualization primitive** (top-K ranked edges, Manhattan-
+> with-edges plots) but is NO LONGER the inferential per-bin attribution
+> method.  Stratified GREML supersedes it for any per-annotation Δh²
+> claim.
+>
+> **Implementation order** (subject to Adam's go on the design):
+> 1. A3a prototype (multi-component REML on existing Fig 5 Panel B
+>    cells) — smallest engineering ask, tests the REML engine on a known
+>    architecture.
+> 2. Acts I-II validation against SNP-REML (15 cells, n=400, L=5 Mb).
+> 3. A3b (frequency) + A3c (population) sweeps.
+>
+> Captions in `~/newwriting/arg-mapping/figs2/captions.md` (manuscript
+> repo) will need a parallel update for Fig 5 Panel A/B and Fig 6 Panels
+> B/C once Phase C lands — flagged for Adam, deferred until validation
+> outcome is known.
 
 > **2026-06-05 (PM) — Block 1.1 v3 complete (realistic demographies).**
 > 90 unique cells (60 OOA + 20 ADM-tr + 10 ARC), 0 failures.  Key verdict:
@@ -846,7 +921,25 @@ infinitesimal; Wainschtein / O'Connor framing).
 
 Estimated: 1-2 weeks. Reuses Block 1.2 infrastructure.
 
-#### Block 2.2 — Partitioned heritability across functional annotations — ❌ NEGATIVE 2026-06-04
+#### Block 2.2 — Partitioned heritability across functional annotations — ↺ PHASE C PIVOT 2026-06-08
+
+**Status (2026-06-08)**: Phase B verdict (NEGATIVE for the
+regression-on-ŵ² approach, 2026-06-04) **stands as-is**.  **Phase C
+opens a fresh attack on the same scientific question using a
+fundamentally different estimator**: direct multi-component REML on
+per-bin ARG kinship (V = σ²_ε·I + Σ_b σ²_b·K_b with K_b = Σ_{e ∈ bin_b}
+(ℓ_e/2)·m_e·m_eᵀ).  No ŵ² intermediate, no per-tree resolution
+requirement → bypasses the Phase B failure mode (adjacent-tree
+collinearity).  Full Phase C design at `test/eval/block2_2_design.md`
+§ Phase C.  Validation strategy (per Adam 2026-06-08): three-regime
+calibration against **SNP-stratified REML** (not S-LDSC; n ≤ 1000
+regime too small for asymptotic regression), then Act III sweep across
+**all three ARG-distinctive evolutionary annotations** (age, frequency,
+population).  Simulation validation first; real-data deferred.
+
+---
+
+(Phase B verdict preserved below for traceability.)
 
 **Status (2026-06-04)**: Phase A + B implemented end-to-end (server,
 commits `9623d3c`, `12cf61d`, `ed7d8f5`); **science verdict is NEGATIVE**.
