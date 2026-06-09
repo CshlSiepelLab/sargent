@@ -1,9 +1,73 @@
 # SARGENT — Development Roadmap
 
-Last updated: 2026-06-08 (PM).
+Last updated: 2026-06-09.
+
+> **2026-06-09 — Identifiability audit: positional/functional partitioning is a
+> DEAD END; redirect the stratified-GREML engine to the evolutionary axes.**
+> (Supersedes the priorities in the 2026-06-08 PM entry below.)
+>
+> Implementing and stress-testing the Phase C engine exposed a hard, *inherent*
+> limit. **Both** the per-segment ŵ² approach (Phase B) **and** the per-bin
+> **functional-annotation** GREML (Phase C Acts I-II) fail for the **same
+> reason**: any decomposition indexed by **genomic position** produces
+> mutually-collinear kinships, because relatedness is a *global* property of a
+> pair of individuals — every genomic subset estimates the same genome-average
+> relatedness, with the distinguishing noise *shrinking* as regions grow (so it
+> gets **worse** at genome scale, not better). Measured: per-annotation GRM
+> collinearity **corr 0.73–0.86**; multi-component REML on near-identical GRMs
+> cannot separate them and collapses toward equal allocation. (Single-component
+> *total* h² recovers fine, 0.543 vs 0.57 — it is *partitioning by position*
+> that is dead, not total estimation, and it cannot be rescued as posed.)
+>
+> **The engine survives on axes whose strata produce *structurally distinct*
+> kinships — the evolutionary axes.** A stratified decomposition is identifiable
+> iff the K_b are not collinear. Measured (centered eGRM bins):
+>
+> | axis | per-stratum kinship corr | verdict |
+> |---|---|---|
+> | **frequency** (rare/common/abundant) | **0.00–0.12** | identifiable ✓✓ |
+> | **age** (recent/middle/ancient) | **0.07–0.23** | identifiable ✓ |
+> | **population** (shared / A-spec / B-spec) | A↔B 0.18 but **shared↔A 0.68** | at-risk ✗ |
+> | functional (exon/promoter/intergenic) | 0.73–0.86 | DEAD |
+>
+> Rare-vs-common and recent-vs-ancient are genuinely different *relationships*
+> among the same people (eff-rank 93→17 across freq, 174→17 across age), so they
+> separate. **Genomic position is not a different relationship; it is the same
+> one everywhere.**
+>
+> **Consequences for the four flagships (re-prioritized):**
+> - **F2 (age × h²) and F4 (frequency / missing-h² compartments): solid,
+>   verified-identifiable — these become the spine.**
+> - **F1 (population decomposition): AT RISK, demoted.** The *shared* (pre-split)
+>   stratum dominates (~95% of branch length at F_ST≈0.07) and is collinear
+>   (0.68) with the population-specific strata; a *balanced* cohort + higher
+>   F_ST is needed before trusting a shared-vs-specific GREML decomposition.
+>   **Note F1's *prediction* story (Block 1.1 ARG-BLUP cross-ancestry
+>   portability) is unaffected and stands on its own** — only the GREML
+>   *decomposition* of F1 is in question. (Was "highest priority"; now conditional.)
+> - **F3 (polygenic adaptation): rides on the age axis (F2)** — viable to the
+>   extent F2 is.
+>
+> **DROPPED: Acts I-II (functional-annotation SNP-REML calibration) and the
+> Fig 5 "WHERE / partitioned-h² across functional annotations" panel** — that
+> was the dead positional axis. Kept only as a one-line sanity check (single-GRM
+> total h² recovers; ARG==SNP when all variants typed), not a results figure.
+>
+> **For the manuscript / REFRAME_NOTES (mirror on laptop):** the identifiable
+> "4D decomposition" should **drop the *position*/functional dimension** and
+> lead with **time × frequency** (population conditional). The story is
+> "heritability decomposes by *evolutionary stratum* (when, how common — and
+> maybe where-in-the-tree), which arrays cannot read," not "across functional
+> annotations."
+>
+> **Verification still in flight (small-step protocol, per Adam — no sweeps
+> until these pass):** (a) does age-stratified GREML recover a *graded*
+> architecture, not just A3a's extreme one? — running; (b) frequency
+> graded-recovery; (c) a balanced multi-pop cell to settle F1-decomposition.
 
 > **2026-06-08 (PM) — Manuscript pivot: biology-first framing, four flagship
-> findings, stratified GREML as the unifying engine.**
+> findings, stratified GREML as the unifying engine.** *(Priorities below
+> partly superseded by the 2026-06-09 identifiability audit above.)*
 >
 > Strategic discussion with Adam.  Net trajectory of v6.0–v6.4 was a
 > competently-defended methods paper: variance components (A3),
