@@ -251,6 +251,18 @@ $PYBIN test/eval/arg_ldsc.py --case-prefix $BASE/case --trees $BASE/case.trees \
 
 ## Phase C — Direct stratified GREML on per-bin ARG kinship (2026-06-08 pivot)
 
+> **2026-06-09 status:** The engine works (A3a feasibility PASS, commit
+> `1afe903`; A3a writeup at `block2_2_phaseC_A3a_feasibility.md`).  The
+> **identifiability audit** that followed reframes Phase C: **Acts I-II
+> (functional-annotation calibration against SNP-REML) are DEAD** by the
+> same positional-collinearity wall Phase B hit (per-annotation GRM corr
+> 0.73–0.86; multi-component REML collapses toward equal allocation).
+> Only the **evolutionary axes** are identifiable — A3a (age) and A3b
+> (frequency) are the spine; A3c (population) is at-risk pending a
+> balanced-cohort test.  ROADMAP entry `6f8cf9d` and REFRAME_NOTES v6.7
+> have the full audit.  Acts I-II section below is **preserved for the
+> record** but not on the implementation path.
+
 **Method change.** Phase B failed because it relied on **ŵ²-then-regress**:
 SARGENT estimated a per-segment variance ŵ²_s, and per-annotation h² was
 recovered via per-base regression of ŵ²_s on annotation coverage. The
@@ -307,16 +319,25 @@ calibration partner.
 
 ### Two-act experimental arc
 
-**Act I (Acts I-II) — Validation against SNP-stratified REML** (calibration
-+ gap-opening + bias-correction story; site-level annotations).
+> **2026-06-09 update:** Acts I-II (functional-annotation calibration
+> against SNP-REML) are **DEAD** — the per-annotation GRMs are mutually
+> collinear (corr 0.73–0.86; multi-component REML collapses toward equal
+> allocation).  Same positional wall Phase B hit.  Sections below preserved
+> for the record; **only Act III is on the path.**  Act III itself
+> re-prioritized: A3a (age) + A3b (frequency) are the spine, A3c
+> (population) is at-risk pending balanced-cohort test.
+
+**Act I (Acts I-II) — Validation against SNP-stratified REML** [DEAD,
+2026-06-09] (calibration + gap-opening + bias-correction story; site-level
+annotations).
 
 **Act III — ARG-distinctive evolutionary annotations** (age, frequency,
-population; only-ARG-can-do).
+population; only-ARG-can-do).  **This is now the entire path.**
 
 Acts I and II share data (one annotated sim + one estimator pipeline, three
 typing regimes). Act III is three separate sub-experiments.
 
-### Acts I-II: three regimes against SNP-stratified REML
+### Acts I-II: three regimes against SNP-stratified REML [DEAD — preserved for record]
 
 All three regimes use one simulation framework (`simulate.py
 --annotation-genes`, already in place from Phase A) with three different
@@ -523,33 +544,49 @@ Defer until simulation validation is complete. Engineering for biobank
 scale (stochastic trace estimators, CG solves) is well-trodden territory
 but not on the methods-paper critical path.
 
-### Downstream follow-on if A3a lands cleanly: revisit Fig 5 Panel C
+### Downstream follow-on: revisit Fig 5 Panel C
+
+> **2026-06-09 update:** A3a landed PASS (commit `1afe903`).  The
+> identifiability audit eliminates one of the two candidates below:
+> **spatial-bin variance-capture (a) is dead** for the same positional-
+> collinearity reason that killed Acts I-II — coarse spatial bins are
+> still positional, and a multi-component REML on coarsely-binned
+> contiguous-tree GRMs will hit the same near-identical-kinship wall.
+> Only candidate **(b) frequency-tertile** survives, and it largely
+> *collapses into Panel B (A3b)* under the v6.7 figure restructure
+> (REFRAME_NOTES v6.7).  Panel C is therefore likely to be either
+> retired or repurposed as a per-stratum *graded-architecture* recovery
+> demonstration, not a standalone variance-capture panel.  Defer the
+> final call to post-A3b graded-recovery report.
 
 The current Fig 5 Panel C (variance-capture curves from Block 2.5.2)
 has an honest but weak story: truth-side separates the three bf regimes
 (0.005 / 0.05 / 0.5) by ~100× in M_e, but estimator-side ŵ² is flat at
 M_e ≈ 12–20 across all regimes — the panel as drawn shows the gap
-without recovering it.  If A3a confirms the multi-component REML engine
-works, two candidate Panel C v2 directions become available:
+without recovering it.  Two candidate v2 directions were proposed
+post-A3a; the identifiability audit settles them:
 
-- **(a) Spatial-bin variance-capture under GREML.**  Partition the
-  genome into ~K coarse spatial bins (50–100 contiguous trees each;
-  finer than annotation but coarser than per-tree).  Build K_b per
-  bin, fit multi-component REML, sort σ̂²_b descending, cumulative-sum
-  → variance-capture curve.  Same conceptual axis as the current
-  panel; identifiable where per-tree ŵ² isn't.  Rerun on Block 2.5.2
-  cells to see if regime separation recovers.
+- **(a) [DEAD 2026-06-09] Spatial-bin variance-capture under GREML.**
+  Partition the genome into ~K coarse spatial bins, build K_b per bin,
+  fit multi-component REML, sort σ̂²_b descending, cumulative-sum →
+  variance-capture curve.  The per-bin K_b are still *positional* and
+  will be mutually collinear by the same argument that killed Acts I-II
+  (relatedness is global; every genomic subset estimates the same
+  genome-average relationship).  Coarser bins won't help; collinearity
+  worsens at scale.
 
 - **(b) Frequency-tertile variance-capture using A3b.**  Reframe the
   HOW axis from "spatial polygenicity" to "rare-vs-common variance
   concentration" — variance-capture curves binned by edge DAF instead
-  of by spatial position.  Much more SARGENT-distinctive and tightly
-  coupled to flagships F2/F4; reuses A3b infrastructure once it lands.
+  of by spatial position.  **Surviving candidate**, but under the v6.7
+  figure restructure (Panel B now = frequency-stratified GREML), this
+  candidate largely *is* Panel B.  A separate Panel C only makes sense
+  if it adds a distinct view (e.g., cumulative σ²_b within each
+  frequency stratum, showing concentration vs spread).
 
-**Not blocking v1.**  Gated on A3a feasibility report.  Current Panel C
-stays as fallback.  Decision: post-A3a, pick (a) or (b) (or keep
-current as the honest baseline) based on which produces the cleanest
-story alongside Panel A and Panel B v2.
+**Likely outcome:** Panel C is retired or repurposed.  Current panel
+stays as fallback only if no clean Panel C v2 emerges.  Decision:
+post-A3b graded-recovery report.
 
 ### Reproduce (provisional — implementation pending)
 
