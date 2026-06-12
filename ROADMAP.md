@@ -1,6 +1,38 @@
 # SARGENT — Development Roadmap
 
-Last updated: 2026-06-09.
+Last updated: 2026-06-12.
+
+> **2026-06-12 — F1 LANDS (decisively): cross-ancestry PRS failure has an
+> allele-age signature.** Full writeup: `test/eval/xancestry_age_signature.md`.
+>
+> The 2026-06-09 audit demoted F1 (population *decomposition* was collinear/
+> at-risk). F1 is now **rescued by reframing it as PREDICTION, not
+> decomposition** — which is identifiable, so the collinearity wall does not
+> apply. The result:
+> - **Mechanism:** train-A × test-B cross-kinship is **100% in the deep/ancient
+>   stratum** (recent/middle carry zero) — A and B are related only through
+>   pre-split shared ancestry.
+> - **Decisive (genotype-level, r²-independent):** per-variant transferability
+>   regressed on age + frequency — **partial corr(age | freq) z=15–20; freq | age
+>   adds ~nothing (z≈0).** Once you know a variant's *age*, its *frequency* tells
+>   you nothing more about whether it transfers. The ARG is **not** an expensive
+>   MAF filter — age is the right variable, frequency a poor proxy.
+> - **Prediction-level:** ARG-BLUP portability stratifies by age (old ports ~4×
+>   young, z≈3) and by frequency (common>rare, z≈2.5) — ARG **reproduces the
+>   frequency baseline and adds age on top**.
+> - **The cap:** cross-R² is bounded by the shared fraction — raising within-R²
+>   to 0.5 left cross-R² at ~0.02 (portability ~4% at F_ST 0.30, *independent of
+>   n/h²*). A mechanistic statement of real-world cross-ancestry PRS collapse.
+>
+> **Status of the three evolutionary axes now:** **F1 (population, via
+> age-stratified prediction) = LANDED, decisive.** F2 (age × h² decomposition)
+> and F4 (frequency/missing-h²) remain the identifiable *decomposition* axes but
+> are secondary; note the per-variant *frequency* decomposition is not
+> ARG-distinctive (it is GREML-MS on genotypes) — its ARG value is the **age**
+> overlay, which beats frequency above. **Functional/positional WHERE axis stays
+> dead** (Fig 5 Panel A retired; its slot is filled by the F1 age-signature
+> figure — see writeup for the 4-panel proposal + integration).
+> Analysis: `test/eval/{xanc_transfer_regress,xanc_portability}.py`.
 
 > **2026-06-09 — Identifiability audit: positional/functional partitioning is a
 > DEAD END; redirect the stratified-GREML engine to the evolutionary axes.**
