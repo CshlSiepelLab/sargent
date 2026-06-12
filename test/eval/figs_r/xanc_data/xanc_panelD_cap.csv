@@ -1,0 +1,5 @@
+fst,regime,within_R2,cross_R2,n_seed
+0.15,standard_h2_0.5,0.1884,0.0214,30
+0.3,standard_h2_0.5,0.1996,0.0146,30
+0.15,highpower_h2_0.8,0.4986,0.0134,10
+0.3,highpower_h2_0.8,0.485,0.0206,10
