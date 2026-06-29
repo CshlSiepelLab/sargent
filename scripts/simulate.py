@@ -373,6 +373,13 @@ def main():
                          "(default 0.01 = 1%%, matches SBayesR's canonical scenario for human "
                          "polygenic traits; typical GWAS-polygenic range is 0.01-0.10).  "
                          "Overridden by an explicit --n-causal.")
+    ap.add_argument("--min-causal", type=int, default=20,
+                    help="floor on the number of causal SNPs when deriving the count "
+                         "from --causal-fraction (default 20, so very small simulations "
+                         "don't get pathologically few causal variants).  When this floor "
+                         "binds, the realised causal fraction exceeds --causal-fraction; a "
+                         "warning is printed and the realised fraction is recorded in "
+                         "params.json.  Set --min-causal 0 to disable the floor.")
     # Block 2.1 — age-stratified effect-size architecture.
     # Scale per-variant β² by (age_j / age_ref)^tau before the h²_snp
     # normalisation. tau=0 disables (default, current behaviour).
@@ -878,10 +885,20 @@ def main():
     # don't get pathologically few causal variants.  unobs_idx / remaining
     # are computed above (before bed_mask) so the SV-class carve-out is
     # disjoint from the SNP causal set.
+    n_causal_floored = False
     if args.n_causal is not None:
         n_causal_target = min(args.n_causal, len(remaining))
     else:
-        n_causal_target = min(max(20, int(args.causal_fraction * p)), len(remaining))
+        raw = int(round(args.causal_fraction * p))
+        floor = max(0, args.min_causal)
+        n_causal_target = min(max(floor, raw), len(remaining))
+        n_causal_floored = raw < floor
+        if n_causal_floored:
+            sys.stderr.write(
+                f"WARNING: --causal-fraction {args.causal_fraction} x {p} polymorphic "
+                f"variants = {raw} < --min-causal {floor}; using {n_causal_target} causal "
+                f"SNPs (realised causal fraction {n_causal_target / p:.4f}, "
+                f"intended {args.causal_fraction}).\n")
     n_causal = n_causal_target
     # Block 2.2 — annotation enrichment via causal DENSITY: a variant's causal
     # probability is proportional to tau_{ann(j)}, so enriched annotations carry
@@ -1238,6 +1255,10 @@ def main():
         "bed_maf_min":     args.bed_maf_min,
         "n_causal":        n_causal,
         "n_causal_in_bed": int(bed_mask[causal_idx].sum()),
+        "n_polymorphic":            int(p),
+        "causal_fraction_target":   float(args.causal_fraction),
+        "causal_fraction_realised": (float(n_causal) / p) if p else 0.0,
+        "n_causal_floored":         bool(n_causal_floored),
         "length":          args.length,
         "recomb_rate":     args.recomb_rate,
         "mut_rate":        args.mut_rate,
