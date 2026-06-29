@@ -935,7 +935,16 @@ def main():
     # Fixed-effect phenotype contribution (uses standardized genotypes)
     y_fixed = dosage_std.T @ beta           # (n_indiv,)
 
-    var_fixed = float(np.var(y_fixed))
+    # Trait-scale normalization reference. We pin realised heritability on the
+    # TEST population (the last n_test individuals = pure target pop) so the
+    # prediction target's h² is held at target across mixture levels and
+    # cross-ancestry scenarios; otherwise pooled-sample normalization lets the
+    # test-pop h² drift with sample composition, biasing r2_calib's ceiling
+    # (see SIMULATION_SPECS.md §4.3 in the sargent-paper repo). With no test set
+    # (n_test == 0) fall back to the full sample (legacy behaviour).
+    norm_idx = slice(args.n_indiv, n_indiv) if args.n_test > 0 else slice(None)
+
+    var_fixed = float(np.var(y_fixed[norm_idx]))
     if var_fixed > 0 and args.h2_snp > 0:
         scale_f = math.sqrt(args.h2_snp / var_fixed)
         beta   *= scale_f
@@ -971,7 +980,7 @@ def main():
     print("Simulating random effects ...", flush=True)
     y_random = sim_random_effect(ts, hap_ranks, n_indiv, ws2_vec, rng)
 
-    var_random = float(np.var(y_random))
+    var_random = float(np.var(y_random[norm_idx]))
     if var_random > 0 and args.h2_arg > 0:
         scale_r   = math.sqrt(args.h2_arg / var_random)
         y_random *= scale_r
@@ -1007,7 +1016,7 @@ def main():
         beta_unobs[unobs_idx] = eff
         y_unobs = dosage_std.T @ beta_unobs
 
-        var_unobs = float(np.var(y_unobs))
+        var_unobs = float(np.var(y_unobs[norm_idx]))
         if var_unobs > 0:
             scale_u = math.sqrt(args.h2_unobs / var_unobs)
             beta_unobs *= scale_u
@@ -1018,10 +1027,26 @@ def main():
     y_noise = rng.normal(0.0, math.sqrt(sigma2) if sigma2 > 0 else 0.0, size=n_indiv)
     y = y_fixed + y_random + y_unobs + y_noise
 
-    # Realised heritabilities (from rescaled components, before noise is added)
-    h2_snp_realised   = float(np.var(y_fixed)  / np.var(y)) if np.var(y) > 0 else 0.0
-    h2_arg_realised   = float(np.var(y_random) / np.var(y)) if np.var(y) > 0 else 0.0
-    h2_unobs_realised = float(np.var(y_unobs)  / np.var(y)) if np.var(y) > 0 else 0.0
+    # Realised heritabilities. Pooled (all sampled individuals) kept for
+    # backward-compat; per-population added because the scale is pinned on the
+    # TEST population (§4.3), so train- and test-population h² generally differ.
+    def _realised_h2(idx):
+        vy = float(np.var(y[idx]))
+        if vy <= 0:
+            return 0.0, 0.0, 0.0
+        return (float(np.var(y_fixed[idx]))  / vy,
+                float(np.var(y_random[idx])) / vy,
+                float(np.var(y_unobs[idx]))  / vy)
+
+    h2_snp_realised, h2_arg_realised, h2_unobs_realised = _realised_h2(slice(None))
+    if args.n_test > 0:
+        (h2_snp_realised_test, h2_arg_realised_test,
+         h2_unobs_realised_test)  = _realised_h2(slice(args.n_indiv, n_indiv))
+        (h2_snp_realised_train, h2_arg_realised_train,
+         h2_unobs_realised_train) = _realised_h2(slice(0, args.n_indiv))
+    else:
+        h2_snp_realised_test = h2_arg_realised_test = h2_unobs_realised_test = None
+        h2_snp_realised_train = h2_arg_realised_train = h2_unobs_realised_train = None
 
     # ---- Block 2.2: realised per-annotation heritability (ground truth) -----
     # Per annotation, the genetic variance contributed by its causal variants,
@@ -1286,6 +1311,13 @@ def main():
         "h2_snp_realised":   h2_snp_realised,
         "h2_arg_realised":   h2_arg_realised,
         "h2_unobs_realised": h2_unobs_realised,
+        "h2_norm_population":     "test" if args.n_test > 0 else "pooled",
+        "h2_snp_realised_test":   h2_snp_realised_test,
+        "h2_arg_realised_test":   h2_arg_realised_test,
+        "h2_unobs_realised_test": h2_unobs_realised_test,
+        "h2_snp_realised_train":  h2_snp_realised_train,
+        "h2_arg_realised_train":  h2_arg_realised_train,
+        "h2_unobs_realised_train": h2_unobs_realised_train,
         "n_unobs_causal":    n_unobs_causal,
         "unobs_effect_dist":  args.unobs_effect_dist if args.h2_unobs > 0 else None,
         "unobs_effect_scale": args.unobs_effect_scale if args.h2_unobs > 0 else None,
