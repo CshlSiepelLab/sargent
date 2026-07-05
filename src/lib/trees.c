@@ -630,6 +630,15 @@ void tree_cov_matvec_inc_readout(double *out,
                                   const tree_cov_matvec_inc_state_t *st)
 {
     const int n_indiv = st->n_indiv;
+    /* Worksharing zero, NOT a plain serial loop: the implicit exit barrier of
+     * `omp for` guarantees every thread finishes zeroing out[] before any
+     * thread reaches the accumulation loop below.  A plain loop here is run
+     * redundantly by all threads with no barrier, so a straggler still zeroing
+     * out[k] can clobber an `out[k] += a` a faster thread already wrote --
+     * corrupting the readout and making G_all indefinite (issue #26).  When
+     * called outside an active team (serial path / OpenMP-off) the orphaned
+     * `omp for` degrades to a correct serial loop. */
+    #pragma omp for schedule(static)
     for (int i = 0; i < n_indiv; i++) out[i] = 0.0;
 
     const tsk_id_t *samples = tsk_treeseq_get_samples(st->ts);

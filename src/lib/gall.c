@@ -136,6 +136,27 @@ gall_t *gall_build(const tsk_treeseq_t *ts,
         }
     }
 
+    /* G_all is PSD by construction (a nonnegative sum of rank-1 branch outer
+     * products), so any negative eigenvalue is numerical, not structural.
+     * Floor to a small positive value relative to lambda_max so downstream
+     * consumers that assume lambda >= 0 stay well-defined:
+     * emma_profile_reml() evaluates log(delta*lambda + 1), and
+     * gall_precond_build() forms 1/(ws2_mean*lambda + sigma2).  Report when
+     * flooring is needed -- a *large* negative lambda signals upstream
+     * corruption (see issue #26: OpenMP readout race), not rounding. */
+    {
+        double lam_max     = g->lambda[n-1];              /* dsyev: ascending */
+        double lam_min_raw = g->lambda[0];
+        double floor       = 1e-9 * (lam_max > 0.0 ? lam_max : 1.0);
+        int    n_floored   = 0;
+        for (int i = 0; i < n; i++)
+            if (g->lambda[i] < floor) { g->lambda[i] = floor; n_floored++; }
+        if (n_floored > 0)
+            fprintf(stderr, "gall_build: floored %d non-PSD eigenvalue(s) "
+                    "(raw lambda_min = %.3g, floor = %.3g)\n",
+                    n_floored, lam_min_raw, floor);
+    }
+
     /* w_ones[k] = (U^T 1_n)[k] = sum of k-th eigenvector column. */
     for (int k = 0; k < n; k++) {
         const double *Uk = g->U + (size_t)k * n;
