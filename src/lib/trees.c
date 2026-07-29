@@ -666,6 +666,17 @@ void tree_cov_matvec_incremental(double *out,
     tree_cov_matvec_inc_readout(out, st);
 }
 
+/* Mean genomic span per tree = sequence_length / num_trees.  Used to normalise
+ * the per-tree span weight so Sum_s (span_s / mean_span) == S_orig: the
+ * span-weighted kernel Sum_s span_s G_s then keeps the same overall scale as the
+ * old unweighted Sum_s G_s (only the RELATIVE per-tree weighting changes). */
+static double tree_seq_mean_span(const tsk_treeseq_t *ts)
+{
+    double     L  = tsk_treeseq_get_sequence_length(ts);
+    tsk_size_t nt = tsk_treeseq_get_num_trees(ts);
+    return (nt > 0 && L > 0.0) ? L / (double)nt : 1.0;
+}
+
 /* ---------------------------------------------------------------------------
  * tree_walker_run_inc: incremental tree-walker driving the advance/readout
  * split.  pre_visit may skip the readout; advance always runs to keep S[]
@@ -707,8 +718,13 @@ int tree_walker_run_inc(tree_cov_matvec_inc_state_t *inc,
 
     tree_walk_state_t st = {
         .n_indiv = inc->n_indiv,
+        .span    = 1.0,
         .gv      = gv,
     };
+
+    /* Span weighting: aggregation visitors weight each tree's G_s by st.span
+     * (= span_s / mean_span), making the kernel the span-weighted eGRM. */
+    double mean_span = tree_seq_mean_span(inc->ts);
 
     int err = 0;
 
@@ -740,6 +756,7 @@ int tree_walker_run_inc(tree_cov_matvec_inc_state_t *inc,
                         tree_cov_matvec_inc_advance(inc, &tree);
                         st.s_orig = s_shared;
                         st.sp     = sp;
+                        st.span   = (tree.interval.right - tree.interval.left) / mean_span;
                         do_visit  = (!pre_visit || pre_visit(s_shared, sp, ctx))
                                     ? 1 : 0;
                         s_shared++;
@@ -782,6 +799,7 @@ int tree_walker_run_inc(tree_cov_matvec_inc_state_t *inc,
             if (pre_visit && !pre_visit(s, sp, ctx)) continue;
             tree_cov_matvec_inc_readout(gv, inc);
             st.s_orig = s; st.sp = sp;
+            st.span = (tree.interval.right - tree.interval.left) / mean_span;
             visit(&st, ctx);
         }
         if (ret < 0) {
@@ -802,6 +820,7 @@ int tree_walker_run_inc(tree_cov_matvec_inc_state_t *inc,
             if (pre_visit && !pre_visit(s, sp, ctx)) continue;
             tree_cov_matvec_inc_readout(gv, inc);
             st.s_orig = s; st.sp = sp;
+            st.span = (tree.interval.right - tree.interval.left) / mean_span;
             visit(&st, ctx);
         }
         if (ret < 0) {
@@ -849,8 +868,11 @@ int tree_walker_run(const tsk_treeseq_t *ts,
         .n_indiv = n_indiv,
         .s_orig  = 0,
         .sp      = 0,
+        .span    = 1.0,
         .gv      = gv,
     };
+
+    double mean_span = tree_seq_mean_span(ts);
 
     int s = 0;
     for (ret = tsk_tree_first(&tree); ret == TSK_TREE_OK && s < S_orig;
@@ -861,6 +883,7 @@ int tree_walker_run(const tsk_treeseq_t *ts,
         tree_cov_matvec(gv, in, n_indiv, &tree, work, order_buf, hap_to_indiv);
         st.s_orig = s;
         st.sp     = sp;
+        st.span   = (tree.interval.right - tree.interval.left) / mean_span;
         visit(&st, ctx);
     }
     if (ret < 0) {
@@ -885,7 +908,7 @@ static void g_scale_visit(const tree_walk_state_t *st, void *vctx)
     g_scale_ctx_t *c = vctx;
     double dot = 0.0;
     for (int i = 0; i < c->n_indiv; i++) dot += c->eps[i] * st->gv[i];
-    c->sum  += dot / c->n_indiv;
+    c->sum  += st->span * dot / c->n_indiv;
     c->count++;
 }
 

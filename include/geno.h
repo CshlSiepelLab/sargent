@@ -215,6 +215,10 @@ typedef struct {
     int      n_indiv;        /* convenience copy */
     int      s_orig;         /* current original-tree index in [0, S_orig) */
     int      sp;             /* current pruned-segment index (= s_orig when prune_map is NULL) */
+    double   span;           /* span weight of the current tree = (span_s / mean_span);
+                                aggregation visitors weight G_s by this so the kernel
+                                is the span-weighted eGRM Sum_s span_s G_s (normalised so
+                                Sum_s span == S_orig, preserving the old unweighted scale) */
     double  *gv;             /* G_s * in for the current tree, length n_indiv */
 } tree_walk_state_t;
 

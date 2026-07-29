@@ -40,7 +40,7 @@
  */
 
 #define GALL_MAGIC   UINT64_C(0x4C4C414753524741)
-#define GALL_VERSION 2u
+#define GALL_VERSION 3u   /* v3: span-weighted eGRM (G_all = Sum_s span_s G_s) */
 
 typedef struct {
     int     n;          /* number of individuals */
