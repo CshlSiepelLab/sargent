@@ -4,9 +4,10 @@ simulate.py — generate synthetic ARG + genotype + phenotype data for SARGENT t
 
 Model:  y = X β + u + ε
   X β : fixed effects (BayesR discrete mixture)
-   u  : random effects drawn from tree-branch Brownian motion with per-tree ws²
+   u  : random effects drawn from tree-branch Brownian motion with per-tree ws²,
+        weighted by each tree's genomic span (the span-weighted eGRM)
    ε  : i.i.d. N(0, σ²)
-   V  = Σ_s ws²[s] G_s + σ² I
+   V  = Σ_s ws²[s] · span_s · G_s + σ² I
 
 Outputs (all with --out prefix):
   .trees          tskit tree sequence
@@ -94,6 +95,13 @@ def sim_random_effect(ts, hap_ranks, n_indiv, ws2_input, rng):
     per_edge = isinstance(ws2_input, dict)
 
     for tree_idx, tree in enumerate(ts.trees()):
+        # Span-weight each tree's variance contribution so the generative kernel
+        # is the span-weighted eGRM (V = Sum_s ws2_s * span_s * G_s), matching the
+        # estimator (gall.c / variational.c weight G_s by span_s).  A branch's
+        # increment variance scales by the tree's genomic span.  The caller
+        # renormalises ws2 so realised var(u) hits the target h2, so only the
+        # RELATIVE per-tree weighting matters here (raw span is fine).
+        span = tree.interval.right - tree.interval.left
         if per_edge:
             # Skip trees with no active edges
             has_any = any(
@@ -123,7 +131,7 @@ def sim_random_effect(ts, hap_ranks, n_indiv, ws2_input, rng):
                     node_val[nd] = node_val[parent]
                     continue
                 bl = tree.branch_length(nd)
-                node_val[nd] = node_val[parent] + rng.normal(0.0, math.sqrt(ws2_e * bl))
+                node_val[nd] = node_val[parent] + rng.normal(0.0, math.sqrt(ws2_e * bl * span))
 
         # Accumulate into u: (1/√2) · (val[hap0] + val[hap1])
         h0 = hap_ranks[:, 0]

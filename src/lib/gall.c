@@ -39,9 +39,10 @@ static void gall_acc_visit(const tree_walk_state_t *st, void *vctx)
     gall_acc_ctx_t *c = vctx;
     double *col = c->G + (size_t)c->col * c->n;
     const double *gv = st->gv;
+    double span = st->span;            /* span-weighted eGRM: G_all = Sum_s span_s G_s */
     int n = c->n;
     for (int i = 0; i < n; i++)
-        col[i] += gv[i];
+        col[i] += span * gv[i];
 }
 
 /* -------------------------------------------------------------------------
@@ -69,7 +70,8 @@ gall_t *gall_build(const tsk_treeseq_t *ts,
 
     g->n = n;
 
-    /* Compute G_all = Σ_s G_s one column at a time using unit-vector inputs.
+    /* Compute the span-weighted eGRM G_all = Σ_s span_s G_s one column at a time
+     * using unit-vector inputs (gall_acc_visit applies the per-tree span weight).
      * Cost: n tree-sequence passes, each O(S_orig × n_hap × depth).
      * One-time build; per-phenotype amortises to near-zero. */
     fprintf(stderr, "gall_build: %d tree passes (n=%d, S=%d) ...\n",

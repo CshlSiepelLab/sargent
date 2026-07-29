@@ -542,7 +542,7 @@ static int v_matvec_pre(int s_orig, int sp, void *ctx)
 static void v_matvec_visit(const tree_walk_state_t *st, void *ctx)
 {
     v_matvec_visit_ctx_t *vc = ctx;
-    double w = vc->ws2[st->sp];
+    double w = vc->ws2[st->sp] * st->span;   /* span-weighted kernel: Sum_s ws2_s span_s G_s */
     for (int i = 0; i < vc->n; i++) vc->out[i] += w * st->gv[i];
 }
 
@@ -577,7 +577,7 @@ static void quad_visit(const tree_walk_state_t *st, void *ctx)
     quad_visit_ctx_t *qc = ctx;
     double a = 0.0;
     for (int i = 0; i < qc->n; i++) a += qc->r_tilde[i] * st->gv[i];
-    qc->A[st->sp] += a;
+    qc->A[st->sp] += st->span * a;   /* span-weighted: r_tilde^T (span_s G_s) r_tilde */
 }
 
 /* Compute A[sp] = r_tilde^T G_sp r_tilde for all S pruned segments. */
