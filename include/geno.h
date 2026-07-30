@@ -65,6 +65,28 @@ struct geno_reader {
 /* Backend constructors */
 geno_reader_t *geno_open_bed(const char *prefix);  /* .bed/.bim/.fam prefix */
 
+/* ---------------------------------------------------------------------------
+ * BED-only helpers for out-of-sample prediction (native --predict path).
+ *
+ * A prediction run must align a *test* BED to the *train* polymorphic variant
+ * set (β is indexed by that set) and standardize test dosages by TRAIN
+ * statistics.  Train and test share the same .bim (same variants, same order),
+ * so alignment is by absolute file-variant index.
+ * ------------------------------------------------------------------------- */
+
+/* Return the absolute .bim/.bed file-variant index of the j-th polymorphic
+ * variant (0 <= j < r->n_variants), i.e. the inverse of the monomorphic
+ * filtering done by precompute_stats.  Returns -1 for a non-BED reader or an
+ * out-of-range j.  Requires precompute_stats to have been called. */
+int geno_bed_poly_file_index(const geno_reader_t *r, int j);
+
+/* Decode the raw dosages (0,1,2,NaN; no imputation/standardization) of the
+ * absolute file-variant index `file_var_idx` into out[r->n_samples].  Valid
+ * before or after precompute_stats (does not depend on the poly filter).
+ * Returns 0 on success, -1 on error / non-BED reader.  Used to read test-BED
+ * variants at train-derived file indices. */
+int geno_bed_read_raw_at(geno_reader_t *r, int file_var_idx, double *out);
+
 /* Caller owns ts and is responsible for tsk_treeseq_free — the reader borrows it.
    This allows the same tsk_treeseq_t to be used concurrently for local-tree
    covariance matrices and other tree-sequence operations. */
