@@ -522,6 +522,7 @@ typedef struct {
     const int           *hap_to_indiv;
     double              *gv;         /* n scratch (borrowed) */
     tree_cov_matvec_inc_state_t *inc; /* borrowed; long-lived incremental state */
+    int                  use_span;   /* span-weight the kernel? (uniform arms yes, learned no) */
 } v_matvec_data_t;
 
 /* --- v_matvec via tree_walker_run --- */
@@ -561,7 +562,7 @@ static void v_matvec(double *out, const double *in, int n, void *data)
 
     v_matvec_visit_ctx_t vc = { .out = out, .ws2 = d->ws2, .n = n };
     tree_walker_run_inc(d->inc, d->S_orig, d->prune_map, in, d->gv,
-                        v_matvec_pre, v_matvec_visit, &vc);
+                        v_matvec_pre, v_matvec_visit, &vc, d->use_span);
 }
 
 /* --- compute_quad_all via tree_walker_run --- */
@@ -584,12 +585,12 @@ static void quad_visit(const tree_walk_state_t *st, void *ctx)
 static void compute_quad_all(tree_cov_matvec_inc_state_t *inc,
                               int n, int S, int S_orig, const int *prune_map,
                               const double *r_tilde,
-                              double *A, double *gv)
+                              double *A, double *gv, int use_span)
 {
     for (int sp = 0; sp < S; sp++) A[sp] = 0.0;
     quad_visit_ctx_t qc = { .A = A, .r_tilde = r_tilde, .n = n };
     tree_walker_run_inc(inc, S_orig, prune_map, r_tilde, gv,
-                        NULL, quad_visit, &qc);
+                        NULL, quad_visit, &qc, use_span);
 }
 
 
@@ -682,7 +683,7 @@ void var_random(sargent_t *sg, int silent)
         .ts = sg->ts, .ws2 = sg->ws2, .sigma2 = sg->sigma2,
         .n = n, .S = S, .S_orig = sg->S_orig, .prune_map = sg->prune_map,
         .hap_to_indiv = sg->hap_to_indiv,
-        .gv = gv, .inc = &inc,
+        .gv = gv, .inc = &inc, .use_span = sg->uniform_arg,
     };
     hutch_opts_t hopts = {
         .nprobe = nprobe, .batch_size = 0, .use_gaussian = 0, .seed = 0,
@@ -726,7 +727,7 @@ void var_random(sargent_t *sg, int silent)
         for (int i = 0; i < n; i++) A_0 += r_tilde[i] * r_tilde[i];
 
         compute_quad_all(&inc, n, S, sg->S_orig, sg->prune_map,
-                         r_tilde, A, gv);
+                         r_tilde, A, gv, sg->uniform_arg);
 
         hutch_trace_all(cg, v_matvec, &vd, sg->ts, sg->hap_to_indiv,
                         n, S, sg->S_orig, sg->prune_map, B, &B_0, &hopts);
@@ -1071,7 +1072,7 @@ void var_joint(sargent_t *sg, int silent)
         .ts = sg->ts, .ws2 = sg->ws2, .sigma2 = sg->sigma2,
         .n = n, .S = S, .S_orig = sg->S_orig, .prune_map = sg->prune_map,
         .hap_to_indiv = sg->hap_to_indiv,
-        .gv = gv, .inc = &inc,
+        .gv = gv, .inc = &inc, .use_span = sg->uniform_arg,
     };
     hutch_opts_t hopts = {
         .nprobe = sg->nprobe, .batch_size = 0, .use_gaussian = 0, .seed = 0,
@@ -1120,7 +1121,7 @@ void var_joint(sargent_t *sg, int silent)
         double A_0 = 0.0, B_0 = 0.0;
         for (int i = 0; i < n; i++) A_0 += r_tilde[i] * r_tilde[i];
         compute_quad_all(&inc, n, S, sg->S_orig, sg->prune_map,
-                         r_tilde, A, gv);
+                         r_tilde, A, gv, sg->uniform_arg);
         hutch_trace_all(cg, v_matvec, &vd, sg->ts, sg->hap_to_indiv,
                         n, S, sg->S_orig, sg->prune_map, B, &B_0, &hopts);
 

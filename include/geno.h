@@ -258,4 +258,10 @@ int tree_walker_run_inc(tree_cov_matvec_inc_state_t *inc,
                         double              *gv,           /* length inc->n_indiv */
                         tree_pre_visit_fn    pre_visit,    /* nullable */
                         tree_visit_fn        visit,
-                        void                *ctx);
+                        void                *ctx,
+                        int                  use_span);    /* 1 = weight G_s by span_s
+                                                              (span-weighted eGRM, uniform
+                                                              arms); 0 = plain G_s (learned
+                                                              arms — span is non-identifiable
+                                                              with free ws2 and ill-conditions
+                                                              the CG). st.span = 1.0 when 0. */

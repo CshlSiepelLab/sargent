@@ -435,7 +435,10 @@ int main(int argc, char *argv[])
          *   - for per-tree mode: gall supplies both the CG preconditioner and
          *     the EMMA warm-start (reduces Stage 2 from ~750 s to ~50 s). */
         if (!gall && (precompute || uniform_arg || !snp_only)) {
-            gall = gall_build(&ts, sg->hap_to_indiv, sg->n);
+            /* Span-weight G_all only for the uniform arms (their kernel is the
+             * span-weighted eGRM). For the learned arms G_all is used solely as the
+             * CG preconditioner, which must match the un-span learned operator. */
+            gall = gall_build(&ts, sg->hap_to_indiv, sg->n, uniform_arg);
             if (gall) {
                 if (trees_sz >= 0) {
                     if (gall_save(gall, gall_path, trees_sz) == 0 && !silent)

@@ -62,8 +62,11 @@ typedef struct {
  * hap_to_indiv: sample-rank → individual mapping (length = 2*n).
  * Returns NULL on OOM or LAPACK failure.  Caller frees with gall_free().
  */
+/* use_span: 1 = build the span-weighted eGRM G_all = Σ_s span_s·G_s (the uniform
+ * arms' kernel); 0 = build the plain aggregate Σ_s G_s (used as the learned arms'
+ * CG preconditioner, which must match the un-span learned operator). */
 gall_t *gall_build(const tsk_treeseq_t *ts,
-                   const int *hap_to_indiv, int n_indiv);
+                   const int *hap_to_indiv, int n_indiv, int use_span);
 
 void gall_free(gall_t *g);
 

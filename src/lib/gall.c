@@ -49,7 +49,7 @@ static void gall_acc_visit(const tree_walk_state_t *st, void *vctx)
  * gall_build: n incremental tree-sequence passes then LAPACK eigendecompose.
  * ---------------------------------------------------------------------- */
 gall_t *gall_build(const tsk_treeseq_t *ts,
-                   const int *hap_to_indiv, int n)
+                   const int *hap_to_indiv, int n, int use_span)
 {
     int S_orig = (int)tsk_treeseq_get_num_trees(ts);
 
@@ -83,7 +83,7 @@ gall_t *gall_build(const tsk_treeseq_t *ts,
         in[j] = 1.0;
         ctx.col = j;
         int ret = tree_walker_run_inc(&inc, S_orig, /*prune_map=*/NULL,
-                                      in, out, NULL, gall_acc_visit, &ctx);
+                                      in, out, NULL, gall_acc_visit, &ctx, use_span);
         if (ret != 0) {
             fprintf(stderr, "gall_build: tree walk failed at column %d\n", j);
             goto fail;

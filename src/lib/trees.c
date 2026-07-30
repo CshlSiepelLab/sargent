@@ -705,7 +705,8 @@ int tree_walker_run_inc(tree_cov_matvec_inc_state_t *inc,
                         double              *gv,
                         tree_pre_visit_fn    pre_visit,
                         tree_visit_fn        visit,
-                        void                *ctx)
+                        void                *ctx,
+                        int                  use_span)
 {
     tsk_tree_t tree;
     int ret = tsk_tree_init(&tree, inc->ts, 0);
@@ -756,7 +757,7 @@ int tree_walker_run_inc(tree_cov_matvec_inc_state_t *inc,
                         tree_cov_matvec_inc_advance(inc, &tree);
                         st.s_orig = s_shared;
                         st.sp     = sp;
-                        st.span   = (tree.interval.right - tree.interval.left) / mean_span;
+                        st.span   = use_span ? (tree.interval.right - tree.interval.left) / mean_span : 1.0;
                         do_visit  = (!pre_visit || pre_visit(s_shared, sp, ctx))
                                     ? 1 : 0;
                         s_shared++;
@@ -799,7 +800,7 @@ int tree_walker_run_inc(tree_cov_matvec_inc_state_t *inc,
             if (pre_visit && !pre_visit(s, sp, ctx)) continue;
             tree_cov_matvec_inc_readout(gv, inc);
             st.s_orig = s; st.sp = sp;
-            st.span = (tree.interval.right - tree.interval.left) / mean_span;
+            st.span = use_span ? (tree.interval.right - tree.interval.left) / mean_span : 1.0;
             visit(&st, ctx);
         }
         if (ret < 0) {
@@ -820,7 +821,7 @@ int tree_walker_run_inc(tree_cov_matvec_inc_state_t *inc,
             if (pre_visit && !pre_visit(s, sp, ctx)) continue;
             tree_cov_matvec_inc_readout(gv, inc);
             st.s_orig = s; st.sp = sp;
-            st.span = (tree.interval.right - tree.interval.left) / mean_span;
+            st.span = use_span ? (tree.interval.right - tree.interval.left) / mean_span : 1.0;
             visit(&st, ctx);
         }
         if (ret < 0) {
@@ -947,7 +948,8 @@ double estimate_g_scale(const tsk_treeseq_t *ts, const int *hap_to_indiv,
 
     g_scale_ctx_t gctx = { .eps = eps, .n_indiv = n_indiv, .sum = 0.0, .count = 0 };
     int ret = tree_walker_run_inc(&inc, S, /*prune_map=*/NULL,
-                                  eps, gv, NULL, g_scale_visit, &gctx);
+                                  eps, gv, NULL, g_scale_visit, &gctx,
+                                  /*use_span=*/0);  /* learned prior-grid scale: un-span */
     double sum   = gctx.sum;
     int    count = gctx.count;
 
