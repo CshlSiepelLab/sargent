@@ -372,6 +372,37 @@ def main():
                          "0.20 = moderate mix. Block 1.1 ladder = 0/0.05/0.20.")
     ap.add_argument("--h2-snp",    type=float, default=0.3,  help="target fixed-effect heritability")
     ap.add_argument("--h2-arg",   type=float, default=0.3,  help="target random-effect heritability")
+    # --- Frequency architecture of the causal set (sargent-paper SIMULATION_SPECS §5) ---
+    # Both default to the values that reproduce prior behaviour exactly.
+    ap.add_argument("--causal-maf-min", type=float, default=0.0,
+                    help="minimum pooled MAF for a variant to be ELIGIBLE as causal "
+                         "(default 0.0 = no floor, prior behaviour).  Without a floor, "
+                         "causal variants are drawn uniformly from the site-frequency "
+                         "spectrum and are therefore mostly singletons/doubletons: their "
+                         "realised contribution is dominated by which few individuals "
+                         "happen to carry them, which destabilises the realised h2 and "
+                         "makes train and test heritability diverge.  Published analyses "
+                         "impose a floor even when rare variants are the subject "
+                         "(Schoech 2019: MAF>0.07%%; Gazal 2018: 0.5%%; Zeng 2018: 1%%).  "
+                         "NOTE this changes the RNG stream: the eligible set feeding "
+                         "rng.choice differs, so floor-on and floor-off runs are "
+                         "different draws, not the same draw perturbed.")
+    ap.add_argument("--alpha", type=float, default=-1.0,
+                    help="frequency dependence of PER-ALLELE effect variance: "
+                         "Var(beta_j) proportional to [2p(1-p)]^alpha, so the variance a "
+                         "variant EXPLAINS scales as [2p(1-p)]^(alpha+1).  "
+                         "alpha=-1 (default) is the standardised-genotype model -- every "
+                         "causal variant explains the same variance regardless of "
+                         "frequency -- and is what you get implicitly from 'standardise "
+                         "genotypes, draw effects i.i.d.'.  alpha=0 means no frequency "
+                         "dependence of per-allele effects.  Empirical estimates cluster "
+                         "near -0.4 (Schoech 2019: -0.38; Gazal 2018: -0.37; Zeng 2018 "
+                         "corroborating), under which MAF<1%% variants explain <10%% of "
+                         "SNP-heritability.  Applied as a deterministic reweighting of "
+                         "the drawn effects, so it consumes NO random numbers and "
+                         "alpha=-1 is bit-identical to prior behaviour.  Composes "
+                         "multiplicatively with --age-tau-coef; both act before the "
+                         "h2_snp normalisation, so order is irrelevant.")
     ap.add_argument("--n-causal",    type=int,   default=None,
                     help="number of causal SNPs (fixed effects).  If unset, defaults to "
                          "max(20, int(--causal-fraction * n_variants)).  An explicit value "
@@ -416,7 +447,25 @@ def main():
                          "(default 0 = no filter).  Set ~0.05 to make the panel "
                          "common-SNP / genotyping-array-like, so rare causal variants "
                          "are untyped and only the ARG can see them (Block 2.2: this is "
-                         "what creates the flavour-A-vs-B gap).")
+                         "what creates the flavour-A-vs-B gap).  Composes with "
+                         "--bed-coverage as a plain AND, so f_typed retains its meaning "
+                         "as the fraction of the ELIGIBLE pool that is typed.")
+    ap.add_argument("--bed-freq-weight", type=float, default=0.0,
+                    help="frequency-dependent ascertainment of the typed panel: variant "
+                         "j is sampled with probability proportional to [2p(1-p)]^w "
+                         "(default 0 = uniform, prior behaviour).  A uniform draw leaves "
+                         "the panel's frequency spectrum INVARIANT to --bed-coverage, so "
+                         "a simulated 5%% 'array' has the same MAF profile as full "
+                         "sequencing -- the opposite of a real genotyping array, which is "
+                         "designed from common variation and becomes progressively more "
+                         "common-biased as it thins.  A single fixed w reproduces that "
+                         "behaviour automatically, because weighted sampling from a "
+                         "rare-dominated pool concentrates on the common tail as the "
+                         "panel shrinks: at w=1 (weight proportional to genotypic "
+                         "variance) the median typed MAF runs ~0.09 at f_typed=0.3 and "
+                         "~0.29 at f_typed=0.05.  Unlike the uniform draw, which keeps a "
+                         "Binomial number of variants, the weighted draw keeps an EXACT "
+                         "count of round(f_typed * p).")
     ap.add_argument("--seed",        type=int,   default=42,   help="random seed")
     ap.add_argument("--out",         type=str,   default="sim", help="output prefix")
     # Phase 6b: SV-flavoured unobserved-variants class.  Variants are sampled
@@ -848,7 +897,22 @@ def main():
 
     if args.bed_coverage < 1.0:
         bed_rng = np.random.default_rng(args.seed + 1_000_003)
-        bed_mask = bed_rng.random(p) < args.bed_coverage
+        if args.bed_freq_weight == 0.0:
+            # Uniform thinning (prior behaviour).  Kept as the literal original
+            # call so the bed RNG stream is untouched when the new knob is off.
+            bed_mask = bed_rng.random(p) < args.bed_coverage
+        else:
+            # Frequency-dependent ascertainment: weight proportional to
+            # [2p(1-p)]^w, sampled without replacement.  See --bed-freq-weight.
+            _af  = dosage.mean(axis=1) / 2.0
+            _maf = np.minimum(_af, 1.0 - _af)
+            _w   = (2.0 * _maf * (1.0 - _maf)) ** args.bed_freq_weight
+            _elig = np.flatnonzero(_w > 0.0)     # monomorphic sites get zero weight
+            _k = int(round(args.bed_coverage * p))
+            _k = max(1, min(_k, len(_elig)))
+            bed_mask = np.zeros(p, dtype=bool)
+            bed_mask[bed_rng.choice(_elig, size=_k, replace=False,
+                                    p=_w[_elig] / _w[_elig].sum())] = True
     else:
         bed_mask = np.ones(p, dtype=bool)
 
@@ -913,6 +977,24 @@ def main():
     # tau-fold more causal variants per base (constant effect sizes).  This makes
     # per-annotation h^2 proportional to base_frac * tau while keeping the signal
     # polygenic (many modest-effect SNPs), which the downstream estimators need.
+    # SIMULATION_SPECS §5: restrict the ELIGIBLE set before the draw, so both the
+    # annotation-weighted and the plain branch below see the same pool.  This
+    # necessarily changes what rng.choice returns, hence the RNG-stream caveat in
+    # --causal-maf-min's help.
+    if args.causal_maf_min > 0.0:
+        _af  = dmean.ravel() / 2.0            # dosage is 0/1/2, so its mean is 2p
+        _maf = np.minimum(_af, 1.0 - _af)
+        # var_tau below is indexed by variant id, so filtering `remaining` keeps
+        # the annotation weights aligned with no extra bookkeeping.
+        remaining = remaining[_maf[remaining] >= args.causal_maf_min]
+        if len(remaining) < n_causal:
+            sys.exit(
+                f"ERROR: only {len(remaining)} variants have MAF >= "
+                f"{args.causal_maf_min}, but --n-causal {n_causal} are required.\n"
+                f"  Lower --causal-maf-min, lower --n-causal, or simulate a longer "
+                f"sequence (of {p} polymorphic variants, "
+                f"{int((_maf >= args.causal_maf_min).sum())} clear the floor).")
+
     if var_tau is not None:
         w = var_tau[remaining].astype(float)
         causal_idx = rng.choice(remaining, size=n_causal, replace=False,
@@ -926,6 +1008,17 @@ def main():
         k = rng.choice(K, p=pi_mix)
         if sigma2_mix[k] > 0:
             beta[j] = rng.normal(0.0, math.sqrt(sigma2_mix[k]))
+
+    # SIMULATION_SPECS §5: impose the frequency dependence of per-allele effects.
+    # beta above is on the STANDARDISED-genotype scale, i.e. alpha = -1 already.
+    # Per-allele beta_j = beta_std_j / dstd_j, so Var(beta_per_allele) ∝ dstd^-2 *
+    # Var(beta_std); to reach Var(beta_per_allele) ∝ (dstd^2)^alpha we need
+    # Var(beta_std) ∝ (dstd^2)^(alpha+1), i.e. scale beta_std by dstd^(alpha+1).
+    # dstd is used rather than a recomputed sqrt(2pq) because it is exactly what
+    # the standardisation divided by, so no HWE assumption enters.  Deterministic:
+    # consumes no RNG, and the exponent is 0 (a no-op) at the alpha=-1 default.
+    if args.alpha != -1.0:
+        beta[causal_idx] *= dstd.ravel()[causal_idx] ** (args.alpha + 1.0)
 
     # Block 2.1 — age-stratified effect-size scaling.
     # β_j² is scaled by (age_j / age_ref)^tau before h²_snp normalisation.
@@ -1164,12 +1257,18 @@ def main():
     bed_idx_of = np.full(p, -1, dtype=int)
     bed_idx_of[bed_mask] = np.arange(n_bed)
 
+    # `maf` is APPENDED as the last column on purpose: metrics.py reads this file
+    # by header name, but age_partition.py and e5_localized_age.py use positional
+    # np.loadtxt, so inserting a column would break them while appending is safe.
+    _af_out  = dmean.ravel() / 2.0
+    _maf_out = np.minimum(_af_out, 1.0 - _af_out)
     with open(args.out + ".true_beta.tsv", "w") as f:
-        f.write("snp_idx\tbp_pos\tbeta\tin_bed\tbed_idx\tage\n")
+        f.write("snp_idx\tbp_pos\tbeta\tin_bed\tbed_idx\tage\tmaf\n")
         for j in causal_idx:
             in_bed = 1 if bed_mask[j] else 0
             f.write(f"{j}\t{positions[j]}\t{beta[j]:.8g}\t{in_bed}\t"
-                    f"{bed_idx_of[j] if in_bed else -1}\t{ages[j]:.6g}\n")
+                    f"{bed_idx_of[j] if in_bed else -1}\t{ages[j]:.6g}\t"
+                    f"{_maf_out[j]:.6g}\n")
 
     # ws2 ground truth.  For per-tree architectures (ws2_vec is a numpy array),
     # writes .true_ws2.tsv as before.  For per-edge architectures (ws2_vec is a
@@ -1275,6 +1374,14 @@ def main():
             if cur < int(args.length):
                 f.write(f"{cur}\t{int(args.length)}\tintergenic\n")
 
+    # Realised MAF of the causal set, for the provenance block below.  Computed
+    # here rather than reused from the .true_beta.tsv writer so this does not
+    # depend on that block having run.
+    _af_params  = dmean.ravel() / 2.0
+    _maf_params = np.minimum(_af_params, 1.0 - _af_params)[causal_idx]
+    if _maf_params.size == 0:                     # h2_snp == 0: no causal SNPs
+        _maf_params = np.zeros(1)
+
     params = {
         "n_indiv":         n_train,
         "n_test":          n_test,
@@ -1286,8 +1393,22 @@ def main():
         "n_variants_full": p,
         "bed_coverage":    args.bed_coverage,
         "bed_maf_min":     args.bed_maf_min,
+        "bed_freq_weight": args.bed_freq_weight,
         "n_causal":        n_causal,
         "n_causal_in_bed": int(bed_mask[causal_idx].sum()),
+        # Frequency architecture (SIMULATION_SPECS §5).  The realised quantiles
+        # make it checkable after the fact that the floor did what was asked,
+        # and record how rare the causal set actually was when it did not.
+        "causal_maf_min":  args.causal_maf_min,
+        "alpha":           args.alpha,
+        "causal_maf_realised": {
+            "min":    float(np.min(_maf_params)),
+            "q25":    float(np.percentile(_maf_params, 25)),
+            "median": float(np.median(_maf_params)),
+            "q75":    float(np.percentile(_maf_params, 75)),
+            "max":    float(np.max(_maf_params)),
+            "frac_below_0.01": float((_maf_params < 0.01).mean()),
+        },
         "n_polymorphic":            int(p),
         "causal_fraction_target":   float(args.causal_fraction),
         "causal_fraction_realised": (float(n_causal) / p) if p else 0.0,
