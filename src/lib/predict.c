@@ -302,8 +302,9 @@ static int *map_ws2_train_to_full(const double *train_breaks, int S_train,
  * ------------------------------------------------------------------------- */
 typedef struct {
     double *uni;        /* length n_total accumulator for K_uni column */
-    double *sg;         /* length n_total accumulator for K_sg  column */
-    const double *ws2_full;
+    double *sg;         /* length n_total accumulator for K_sg column; NULL when
+                         * ws2 is absent (--snp-only): the learned arm is skipped */
+    const double *ws2_full;   /* NULL iff sg is NULL */
     int n_total;
 } kin_ctx_t;
 
@@ -311,8 +312,14 @@ static void kin_visit(const tree_walk_state_t *st, void *vctx)
 {
     kin_ctx_t *c = vctx;
     double span = st->span;
-    double w = c->ws2_full[st->s_orig] * span;
     const double *gv = st->gv;
+    /* The uniform accumulator is independent of ws2, which is why the four arms
+     * that use it (bayesR, snp_lmm, arg_lmm, sargent_u) need no Stage-2 fit. */
+    if (!c->sg) {
+        for (int i = 0; i < c->n_total; i++) c->uni[i] += span * gv[i];
+        return;
+    }
+    double w = c->ws2_full[st->s_orig] * span;
     for (int i = 0; i < c->n_total; i++) {
         double g = gv[i];
         c->uni[i] += span * g;
@@ -332,17 +339,22 @@ static int build_kinship_blocks(const tsk_treeseq_t *full, int n_tr, int n_te,
     if (tree_cov_matvec_inc_state_init(&inc, full, n_total, h2i_full) != 0)
         return -1;
 
+    /* K_sg_train/K_sg_cross are NULL when there is no Stage-2 ws2 fit; then the
+     * learned accumulator is not allocated and the walker skips it entirely. */
+    int have_sg = (ws2_full != NULL && K_sg_train != NULL && K_sg_cross != NULL);
+
     double *in  = calloc((size_t)n_total, sizeof(double));
     double *gv  = calloc((size_t)n_total, sizeof(double));
     double *uni = calloc((size_t)n_total, sizeof(double));
-    double *sgc = calloc((size_t)n_total, sizeof(double));
-    if (!in || !gv || !uni || !sgc) {
+    double *sgc = have_sg ? calloc((size_t)n_total, sizeof(double)) : NULL;
+    if (!in || !gv || !uni || (have_sg && !sgc)) {
         free(in); free(gv); free(uni); free(sgc);
         tree_cov_matvec_inc_state_free(&inc);
         return -1;
     }
 
-    kin_ctx_t ctx = { .uni = uni, .sg = sgc, .ws2_full = ws2_full,
+    kin_ctx_t ctx = { .uni = uni, .sg = sgc,
+                      .ws2_full = have_sg ? ws2_full : NULL,
                       .n_total = n_total };
 
     if (!silent)
@@ -353,7 +365,7 @@ static int build_kinship_blocks(const tsk_treeseq_t *full, int n_tr, int n_te,
         if (j > 0) in[j - 1] = 0.0;
         in[j] = 1.0;
         memset(uni, 0, (size_t)n_total * sizeof(double));
-        memset(sgc, 0, (size_t)n_total * sizeof(double));
+        if (have_sg) memset(sgc, 0, (size_t)n_total * sizeof(double));
 
         int ret = tree_walker_run_inc(&inc, S_full, /*prune_map=*/NULL,
                                       in, gv, /*pre_visit=*/NULL,
@@ -366,11 +378,11 @@ static int build_kinship_blocks(const tsk_treeseq_t *full, int n_tr, int n_te,
 
         for (int i = 0; i < n_tr; i++) {
             K_uni_train[(size_t)i * n_tr + j] = uni[i];
-            K_sg_train [(size_t)i * n_tr + j] = sgc[i];
+            if (have_sg) K_sg_train[(size_t)i * n_tr + j] = sgc[i];
         }
         for (int c = 0; c < n_te; c++) {
             K_uni_cross[(size_t)c * n_tr + j] = uni[n_tr + c];
-            K_sg_cross [(size_t)c * n_tr + j] = sgc[n_tr + c];
+            if (have_sg) K_sg_cross[(size_t)c * n_tr + j] = sgc[n_tr + c];
         }
     }
 
@@ -528,11 +540,15 @@ int sargent_predict(sargent_t *sg,
     int rc = -1;
     int n_tr = sg->n, p = sg->p;
 
-    if (!sg->ws2) {
-        fprintf(stderr, "predict: Stage 2 weights (ws2) missing; "
-                "--predict requires the ARG random-effect fit.\n");
-        return -1;
-    }
+    /* Stage-2 ws2 is needed ONLY by the full `sargent` arm.  Without it we still
+     * report bayesR, snp_lmm, arg_lmm and sargent_u -- the uniform kinship is
+     * independent of ws2 -- and omit `sargent` from the JSON so no consumer can
+     * mistake a fallback for the real thing.  Stage 2 is ~88% of a cell, so this
+     * is the cheap path (--snp-only --predict) for sweeps that do not need it. */
+    const int have_ws2 = (sg->ws2 != NULL);
+    if (!have_ws2 && !silent)
+        fprintf(stderr, "predict: no Stage-2 ws2; reporting four arms "
+                "(bayesR, snp_lmm, arg_lmm, sargent_u), omitting `sargent`.\n");
 
     /* ---- load full ARG ---- */
     if (!silent) fprintf(stderr, "predict: loading %s ...\n", full_trees_path);
@@ -561,21 +577,26 @@ int sargent_predict(sargent_t *sg,
     int *h2i_full = tsk_build_hap_to_indiv(&full);
     if (!h2i_full) { tsk_treeseq_free(&full); return -1; }
 
-    /* ---- map ws2 train-tree → full-tree ---- */
-    const double *train_breaks = tsk_treeseq_get_breakpoints(sg->ts);
-    const double *full_breaks  = tsk_treeseq_get_breakpoints(&full);
-    int *ws2_map = map_ws2_train_to_full(train_breaks, S_train,
-                                         full_breaks, S_full);
-    double *ws2_full = malloc((size_t)S_full * sizeof(double));
-    if (!ws2_map || !ws2_full) goto cleanup_ts;
-    for (int t = 0; t < S_full; t++) ws2_full[t] = sg->ws2[ws2_map[t]];
+    /* ---- map ws2 train-tree → full-tree (only needed for the `sargent` arm) ---- */
+    int *ws2_map = NULL;
+    double *ws2_full = NULL;
+    if (have_ws2) {
+        const double *train_breaks = tsk_treeseq_get_breakpoints(sg->ts);
+        const double *full_breaks  = tsk_treeseq_get_breakpoints(&full);
+        ws2_map = map_ws2_train_to_full(train_breaks, S_train,
+                                        full_breaks, S_full);
+        ws2_full = malloc((size_t)S_full * sizeof(double));
+        if (!ws2_map || !ws2_full) goto cleanup_ts;
+        for (int t = 0; t < S_full; t++) ws2_full[t] = sg->ws2[ws2_map[t]];
+    }
 
     /* ---- kinship blocks ---- */
     double *K_uni_train = malloc((size_t)n_tr * n_tr * sizeof(double));
     double *K_uni_cross = malloc((size_t)n_te * n_tr * sizeof(double));
-    double *K_sg_train  = malloc((size_t)n_tr * n_tr * sizeof(double));
-    double *K_sg_cross  = malloc((size_t)n_te * n_tr * sizeof(double));
-    if (!K_uni_train || !K_uni_cross || !K_sg_train || !K_sg_cross) goto cleanup_kin;
+    double *K_sg_train  = have_ws2 ? malloc((size_t)n_tr * n_tr * sizeof(double)) : NULL;
+    double *K_sg_cross  = have_ws2 ? malloc((size_t)n_te * n_tr * sizeof(double)) : NULL;
+    if (!K_uni_train || !K_uni_cross || (have_ws2 && (!K_sg_train || !K_sg_cross)))
+        goto cleanup_kin;
 
     if (build_kinship_blocks(&full, n_tr, n_te, h2i_full, S_full, ws2_full,
                              K_uni_train, K_uni_cross,
@@ -675,7 +696,10 @@ int sargent_predict(sargent_t *sg,
     for (int c = 0; c < n_te; c++) yhat[c] += prs_test[c];
     m_su = compute_metrics(yhat, y_test, n_te);
 
-    /* (e) sargent: residual r; center K_sg; BLUP; + Xβ */
+    /* (e) sargent: residual r; center K_sg; BLUP; + Xβ.
+     *     Skipped entirely without a Stage-2 ws2 fit -- this is the only arm
+     *     that needs it, and the JSON below omits it rather than substituting. */
+    if (have_ws2) {
     center_kinship(K_sg_train, n_tr, K_sg_cross, n_te);
     if (fit_blup(rtrain, K_sg_train, n_tr, &s2, &su2, alpha, &mean_fit) != 0) goto cleanup_pred;
     predict_blup(K_sg_cross, n_te, n_tr, alpha, mean_fit, yhat);
@@ -697,6 +721,7 @@ int sargent_predict(sargent_t *sg,
         sargent_rand_r = (sxx > 0 && syy > 0) ? sxy / sqrt(sxx * syy) : NAN;
         free(uhat);
     }
+    }   /* end if (have_ws2) -- the `sargent` arm */
 
     /* ---- write JSON ---- */
     {
@@ -722,13 +747,20 @@ int sargent_predict(sargent_t *sg,
         ARM("arg_lmm", m_arg);
         fprintf(f, "  \"arg_lmm_h2\": "); json_num(f, arg_h2); fprintf(f, ",\n");
         ARM("sargent_u", m_su);
-        ARM("sargent", m_sg);
-        fprintf(f, "  \"sargent_sigma2\": "); json_num(f, sargent_sigma2);
-        if (true_random) {
-            fprintf(f, ",\n  \"sargent_rand_r\": "); json_num(f, sargent_rand_r);
+        /* `sargent` is OMITTED (not zeroed, not aliased to sargent_u) when there
+         * is no Stage-2 ws2, so a consumer that expects it fails loudly rather
+         * than silently reading a stand-in.  A flag records why. */
+        if (have_ws2) {
+            ARM("sargent", m_sg);
+            fprintf(f, "  \"sargent_sigma2\": "); json_num(f, sargent_sigma2);
+            if (true_random) {
+                fprintf(f, ",\n  \"sargent_rand_r\": "); json_num(f, sargent_rand_r);
+            }
             fprintf(f, "\n");
         } else {
-            fprintf(f, "\n");
+            fprintf(f, "  \"sargent_omitted\": \"no Stage-2 ws2 fit "
+                       "(--snp-only); arms reported: bayesR, snp_lmm, arg_lmm, "
+                       "sargent_u\"\n");
         }
         #undef ARM
         fprintf(f, "}\n");
@@ -742,7 +774,10 @@ int sargent_predict(sargent_t *sg,
         fprintf(stderr, "  snp_lmm    R2=%+.3f r=%+.3f\n", m_snp.r2, m_snp.r);
         fprintf(stderr, "  arg_lmm    R2=%+.3f r=%+.3f\n", m_arg.r2, m_arg.r);
         fprintf(stderr, "  sargent_u  R2=%+.3f r=%+.3f\n", m_su.r2, m_su.r);
-        fprintf(stderr, "  sargent    R2=%+.3f r=%+.3f\n", m_sg.r2, m_sg.r);
+        if (have_ws2)
+            fprintf(stderr, "  sargent    R2=%+.3f r=%+.3f\n", m_sg.r2, m_sg.r);
+        else
+            fprintf(stderr, "  sargent    (omitted: no Stage-2 ws2)\n");
     }
     rc = 0;
 
