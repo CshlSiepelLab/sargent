@@ -18,6 +18,7 @@
 #include "sargent.h"
 #include "gall.h"
 #include "variational.h"
+#include "predict.h"
 #include "sargent.help.h"
 
 /* Read n phenotype values from f.
@@ -214,6 +215,14 @@ int main(int argc, char *argv[])
     const char *outroot = "sargent";
     const char *mode_str = "predict";   /* predict | localize (stub) */
 
+    /* Native out-of-sample prediction (--predict).  Paths default from the
+     * geno_prefix (the case prefix) per simulate.py's conventions. */
+    int predict_oos = 0;
+    const char *full_trees_arg = NULL;   /* default <geno_prefix>.full.trees */
+    const char *test_geno_arg  = NULL;   /* default <geno_prefix>.test */
+    const char *test_pheno_arg = NULL;   /* default <geno_prefix>.test.phen */
+    const char *predict_out_arg = NULL;  /* default <outroot>.predict.json */
+
     struct option long_opts[] = {
         {"silent",         0, 0, 'z'},
         {"ts-geno",        0, 0, 'G'},
@@ -229,6 +238,11 @@ int main(int argc, char *argv[])
         {"mode",           1, 0, 'M'},
         {"ws2-l1",         1, 0, 0x100},
         {"ws2-l2",         1, 0, 0x101},
+        {"predict",        0, 0, 0x102},
+        {"full-trees",     1, 0, 0x103},
+        {"test-geno",      1, 0, 0x104},
+        {"test-pheno",     1, 0, 0x105},
+        {"predict-out",    1, 0, 0x106},
         {"precompute",     0, 0, 'X'},
         {"version",        0, 0, 'v'},
         {"help",           0, 0, 'h'},
@@ -252,6 +266,11 @@ int main(int argc, char *argv[])
         case 'N': nprobe      = atoi(optarg);     break;
         case 0x100: ws2_l1    = atof(optarg);     break;
         case 0x101: ws2_l2    = atof(optarg);     break;
+        case 0x102: predict_oos    = 1;           break;
+        case 0x103: full_trees_arg = optarg;      break;
+        case 0x104: test_geno_arg  = optarg;      break;
+        case 0x105: test_pheno_arg = optarg;      break;
+        case 0x106: predict_out_arg= optarg;      break;
         case 'X': precompute  = 1;                break;
         case 'v': printf("sargent version %s\n", SARGENT_VERSION); exit(0);
         case 'h': printf("%s", HELP); exit(0);
@@ -302,6 +321,19 @@ int main(int argc, char *argv[])
             exit(EXIT_FAILURE);
         }
         em_iters = 0;
+    }
+
+    if (predict_oos) {
+        if (ts_geno) {
+            fprintf(stderr, "ERROR: --predict requires BED genotypes "
+                    "(not --ts-geno); test genotypes come from a test BED.\n");
+            exit(EXIT_FAILURE);
+        }
+        if (snp_only) {
+            fprintf(stderr, "ERROR: --predict needs the Stage-2 ARG fit; "
+                    "it is incompatible with --snp-only.\n");
+            exit(EXIT_FAILURE);
+        }
     }
 
     int n_pos   = argc - optind;
@@ -374,8 +406,10 @@ int main(int argc, char *argv[])
     }
 
     sargent_t *sg = sargent_new(gr, &ts, y);
-    free(y);
+    /* Keep the uncentered `y` alive: --predict needs the original train
+     * phenotype (sg->y is centered).  Freed at the end of main(). */
     if (!sg) {
+        free(y);
         fprintf(stderr, "ERROR: failed to build sargent object.\n");
         geno_close(gr);
         tsk_treeseq_free(&ts);
@@ -553,11 +587,32 @@ int main(int argc, char *argv[])
         fprintf(stderr, "  sigma2    : %.4f\n", sg->sigma2);
     }
 
+    /* ---- Native out-of-sample prediction (--predict) --------------------- */
+    int predict_rc = 0;
+    if (predict_oos) {
+        char full_trees[4096], test_geno[4096], test_pheno[4096], predict_out[4096];
+        if (full_trees_arg) snprintf(full_trees, sizeof(full_trees), "%s", full_trees_arg);
+        else                snprintf(full_trees, sizeof(full_trees), "%s.full.trees", geno_prefix);
+        if (test_geno_arg)  snprintf(test_geno, sizeof(test_geno), "%s", test_geno_arg);
+        else                snprintf(test_geno, sizeof(test_geno), "%s.test", geno_prefix);
+        if (test_pheno_arg) snprintf(test_pheno, sizeof(test_pheno), "%s", test_pheno_arg);
+        else                snprintf(test_pheno, sizeof(test_pheno), "%s.test.phen", geno_prefix);
+        if (predict_out_arg) snprintf(predict_out, sizeof(predict_out), "%s", predict_out_arg);
+        else                 snprintf(predict_out, sizeof(predict_out), "%s.predict.json", outroot);
+
+        if (!silent) fprintf(stderr, "\nStage 3: out-of-sample prediction ...\n");
+        predict_rc = sargent_predict(sg, y, geno_prefix, full_trees,
+                                     test_geno, test_pheno, predict_out, silent);
+        if (predict_rc != 0)
+            fprintf(stderr, "ERROR: prediction stage failed.\n");
+    }
+
     sg->gall = NULL;       /* gall is managed externally; clear before free */
     sargent_free(sg);
+    free(y);
     gall_free(gall);
     geno_close(gr);
     tsk_treeseq_free(&ts);
     if (!silent) fprintf(stderr, "Done.\n");
-    return 0;
+    return predict_rc == 0 ? 0 : EXIT_FAILURE;
 }

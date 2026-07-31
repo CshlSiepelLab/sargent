@@ -199,6 +199,36 @@ static const geno_ops_t bed_ops = {
     bed_close,
 };
 
+int geno_bed_poly_file_index(const geno_reader_t *r, int j)
+{
+    if (!r || r->ops != &bed_ops) return -1;
+    if (j < 0 || j >= r->n_variants) return -1;
+    const bed_impl_t *b = r->impl;
+    if (!b->poly_idx) return -1;
+    return b->poly_idx[j];
+}
+
+int geno_bed_read_raw_at(geno_reader_t *r, int file_var_idx, double *out)
+{
+    if (!r || r->ops != &bed_ops) return -1;
+    bed_impl_t *b = r->impl;
+    if (file_var_idx < 0 || file_var_idx >= b->n_variants_total) return -1;
+
+    off_t off = 3 + (off_t)file_var_idx * (off_t)b->bytes_per_var;
+    if (fseeko(b->fp, off, SEEK_SET) != 0) return -1;
+    if (fread(b->raw_buf, 1, b->bytes_per_var, b->fp) != b->bytes_per_var)
+        return -1;
+    decode_raw(b->raw_buf, b->n_samples_total, out);
+
+    /* Reading raw-by-index moves the stream position; if the caller later
+     * resumes streaming reads, restore the streaming cursor. */
+    if (r->stats && b->cur_poly < r->n_variants) {
+        off_t cur = 3 + (off_t)b->poly_idx[b->cur_poly] * (off_t)b->bytes_per_var;
+        fseeko(b->fp, cur, SEEK_SET);
+    }
+    return 0;
+}
+
 geno_reader_t *geno_open_bed(const char *prefix)
 {
     char path[4096];

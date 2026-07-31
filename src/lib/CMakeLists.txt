@@ -7,6 +7,7 @@ add_library(sargent_core STATIC
     conjgrad.c
     hutchinson.c
     gall.c
+    predict.c
 )
 
 target_include_directories(sargent_core PUBLIC
