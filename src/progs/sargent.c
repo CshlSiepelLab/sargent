@@ -329,10 +329,16 @@ int main(int argc, char *argv[])
                     "(not --ts-geno); test genotypes come from a test BED.\n");
             exit(EXIT_FAILURE);
         }
+        /* --snp-only is ALLOWED.  Four of the five arms (bayesR, snp_lmm,
+         * arg_lmm, sargent_u) never touch the learned per-tree ws2 -- the
+         * uniform kinship accumulator in predict.c is independent of it.  Only
+         * the full `sargent` arm needs Stage 2, and predict_oos() omits that arm
+         * from the JSON when ws2 is absent.  Stage 2 is ~88% of a cell, so this
+         * is the cheap path for sweeps that do not need the learned-weight arm. */
         if (snp_only) {
-            fprintf(stderr, "ERROR: --predict needs the Stage-2 ARG fit; "
-                    "it is incompatible with --snp-only.\n");
-            exit(EXIT_FAILURE);
+            fprintf(stderr, "note: --predict with --snp-only reports four arms "
+                    "(bayesR, snp_lmm, arg_lmm, sargent_u); `sargent` needs the "
+                    "Stage-2 ws2 fit and is omitted.\n");
         }
     }
 
