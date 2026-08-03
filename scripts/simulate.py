@@ -466,6 +466,27 @@ def main():
                          "~0.29 at f_typed=0.05.  Unlike the uniform draw, which keeps a "
                          "Binomial number of variants, the weighted draw keeps an EXACT "
                          "count of round(f_typed * p).")
+    ap.add_argument("--bed-snps-per-mb", type=float, default=0.0,
+                    help="size the typed panel in SNPs per Mb instead of as a fraction "
+                         "of the simulated variant count (default 0 = use --bed-coverage). "
+                         "Overrides --bed-coverage when > 0.  --bed-coverage's meaning "
+                         "depends on how many variants the coalescent happened to produce, "
+                         "so it is comparable neither across region lengths nor to a real "
+                         "platform; SNPs/Mb is both.  Reference points, genome-wide counts "
+                         "over ~3 Gb: ~1400/Mb = Omni5 (4.3M), ~830/Mb = Omni2.5 (2.5M), "
+                         "~250/Mb = the common arrays (GSA 650K, OmniExpress 700K, UK "
+                         "Biobank Axiom 820K), ~80/Mb = 240K, ~30/Mb = 90K.  These "
+                         "simulations produce ~3800 variants/Mb, so a common array is "
+                         "f_typed ~ 0.066 -- far sparser than the axis Fig 2 used.")
+    ap.add_argument("--causal-not-typed", action="store_true",
+                    help="force causal variants OUT of the typed panel, so the coverage "
+                         "axis measures LD tagging rather than direct genotyping.  Without "
+                         "this, --causal-maf-min and --bed-freq-weight both select on "
+                         "frequency and the panel preferentially contains exactly the "
+                         "variants made causal: measured at f_typed=0.3, the panel directly "
+                         "genotyped causal variants carrying 99%% of the genetic variance, "
+                         "leaving nothing for tagging to explain.  Mirrors the treatment "
+                         "the --h2-unobs class already gets.")
     ap.add_argument("--seed",        type=int,   default=42,   help="random seed")
     ap.add_argument("--out",         type=str,   default="sim", help="output prefix")
     # Phase 6b: SV-flavoured unobserved-variants class.  Variants are sampled
@@ -895,24 +916,37 @@ def main():
         unobs_idx = np.zeros(0, dtype=int)
         remaining = np.arange(p)
 
-    if args.bed_coverage < 1.0:
+    # --bed-snps-per-mb targets the panel SIZE directly.  --bed-coverage's meaning
+    # depends on how many variants the coalescent happened to produce, so it is
+    # comparable neither across region lengths nor to a real array; SNPs/Mb is
+    # both.  For scale: a real array is ~333 SNPs/Mb (1M SNPs / 3 Gb), which is
+    # f_typed ~ 0.087 at the ~3800 variants/Mb these simulations produce.
+    _target_k = None
+    if args.bed_snps_per_mb > 0.0:
+        _target_k = int(round(args.bed_snps_per_mb * args.length / 1e6))
+
+    if _target_k is not None or args.bed_coverage < 1.0:
         bed_rng = np.random.default_rng(args.seed + 1_000_003)
-        if args.bed_freq_weight == 0.0:
+        if _target_k is None and args.bed_freq_weight == 0.0:
             # Uniform thinning (prior behaviour).  Kept as the literal original
-            # call so the bed RNG stream is untouched when the new knob is off.
+            # call so the bed RNG stream is untouched when the new knobs are off.
             bed_mask = bed_rng.random(p) < args.bed_coverage
         else:
-            # Frequency-dependent ascertainment: weight proportional to
-            # [2p(1-p)]^w, sampled without replacement.  See --bed-freq-weight.
+            # Fixed-size panel sampled without replacement, weighted by
+            # [2p(1-p)]^w when --bed-freq-weight > 0 and uniform otherwise.
             _af  = dosage.mean(axis=1) / 2.0
             _maf = np.minimum(_af, 1.0 - _af)
-            _w   = (2.0 * _maf * (1.0 - _maf)) ** args.bed_freq_weight
-            _elig = np.flatnonzero(_w > 0.0)     # monomorphic sites get zero weight
-            _k = int(round(args.bed_coverage * p))
+            _het = 2.0 * _maf * (1.0 - _maf)
+            _elig = np.flatnonzero(_het > 0.0)   # monomorphic sites are ineligible
+            if args.bed_freq_weight == 0.0:
+                _pw = None
+            else:
+                _w  = _het ** args.bed_freq_weight
+                _pw = _w[_elig] / _w[_elig].sum()
+            _k = _target_k if _target_k is not None else int(round(args.bed_coverage * p))
             _k = max(1, min(_k, len(_elig)))
             bed_mask = np.zeros(p, dtype=bool)
-            bed_mask[bed_rng.choice(_elig, size=_k, replace=False,
-                                    p=_w[_elig] / _w[_elig].sum())] = True
+            bed_mask[bed_rng.choice(_elig, size=_k, replace=False, p=_pw)] = True
     else:
         bed_mask = np.ones(p, dtype=bool)
 
@@ -1002,6 +1036,52 @@ def main():
     else:
         causal_idx = rng.choice(remaining, size=n_causal, replace=False)
     causal_idx.sort()
+
+    # --causal-not-typed: force causal variants out of the BED, mirroring what
+    # Phase 6b already does for the unobserved class.  Without this, a coverage
+    # axis does not measure LD TAGGING: --causal-maf-min and --bed-freq-weight
+    # both select on frequency, so ascertainment preferentially types exactly the
+    # variants made causal (measured: at f_typed=0.3 the panel directly genotyped
+    # causal variants carrying 99% of the genetic variance).  Applied here, after
+    # causal selection and before bed_mask is used, so in_bed and n_causal_in_bed
+    # report the truth.
+    if args.causal_not_typed:
+        _n_before = n_bed
+        bed_mask[causal_idx] = False
+        if not bed_mask.any():
+            sys.exit("ERROR: --causal-not-typed emptied the BED panel; raise "
+                     "--bed-snps-per-mb / --bed-coverage")
+        # n_bed was computed from bed_mask above, before causal_idx existed, and
+        # write_plink iterates range(n_bed) over bed_dosage -- so it MUST be
+        # refreshed here or the panel and its declared size disagree.
+        # Dropping causal variants shrinks the panel below the size that was
+        # requested, so without a top-up each density point would silently mean a
+        # different density (at 1400 SNPs/Mb the panel came back 11% short).  Refill
+        # from the eligible non-causal variants using the same ascertainment
+        # weights, so --bed-snps-per-mb stays exact and comparable across the axis.
+        _short = _n_before - int(bed_mask.sum())
+        if _short > 0:
+            _af2  = dosage.mean(axis=1) / 2.0
+            _maf2 = np.minimum(_af2, 1.0 - _af2)
+            _het2 = 2.0 * _maf2 * (1.0 - _maf2)
+            _avail = np.flatnonzero((_het2 > 0.0) & (~bed_mask))
+            _avail = np.setdiff1d(_avail, causal_idx)
+            if args.h2_unobs > 0:
+                _avail = np.setdiff1d(_avail, unobs_idx)
+            if args.bed_maf_min > 0.0:
+                _avail = _avail[_maf2[_avail] >= args.bed_maf_min]
+            _take = min(_short, len(_avail))
+            if _take > 0:
+                _rng2 = np.random.default_rng(args.seed + 1_000_009)
+                if args.bed_freq_weight == 0.0:
+                    _pw2 = None
+                else:
+                    _w2  = _het2[_avail] ** args.bed_freq_weight
+                    _pw2 = _w2 / _w2.sum()
+                bed_mask[_rng2.choice(_avail, size=_take, replace=False, p=_pw2)] = True
+        n_bed = int(bed_mask.sum())
+        print(f"  --causal-not-typed: dropped {_n_before - int(bed_mask.sum()) + _short} "
+              f"causal variant(s), refilled {_short}; {n_bed} typed", flush=True)
 
     beta = np.zeros(p)
     for j in causal_idx:
