@@ -358,6 +358,16 @@ void var_fixed(sargent_t *sg, int silent)
     double vf_cap = VAR_FIXED_VFCAP;
     { const char *e = getenv("SARGENT_S2_VFCAP"); if (e) { double v = atof(e); if (v >= 0.0) vf_cap = v; } }
 
+    /* Learn the BayesR mixture scale (EM on sigma2_mix each sweep, keeping the
+     * relative grid fixed). OFF by default so existing results are byte-identical;
+     * SARGENT_LEARN_SCALE=1 enables it. The frozen sigma2_mix set in sargent_new
+     * ([0,1e-4,1e-3,1e-2]*var_y) does not adapt to the trait's effect scale and so
+     * over-shrinks large effects (~8x below the data-driven scale on WGS cells,
+     * per the sargent-paper D1 analysis); learning it recovers the GCTB-style
+     * adaptive sigma2_beta and the associated held-out r2. */
+    int learn_scale = 0;
+    { const char *e = getenv("SARGENT_LEARN_SCALE"); if (e && atoi(e) != 0) learn_scale = 1; }
+
     for (int iter = 0; iter < VAR_FIXED_MAX_ITER; iter++) {
 
         /* u_bar = n/σ² is constant across all SNPs for standardised genotypes */
@@ -365,6 +375,7 @@ void var_fixed(sargent_t *sg, int silent)
 
         double max_delta = 0.0;
         memset(gamma_sum, 0, (size_t)K * sizeof(double));
+        double scale_num = 0.0, scale_den = 0.0;   /* EM sufficient stats for the mixture scale */
         int n_read = 0;
 
         geno_rewind(sg->gr);
@@ -417,6 +428,10 @@ void var_fixed(sargent_t *sg, int silent)
                 double v_jk   = 1.0 / (u_bar + 1.0 / sg->sigma2_mix[k]);
                 double mu_jk  = t_j * v_jk;
                 beta_new     += gamma[k] * mu_jk;
+                /* EM stats for the mixture scale (non-null components only):
+                 * factor = Σ γ_jk E[β_jk²]/σ_k² ÷ Σ γ_jk, applied after the sweep */
+                scale_num    += gamma[k] * (mu_jk * mu_jk + v_jk) / sg->sigma2_mix[k];
+                scale_den    += gamma[k];
             }
 
             /* Damped update: β ← ½β_old + ½β_posterior.
@@ -442,6 +457,23 @@ void var_fixed(sargent_t *sg, int silent)
         if (n_read > 0) {
             for (int k = 0; k < K; k++)
                 sg->pi_mix[k] = gamma_sum[k] / n_read;
+        }
+
+        /* Learn the mixture scale (EM), preserving the relative grid: multiply
+         * every non-null σ_k² by the same factor = Σγ E[β²]/σ_k² ÷ Σγ. Guards
+         * keep it in the regime the freeze was protecting: a per-sweep factor
+         * clamp [0.25,4] (no single-step snap) and an absolute cap σ_k² ≤ var_y
+         * (no single-SNP effect exceeds the phenotypic variance); the VFCAP
+         * trust region below is the final backstop on var(Xβ). */
+        if (learn_scale && scale_den > 0.0) {
+            double factor = scale_num / scale_den;
+            if (factor < 0.25) factor = 0.25;
+            if (factor > 4.0)  factor = 4.0;
+            for (int k = 0; k < K; k++) {
+                if (sg->sigma2_mix[k] <= 0.0) continue;
+                double s2 = sg->sigma2_mix[k] * factor;
+                sg->sigma2_mix[k] = (s2 > var_y) ? var_y : s2;
+            }
         }
 
         /* Trust region on the fixed effect: the SNP-explained component
