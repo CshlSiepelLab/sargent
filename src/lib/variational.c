@@ -25,6 +25,7 @@
 #define VAR_DEFAULT_K        4
 #define VAR_DEFAULT_M        2       /* spike-and-slab for random effects: null + slab */
 #define VAR_FIXED_MAX_ITER   500
+#define VAR_FIXED_POLYAK_BURN 20     /* sweeps skipped before Polyak-averaging beta (opt-in) */
 #define VAR_RANDOM_MAX_ITER       100  /* total EM iterations (burn-in + averaging), cold-start */
 #define VAR_RANDOM_MAX_ITER_WARM   50  /* total EM iterations when EMMA-warm-started */
 #define FUSED_LASSO_PROX_MAX  200    /* coord-descent sweeps per prox call */
@@ -363,10 +364,31 @@ void var_fixed(sargent_t *sg, int silent)
      * SARGENT_LEARN_SCALE=1 enables it. The frozen sigma2_mix set in sargent_new
      * ([0,1e-4,1e-3,1e-2]*var_y) does not adapt to the trait's effect scale and so
      * over-shrinks large effects (~8x below the data-driven scale on WGS cells,
-     * per the sargent-paper D1 analysis); learning it recovers the GCTB-style
-     * adaptive sigma2_beta and the associated held-out r2. */
+     * per the sargent-paper D1 analysis). NOTE (D1 follow-up): learning the scale
+     * turned out to be r2-NEUTRAL on the real estimator (held-out r2 gain
+     * -0.0014, 95% CI [-0.0051,+0.0023]); it is a stability/h2_snp-calibration
+     * option (repairs escaping-beta degeneracy on cross-ancestry cells), not a
+     * prediction fix. Kept OFF by default for that reason. */
     int learn_scale = 0;
     { const char *e = getenv("SARGENT_LEARN_SCALE"); if (e && atoi(e) != 0) learn_scale = 1; }
+
+    /* Polyak-Ruppert averaging of beta over post-burn-in sweeps. var_fixed's
+     * stopping rule watches sigma2 (rel_dsig), but at p >> n beta can settle into a
+     * limit cycle (mixture components flip-flopping) whose amplitude never decays
+     * while sigma2 converges — so the run halts on a criterion blind to it (observed:
+     * max_delta plateaus ~23% of max|beta| through exit). Averaging the tail iterate
+     * is the standard fix (var_random already does this for Stage 2). ON by default
+     * as of 0.4.0, validated on 10 WGS arg0 h08 seeds: the averaged beta leaves a
+     * smaller training residual than the final iterate on 10/10 seeds (h2_snp
+     * +0.0059, 95% CI [+0.0042,+0.0076], p=2e-5), confirming the exit point is an
+     * off-centre sample of the cycle. The held-out r2 effect is small and marginal
+     * (+0.0019, n=10, p=0.047), so this is an estimator-correctness fix rather than
+     * a prediction fix. SARGENT_POLYAK_BETA=0 restores the pre-0.4.0 final-iterate
+     * behaviour (byte-identical to <=0.3.0). */
+    int polyak = 1;
+    { const char *e = getenv("SARGENT_POLYAK_BETA"); if (e) polyak = (atoi(e) != 0); }
+    double *beta_sum = NULL; long navg = 0;
+    if (polyak) { beta_sum = calloc((size_t)p, sizeof(double)); if (!beta_sum) polyak = 0; }
 
     for (int iter = 0; iter < VAR_FIXED_MAX_ITER; iter++) {
 
@@ -526,9 +548,33 @@ void var_fixed(sargent_t *sg, int silent)
             fprintf(stderr, " ]\n");
         }
 
+        if (polyak && iter >= VAR_FIXED_POLYAK_BURN) {
+            for (int j = 0; j < p; j++) beta_sum[j] += sg->beta[j];
+            navg++;
+        }
+
         old_sigma2 = sg->sigma2;
         if (rel_dsig < VAR_FIXED_TOL) break;
     }
+
+    /* Commit the Polyak average and recompute sigma2/h2_snp from it for consistency. */
+    if (polyak && navg > 0) {
+        for (int j = 0; j < p; j++) sg->beta[j] = beta_sum[j] / (double)navg;
+        memcpy(r, sg->y, (size_t)n * sizeof(double));
+        geno_rewind(sg->gr);
+        for (int j = 0; j < p; j++) {
+            if (geno_read_variant(sg->gr, g, GENO_STANDARDIZE) <= 0) break;
+            double b = sg->beta[j];
+            if (b != 0.0) for (int i = 0; i < n; i++) r[i] -= b * g[i];
+        }
+        double rr = 0.0;
+        for (int i = 0; i < n; i++) rr += r[i] * r[i];
+        double s2 = rr / n;
+        if (s2 < 1e-10 * var_y) s2 = 1e-10 * var_y;
+        sg->sigma2 = s2;
+        sg->h2_snp = (var_y > 0.0) ? 1.0 - sg->sigma2 / var_y : 0.0;
+    }
+    free(beta_sum);
 
     free(g);
     free(r);
