@@ -364,10 +364,16 @@ void var_fixed(sargent_t *sg, int silent)
      * limit cycle (mixture components flip-flopping) whose amplitude never decays
      * while sigma2 converges — so the run halts on a criterion blind to it (observed:
      * max_delta plateaus ~23% of max|beta| through exit). Averaging the tail iterate
-     * is the standard fix (var_random already does this for Stage 2). OFF by default
-     * (SARGENT_POLYAK_BETA=1 enables); output is byte-identical when off. */
-    int polyak = 0;
-    { const char *e = getenv("SARGENT_POLYAK_BETA"); if (e && atoi(e) != 0) polyak = 1; }
+     * is the standard fix (var_random already does this for Stage 2). ON by default
+     * as of 0.4.0, validated on 10 WGS arg0 h08 seeds: the averaged beta leaves a
+     * smaller training residual than the final iterate on 10/10 seeds (h2_snp
+     * +0.0059, 95% CI [+0.0042,+0.0076], p=2e-5), confirming the exit point is an
+     * off-centre sample of the cycle. The held-out r2 effect is small and marginal
+     * (+0.0019, n=10, p=0.047), so this is an estimator-correctness fix rather than
+     * a prediction fix. SARGENT_POLYAK_BETA=0 restores the pre-0.4.0 final-iterate
+     * behaviour (byte-identical to <=0.3.0). */
+    int polyak = 1;
+    { const char *e = getenv("SARGENT_POLYAK_BETA"); if (e) polyak = (atoi(e) != 0); }
     double *beta_sum = NULL; long navg = 0;
     if (polyak) { beta_sum = calloc((size_t)p, sizeof(double)); if (!beta_sum) polyak = 0; }
 
