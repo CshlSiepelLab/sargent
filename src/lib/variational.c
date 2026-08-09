@@ -515,7 +515,16 @@ static void var_fixed_run(sargent_t *sg, int silent, uint64_t rseed, int randomi
     double *beta_sum = NULL; long navg = 0;
     if (polyak) { beta_sum = calloc((size_t)p, sizeof(double)); if (!beta_sum) polyak = 0; }
 
-    for (int iter = 0; iter < VAR_FIXED_MAX_ITER; iter++) {
+    /* Convergence knobs (diagnostic; defaults reproduce <=0.4.0 exactly).
+     * The stopping rule watches sigma2, which the file's own Polyak note
+     * records as blind to a beta limit cycle -- so whether each restart is
+     * actually AT an optimum is testable only by tightening these. */
+    int    max_iter = VAR_FIXED_MAX_ITER;
+    double s1_tol   = VAR_FIXED_TOL;
+    { const char *e = getenv("SARGENT_S1_MAXITER"); if (e) { int v = atoi(e); if (v > 0) max_iter = v; } }
+    { const char *e = getenv("SARGENT_S1_TOL");     if (e) { double v = atof(e); if (v > 0) s1_tol = v; } }
+
+    for (int iter = 0; iter < max_iter; iter++) {
 
         /* u_bar = n/σ² is constant across all SNPs for standardised genotypes */
         double u_bar = (double)n / sg->sigma2;
@@ -683,7 +692,7 @@ static void var_fixed_run(sargent_t *sg, int silent, uint64_t rseed, int randomi
         }
 
         old_sigma2 = sg->sigma2;
-        if (rel_dsig < VAR_FIXED_TOL) break;
+        if (rel_dsig < s1_tol) break;
     }
 
     /* Commit the Polyak average and recompute sigma2/h2_snp from it for consistency. */
@@ -777,6 +786,21 @@ void var_fixed(sargent_t *sg, int silent)
                       k == 0 ? 0 : 1, 1);
 
         double e = var_fixed_elbo(sg, gs, rs);
+        /* Diagnostic: SARGENT_STAGE1_DUMP_RESTARTS=<prefix> writes each
+         * restart's beta so the ELBO ranking can be scored against held-out
+         * r2 offline (is selection, or search, the bottleneck?). Debug only. */
+        { const char *dp = getenv("SARGENT_STAGE1_DUMP_RESTARTS");
+          if (dp && *dp) {
+              char path[4096];
+              snprintf(path, sizeof path, "%s_restart%d.beta.tsv", dp, k);
+              FILE *fp = fopen(path, "w");
+              if (fp) {
+                  fprintf(fp, "# elbo %.10g h2_snp %.10g sigma2 %.10g\n",
+                          e, sg->h2_snp, sg->sigma2);
+                  for (int j = 0; j < p; j++) fprintf(fp, "%.10g\n", sg->beta[j]);
+                  fclose(fp);
+              }
+          } }
         if (!silent)
             fprintf(stderr, "var_fixed restart %d/%d: elbo=%.4f h2_snp=%.4f sigma2=%.4f\n",
                     k + 1, nrestart, e, sg->h2_snp, sg->sigma2);
