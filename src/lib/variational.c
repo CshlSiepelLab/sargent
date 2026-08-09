@@ -42,6 +42,10 @@
  * ancestry covariates in Stage 1 (see issue #22 / ROADMAP). Env override:
  * SARGENT_S2_VFCAP (0 disables). */
 #define VAR_FIXED_VFCAP      0.6
+/* Relaxed trust region used when ELBO-selected multi-start is active; see the
+ * rationale at its use site in var_fixed_run. A 0.9 cap never binds on the
+ * 500 kb h2=0.8 grid (identical to no cap) but still catches genuine blow-up. */
+#define VAR_FIXED_VFCAP_MULTISTART 0.9
 
 /* Block 2.6 — fused-lasso proximal helpers (sparsity-on-levels +
  * sparsity-on-differences on theta = log ws² − mean log ws²).
@@ -318,7 +322,114 @@ void sargent_free(sargent_t *sg)
  *     π_k  ← (Σ_j γ_jk) / p
  *     σ²   ← r^T r / n
  * ---------------------------------------------------------------------- */
-void var_fixed(sargent_t *sg, int silent)
+/* xorshift64* — small deterministic RNG for restart sweep-order permutations.
+ * Self-contained so restarts reproduce from their seed alone and do not
+ * disturb any global rand() state. */
+static uint64_t vf_rng_next(uint64_t *s)
+{
+    uint64_t x = *s;
+    x ^= x >> 12; x ^= x << 25; x ^= x >> 27;
+    *s = x;
+    return x * 2685821657736338717ULL;
+}
+
+static void vf_shuffle(int *a, int m, uint64_t *s)
+{
+    for (int i = m - 1; i > 0; i--) {
+        int j = (int)(vf_rng_next(s) % (uint64_t)(i + 1));
+        int t = a[i]; a[i] = a[j]; a[j] = t;
+    }
+}
+
+/* Evaluate the mean-field variational objective (ELBO) at the current
+ * variational parameters.  Used only to RANK restarts; the identical criterion
+ * is applied to each, so the ranking is meaningful even though the
+ * responsibilities are recomputed here from the committed beta rather than
+ * carried out of the sweep (they differ slightly under Polyak averaging).
+ *
+ *   ELBO = -n/2 log(2 pi s2) - (||r||^2 + n * sum_j Var_q[beta_j]) / (2 s2)
+ *          + sum_j sum_k    gamma_jk log(pi_k / gamma_jk)
+ *          + sum_j sum_k>0  gamma_jk [ 1/2 log(v_jk/s_k^2) + 1/2
+ *                                      - (mu_jk^2 + v_jk)/(2 s_k^2) ]
+ *
+ * with standardised genotypes (x_j'x_j = n).  Two genotype passes.
+ * Returns -HUGE_VAL on allocation failure. */
+static double var_fixed_elbo(sargent_t *sg, double *g, double *r)
+{
+    const int n = sg->n, p = sg->p, K = sg->K;
+    const double se = sg->sigma2;
+    if (!(se > 0.0)) return -HUGE_VAL;
+    const double u_bar = (double)n / se;
+
+    /* pass 1: residual from the committed beta */
+    memcpy(r, sg->y, (size_t)n * sizeof(double));
+    geno_rewind(sg->gr);
+    for (int j = 0; j < p; j++) {
+        if (geno_read_variant(sg->gr, g, GENO_STANDARDIZE) <= 0) break;
+        double b = sg->beta[j];
+        if (b != 0.0) for (int i = 0; i < n; i++) r[i] -= b * g[i];
+    }
+
+    double *lg = malloc((size_t)K * sizeof(double));
+    double *gm = malloc((size_t)K * sizeof(double));
+    if (!lg || !gm) { free(lg); free(gm); return -HUGE_VAL; }
+
+    double var_sum = 0.0, kl = 0.0;
+
+    /* pass 2: per-SNP variational terms at the final hyperparameters */
+    geno_rewind(sg->gr);
+    for (int j = 0; j < p; j++) {
+        if (geno_read_variant(sg->gr, g, GENO_STANDARDIZE) <= 0) break;
+        double bj = sg->beta[j];
+        double xr = 0.0;
+        for (int i = 0; i < n; i++) xr += g[i] * (r[i] + bj * g[i]);
+        double t_j  = xr / se;
+        double z_sq = t_j * t_j / u_bar;
+
+        double lmax = -1e300;
+        for (int k = 0; k < K; k++) {
+            double sk2 = sg->sigma2_mix[k];
+            double lpi = log(sg->pi_mix[k] + PI_FLOOR);
+            if (sk2 == 0.0) lg[k] = lpi - 0.5 * z_sq;
+            else {
+                double s_k = u_bar * sk2 + 1.0;
+                lg[k] = lpi - 0.5 * (log(s_k) + z_sq / s_k);
+            }
+            if (lg[k] > lmax) lmax = lg[k];
+        }
+        double sum_g = 0.0;
+        for (int k = 0; k < K; k++) { gm[k] = exp(lg[k] - lmax); sum_g += gm[k]; }
+        for (int k = 0; k < K; k++) gm[k] /= sum_g;
+
+        double mean = 0.0, m2 = 0.0;
+        for (int k = 0; k < K; k++) {
+            if (gm[k] > 0.0)
+                kl += gm[k] * (log(sg->pi_mix[k] + PI_FLOOR) - log(gm[k] + 1e-300));
+            double sk2 = sg->sigma2_mix[k];
+            if (sk2 == 0.0) continue;
+            double v  = 1.0 / (u_bar + 1.0 / sk2);
+            double mu = t_j * v;
+            mean += gm[k] * mu;
+            m2   += gm[k] * (mu * mu + v);
+            kl   += gm[k] * (0.5 * log(v / sk2) + 0.5 - (mu * mu + v) / (2.0 * sk2));
+        }
+        var_sum += m2 - mean * mean;
+    }
+    free(lg); free(gm);
+
+    double rr = 0.0;
+    for (int i = 0; i < n; i++) rr += r[i] * r[i];
+    double ll = -0.5 * (double)n * log(2.0 * M_PI * se)
+                - (rr + (double)n * var_sum) / (2.0 * se);
+    return ll + kl;
+}
+
+/* One Stage-1 fit.  randomized=0 keeps the historical sequential sweep order
+ * (and the streaming genotype read) so a single non-randomized run is
+ * byte-identical to <=0.4.0.  randomized=1 permutes the sweep order each
+ * sweep, which is what lets restarts explore different basins. */
+static void var_fixed_run(sargent_t *sg, int silent, uint64_t rseed, int randomized,
+                          int multistart)
 {
     int n = sg->n;
     int p = sg->p;
@@ -334,11 +445,14 @@ void var_fixed(sargent_t *sg, int silent)
     double *log_g     = malloc((size_t)K * sizeof(double));
     double *gamma     = malloc((size_t)K * sizeof(double));
     double *gamma_sum = malloc((size_t)K * sizeof(double));
-    if (!g || !r || !log_g || !gamma || !gamma_sum) {
+    int    *order     = randomized ? malloc((size_t)p * sizeof(int)) : NULL;
+    if (!g || !r || !log_g || !gamma || !gamma_sum || (randomized && !order)) {
         fprintf(stderr, "var_fixed: out of memory\n");
-        free(g); free(r); free(log_g); free(gamma); free(gamma_sum);
+        free(g); free(r); free(log_g); free(gamma); free(gamma_sum); free(order);
         return;
     }
+    uint64_t rng_state = rseed ? rseed : 0x9E3779B97F4A7C15ULL;
+    if (randomized) for (int j = 0; j < p; j++) order[j] = j;
 
     /* Initialise residuals r = y - X β.
      * On first call β = 0 so r = y; on re-entry the current β is used. */
@@ -356,7 +470,18 @@ void var_fixed(sargent_t *sg, int silent)
 
     /* Fixed-effect variance cap (see VAR_FIXED_VFCAP above). Env override;
      * SARGENT_S2_VFCAP=0 disables. */
-    double vf_cap = VAR_FIXED_VFCAP;
+    /* The 0.6 clamp is tight enough to BIND on h2=0.8 traits, where it
+     * under-scales beta and costs ~0.015 held-out r2 on every well-behaved
+     * cell.  It earns that cost only because the single-start optimiser can
+     * collapse into a dead basin (observed on 1 of 10 WGS h08 seeds:
+     * h2_snp 0.80 -> 0.20, r2 0.74 -> 0.005 with the cap removed).
+     * ELBO-selected multi-start removes that failure mode at the source, so
+     * with restarts on the cap relaxes to a pure divergence guard that never
+     * binds in practice.  Measured (10 seeds, dens3800, h2=0.8): restarts
+     * with a 0.9 cap gain +0.0203 held-out r2 over the 0.6 default, 10/10
+     * seeds, min 0.7173 (no collapse); a 0.9 cap and no cap are identical.
+     * At h2=0.5 the cap never binds and the change is null (+0.0022). */
+    double vf_cap = multistart ? VAR_FIXED_VFCAP_MULTISTART : VAR_FIXED_VFCAP;
     { const char *e = getenv("SARGENT_S2_VFCAP"); if (e) { double v = atof(e); if (v >= 0.0) vf_cap = v; } }
 
     /* Learn the BayesR mixture scale (EM on sigma2_mix each sweep, keeping the
@@ -400,8 +525,12 @@ void var_fixed(sargent_t *sg, int silent)
         double scale_num = 0.0, scale_den = 0.0;   /* EM sufficient stats for the mixture scale */
         int n_read = 0;
 
-        geno_rewind(sg->gr);
-        for (int j = 0; j < p; j++) {
+        if (randomized) vf_shuffle(order, p, &rng_state);
+        else            geno_rewind(sg->gr);
+
+        for (int oi = 0; oi < p; oi++) {
+            int j = randomized ? order[oi] : oi;
+            if (randomized) geno_seek(sg->gr, j);
             if (geno_read_variant(sg->gr, g, GENO_STANDARDIZE) <= 0) break;
             n_read++;
 
@@ -581,6 +710,97 @@ void var_fixed(sargent_t *sg, int silent)
     free(log_g);
     free(gamma);
     free(gamma_sum);
+    free(order);
+}
+
+/* Stage 1 entry point: optional ELBO-selected multi-start.
+ *
+ * SARGENT_STAGE1_RESTARTS=N (default 1) runs N fits and keeps the one with the
+ * highest ELBO.  N=1 takes the historical sequential-sweep path and is
+ * byte-identical to <=0.4.0; N>1 randomises the sweep order per restart.
+ *
+ * Motivation (sargent-paper D1, 2026-08-09): the mean-field objective is
+ * multimodal on high-coverage 500 kb cells.  A python mean-field mimic gained
+ * +0.0353 held-out r2 (mean over 3 seeds) from best-of-6 ELBO-selected
+ * restarts, and a single sequential fit collapsed outright on 1 of 10 seeds
+ * (h2_snp 0.80 -> 0.20) once the var(X beta) trust region was relaxed.  Both
+ * are basin-selection failures rather than a limitation of mean-field itself.
+ */
+void var_fixed(sargent_t *sg, int silent)
+{
+    int nrestart = 1;
+    { const char *e = getenv("SARGENT_STAGE1_RESTARTS");
+      if (e) { int v = atoi(e); if (v >= 1) nrestart = v; } }
+
+    if (nrestart == 1) {          /* historical path, bit-for-bit */
+        var_fixed_run(sg, silent, 0, 0, 0);
+        return;
+    }
+
+    const int n = sg->n, p = sg->p, K = sg->K;
+
+    /* Snapshot the entering state so every restart begins identically. */
+    double *beta0 = sg->beta ? malloc((size_t)p * sizeof(double)) : NULL;
+    double *pi0   = malloc((size_t)K * sizeof(double));
+    double *s2m0  = malloc((size_t)K * sizeof(double));
+    double *best_beta = malloc((size_t)p * sizeof(double));
+    double *best_pi   = malloc((size_t)K * sizeof(double));
+    double *best_s2m  = malloc((size_t)K * sizeof(double));
+    double *gs        = malloc((size_t)n * sizeof(double));
+    double *rs        = malloc((size_t)n * sizeof(double));
+    if (!pi0 || !s2m0 || !best_beta || !best_pi || !best_s2m || !gs || !rs) {
+        fprintf(stderr, "var_fixed: out of memory (restarts); falling back to 1 fit\n");
+        free(beta0); free(pi0); free(s2m0);
+        free(best_beta); free(best_pi); free(best_s2m); free(gs); free(rs);
+        var_fixed_run(sg, silent, 0, 0, 0);
+        return;
+    }
+    if (beta0) memcpy(beta0, sg->beta, (size_t)p * sizeof(double));
+    memcpy(pi0,  sg->pi_mix,     (size_t)K * sizeof(double));
+    memcpy(s2m0, sg->sigma2_mix, (size_t)K * sizeof(double));
+    const double sigma2_0 = sg->sigma2;
+
+    double best_elbo = -HUGE_VAL, best_sigma2 = sg->sigma2, best_h2 = sg->h2_snp;
+    int best_k = -1;
+
+    for (int k = 0; k < nrestart; k++) {
+        /* restore the entering state */
+        if (beta0 && sg->beta) memcpy(sg->beta, beta0, (size_t)p * sizeof(double));
+        else if (sg->beta)     memset(sg->beta, 0, (size_t)p * sizeof(double));
+        memcpy(sg->pi_mix,     pi0,  (size_t)K * sizeof(double));
+        memcpy(sg->sigma2_mix, s2m0, (size_t)K * sizeof(double));
+        sg->sigma2 = sigma2_0;
+
+        /* restart 0 is the historical sequential sweep, so multi-start can
+         * never do worse than the default fit by more than ELBO mis-ranking */
+        var_fixed_run(sg, silent, 0x9E3779B97F4A7C15ULL + 0x1000ULL * (uint64_t)(k + 1),
+                      k == 0 ? 0 : 1, 1);
+
+        double e = var_fixed_elbo(sg, gs, rs);
+        if (!silent)
+            fprintf(stderr, "var_fixed restart %d/%d: elbo=%.4f h2_snp=%.4f sigma2=%.4f\n",
+                    k + 1, nrestart, e, sg->h2_snp, sg->sigma2);
+        if (e > best_elbo) {
+            best_elbo = e; best_k = k;
+            memcpy(best_beta, sg->beta,       (size_t)p * sizeof(double));
+            memcpy(best_pi,   sg->pi_mix,     (size_t)K * sizeof(double));
+            memcpy(best_s2m,  sg->sigma2_mix, (size_t)K * sizeof(double));
+            best_sigma2 = sg->sigma2; best_h2 = sg->h2_snp;
+        }
+    }
+
+    if (best_k >= 0) {
+        memcpy(sg->beta,       best_beta, (size_t)p * sizeof(double));
+        memcpy(sg->pi_mix,     best_pi,   (size_t)K * sizeof(double));
+        memcpy(sg->sigma2_mix, best_s2m,  (size_t)K * sizeof(double));
+        sg->sigma2 = best_sigma2; sg->h2_snp = best_h2;
+        if (!silent)
+            fprintf(stderr, "var_fixed: selected restart %d/%d (elbo=%.4f)\n",
+                    best_k + 1, nrestart, best_elbo);
+    }
+
+    free(beta0); free(pi0); free(s2m0);
+    free(best_beta); free(best_pi); free(best_s2m); free(gs); free(rs);
 }
 
 /* =========================================================================
