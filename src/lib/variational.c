@@ -735,8 +735,297 @@ static void var_fixed_run(sargent_t *sg, int silent, uint64_t rseed, int randomi
  * (h2_snp 0.80 -> 0.20) once the var(X beta) trust region was relaxed.  Both
  * are basin-selection failures rather than a limitation of mean-field itself.
  */
+/* ---------------------------------------------------------------------------
+ * Stage 1, alternative inference: BayesR Gibbs (SSVS)
+ *
+ * Same model var_fixed fits variationally --
+ *   y = X beta + e,  e ~ N(0, s2),  beta_j ~ sum_k pi_k N(0, s2_mix[k]),
+ *   s2_mix[0] = 0 --
+ * but sampled rather than approximated by a factorised posterior, so it does
+ * not inherit mean-field's LD failure mode.  beta is reported as the
+ * post-burn-in posterior mean.
+ *
+ * Why: on 500 kb WGS cells the variational fit sits ~0.017 held-out r2 below
+ * BayesR (GCTB) even with ELBO-selected multi-start, and the sargent-paper D1
+ * prototype put a Gibbs sampler at GCTB parity (+0.0010 over 3 seeds).  Every
+ * mean-field-level lever was exhausted first: restart count saturates, an
+ * oracle selector is worth only +0.0052, scale-learning is null, and tighter
+ * convergence is actively harmful.
+ *
+ * Per sweep this costs about one var_fixed sweep, so the run cost is set by
+ * the iteration count rather than by convergence.
+ * ------------------------------------------------------------------------- */
+
+static double vf_unif(uint64_t *s)
+{
+    return (double)(vf_rng_next(s) >> 11) * (1.0 / 9007199254740992.0);  /* [0,1) */
+}
+
+static double vf_norm(uint64_t *s)
+{
+    double u1, u2;
+    do { u1 = vf_unif(s); } while (u1 <= 1e-300);
+    u2 = vf_unif(s);
+    return sqrt(-2.0 * log(u1)) * cos(2.0 * M_PI * u2);
+}
+
+/* Marsaglia-Tsang gamma(shape, 1) */
+static double vf_gamma_rand(uint64_t *s, double shape)
+{
+    if (shape <= 0.0) return 0.0;
+    if (shape < 1.0) {
+        double u = vf_unif(s);
+        if (u <= 0.0) u = 1e-300;
+        return vf_gamma_rand(s, shape + 1.0) * pow(u, 1.0 / shape);
+    }
+    double d = shape - 1.0 / 3.0, c = 1.0 / sqrt(9.0 * d);
+    for (;;) {
+        double x = vf_norm(s);
+        double v = 1.0 + c * x;
+        if (v <= 0.0) continue;
+        v = v * v * v;
+        double u = vf_unif(s);
+        if (u <= 0.0) u = 1e-300;
+        if (u < 1.0 - 0.0331 * x * x * x * x) return d * v;
+        if (log(u) < 0.5 * x * x + d * (1.0 - v + log(v))) return d * v;
+    }
+}
+
+static void var_fixed_gibbs(sargent_t *sg, int silent, int niter, int burn,
+                            uint64_t seed, int sample_scale)
+{
+    const int n = sg->n, p = sg->p, K = sg->K;
+
+    if (!sg->beta) {
+        sg->beta = calloc((size_t)p, sizeof(double));
+        if (!sg->beta) { fprintf(stderr, "var_fixed_gibbs: out of memory\n"); return; }
+    }
+
+    double *g        = malloc((size_t)n * sizeof(double));
+    double *r        = malloc((size_t)n * sizeof(double));
+    double *lw       = malloc((size_t)K * sizeof(double));
+    double *cnt      = malloc((size_t)K * sizeof(double));
+    double *relgrid  = malloc((size_t)K * sizeof(double));
+    double *beta_sum = calloc((size_t)p, sizeof(double));
+    double *pi_sum   = calloc((size_t)K, sizeof(double));
+    if (!g || !r || !lw || !cnt || !relgrid || !beta_sum || !pi_sum) {
+        fprintf(stderr, "var_fixed_gibbs: out of memory\n");
+        free(g); free(r); free(lw); free(cnt); free(relgrid); free(beta_sum); free(pi_sum);
+        return;
+    }
+
+    /* Relative mixture grid, held fixed; only its common scale is sampled. */
+    for (int k = 0; k < K; k++) relgrid[k] = sg->sigma2_mix[k];
+
+    const double var_y = vec_var(sg->y, n);
+    uint64_t st = seed ? seed : 0xD1B54A32D192ED03ULL;
+
+    /* Common scale factor on the relative grid: sigma2_mix[k] = relgrid[k]*f.
+     * f_max keeps the largest component at or below var_y (no single SNP
+     * explains more than the phenotype); f_min stops total collapse. */
+    double relmax = 0.0;
+    for (int k = 0; k < K; k++) if (relgrid[k] > relmax) relmax = relgrid[k];
+    const double f_max = (relmax > 0.0 && var_y > 0.0) ? var_y / relmax : 1e6;
+    const double f_min = 1e-6;
+    double scale_f = 1.0;
+
+    /* r = y - X beta (beta is 0 on a cold start) */
+    memcpy(r, sg->y, (size_t)n * sizeof(double));
+    geno_rewind(sg->gr);
+    for (int j = 0; j < p; j++) {
+        if (geno_read_variant(sg->gr, g, GENO_STANDARDIZE) <= 0) break;
+        double b = sg->beta[j];
+        if (b != 0.0) for (int i = 0; i < n; i++) r[i] -= b * g[i];
+    }
+
+    long nsamp = 0;
+    double sigma2_sum = 0.0;
+
+    int resync = 0;
+    { const char *e = getenv("SARGENT_GIBBS_RESYNC"); if (e && atoi(e) != 0) resync = 1; }
+
+    for (int it = 0; it < niter; it++) {
+        /* Diagnostic: rebuild r = y - X beta from scratch instead of trusting
+         * the incremental +=/-= maintained across ~p*niter updates. */
+        if (resync) {
+            memcpy(r, sg->y, (size_t)n * sizeof(double));
+            geno_rewind(sg->gr);
+            for (int j = 0; j < p; j++) {
+                if (geno_read_variant(sg->gr, g, GENO_STANDARDIZE) <= 0) break;
+                double b = sg->beta[j];
+                if (b != 0.0) for (int i = 0; i < n; i++) r[i] -= b * g[i];
+            }
+        }
+        memset(cnt, 0, (size_t)K * sizeof(double));
+        double ss_scaled = 0.0;      /* sum_j beta_j^2 / relgrid[k_j], non-null only */
+        long   m_nonnull = 0;
+
+        geno_rewind(sg->gr);
+        for (int j = 0; j < p; j++) {
+            if (geno_read_variant(sg->gr, g, GENO_STANDARDIZE) <= 0) break;
+
+            double bold = sg->beta[j];
+            if (bold != 0.0) for (int i = 0; i < n; i++) r[i] += bold * g[i];  /* r_{-j} */
+
+            double xr = 0.0;
+            for (int i = 0; i < n; i++) xr += g[i] * r[i];
+
+            /* component log-weights; the exp(-r'r/2s2) factor is common and cancels */
+            double lmax = -1e300;
+            for (int k = 0; k < K; k++) {
+                double sk2 = sg->sigma2_mix[k];
+                double lpi = log(sg->pi_mix[k] + PI_FLOOR);
+                if (sk2 <= 0.0) {
+                    lw[k] = lpi;
+                } else {
+                    double v  = 1.0 / ((double)n / sg->sigma2 + 1.0 / sk2);
+                    double mu = v * xr / sg->sigma2;
+                    lw[k] = lpi + 0.5 * log(v / sk2) + mu * mu / (2.0 * v);
+                }
+                if (lw[k] > lmax) lmax = lw[k];
+            }
+            double tot = 0.0;
+            for (int k = 0; k < K; k++) { lw[k] = exp(lw[k] - lmax); tot += lw[k]; }
+
+            double u = vf_unif(&st) * tot, acc = 0.0;
+            int ksel = K - 1;
+            for (int k = 0; k < K; k++) { acc += lw[k]; if (u <= acc) { ksel = k; break; } }
+
+            double bnew = 0.0;
+            if (sg->sigma2_mix[ksel] > 0.0) {
+                double v  = 1.0 / ((double)n / sg->sigma2 + 1.0 / sg->sigma2_mix[ksel]);
+                double mu = v * xr / sg->sigma2;
+                bnew = mu + sqrt(v) * vf_norm(&st);
+                if (relgrid[ksel] > 0.0) { ss_scaled += bnew * bnew / relgrid[ksel]; m_nonnull++; }
+            }
+            sg->beta[j] = bnew;
+            cnt[ksel] += 1.0;
+            if (bnew != 0.0) for (int i = 0; i < n; i++) r[i] -= bnew * g[i];
+        }
+
+        /* pi ~ Dirichlet(1 + counts) */
+        double psum = 0.0;
+        for (int k = 0; k < K; k++) { sg->pi_mix[k] = vf_gamma_rand(&st, 1.0 + cnt[k]); psum += sg->pi_mix[k]; }
+        if (psum > 0.0) for (int k = 0; k < K; k++) sg->pi_mix[k] /= psum;
+
+        /* Common mixture scale f, with sigma2_mix[k] = relgrid[k] * f.
+         *
+         *   f ~ Inv-Gamma(a0 + m/2, b0 + ss_scaled/2)
+         *
+         * The prior must be PROPER.  Under a flat prior (a0=b0=0) a single
+         * large beta landing in the smallest component contributes
+         * beta^2/1e-4 to ss_scaled, f explodes, every component saturates at
+         * var_y, the mixture degenerates to one diffuse component and sigma2
+         * runs away (observed: sigma2 -> 133 against var_y ~ 1).  a0=2, b0=1
+         * is a weak proper prior with mean f=1, i.e. centred on SARGENT's
+         * frozen grid with ~4 degrees of freedom -- the same role GCTB's
+         * scaled-inverse-chi-square prior on sigma2_beta plays. */
+        if (sample_scale) {
+            const double a0 = 2.0, b0 = 1.0;
+            double gs = vf_gamma_rand(&st, a0 + 0.5 * (double)m_nonnull);
+            if (gs > 0.0) {
+                double f = (b0 + 0.5 * ss_scaled) / gs;
+                /* Bound f itself, never the components individually.  Clamping
+                 * each sigma2_mix[k] separately desynchronises sampling from
+                 * the update: beta would be drawn with variance var_y but
+                 * scored as beta^2/relgrid[k] (1e-4), inflating ss_scaled
+                 * ~1e4-fold and pinning the chain at the cap forever. */
+                if (f < f_min) f = f_min;
+                if (f > f_max) f = f_max;
+                scale_f = f;
+                for (int k = 0; k < K; k++) sg->sigma2_mix[k] = relgrid[k] * scale_f;
+            }
+        }
+
+        /* sigma2 ~ Inv-Gamma(n/2, r'r/2), flat prior */
+        double rr = 0.0;
+        for (int i = 0; i < n; i++) rr += r[i] * r[i];
+        double gs2 = vf_gamma_rand(&st, 0.5 * (double)n);
+        if (gs2 > 0.0) {
+            double s2 = (0.5 * rr) / gs2;
+            if (s2 < 1e-10 * var_y) s2 = 1e-10 * var_y;
+            sg->sigma2 = s2;
+        }
+
+        if (it >= burn) {
+            for (int j = 0; j < p; j++) beta_sum[j] += sg->beta[j];
+            for (int k = 0; k < K; k++) pi_sum[k]   += sg->pi_mix[k];
+            sigma2_sum += sg->sigma2;
+            nsamp++;
+        }
+        if (!silent && (it % 50 == 0 || it == niter - 1)) {
+            double bmax = 0.0, bss = 0.0;
+            for (int j = 0; j < p; j++) { double a = fabs(sg->beta[j]); if (a > bmax) bmax = a; bss += a*a; }
+            fprintf(stderr, "gibbs %4d/%d: s2=%.4g pi0=%.4f m=%ld f=%.4g max|b|=%.4g sum b^2=%.4g s2mix3=%.4g\n",
+                    it + 1, niter, sg->sigma2, sg->pi_mix[0], m_nonnull, scale_f, bmax, bss,
+                    sg->sigma2_mix[K-1]);
+        }
+    }
+
+    /* Posterior means, then sigma2/h2_snp recomputed from the mean beta so the
+     * reported summary is coherent with the beta actually written out. */
+    if (nsamp > 0) {
+        for (int j = 0; j < p; j++) sg->beta[j] = beta_sum[j] / (double)nsamp;
+        for (int k = 0; k < K; k++) sg->pi_mix[k] = pi_sum[k] / (double)nsamp;
+
+        memcpy(r, sg->y, (size_t)n * sizeof(double));
+        geno_rewind(sg->gr);
+        for (int j = 0; j < p; j++) {
+            if (geno_read_variant(sg->gr, g, GENO_STANDARDIZE) <= 0) break;
+            double b = sg->beta[j];
+            if (b != 0.0) for (int i = 0; i < n; i++) r[i] -= b * g[i];
+        }
+        double rr = 0.0;
+        for (int i = 0; i < n; i++) rr += r[i] * r[i];
+        double s2 = rr / n;
+        if (s2 < 1e-10 * var_y) s2 = 1e-10 * var_y;
+        sg->sigma2 = s2;
+        sg->h2_snp = (var_y > 0.0) ? 1.0 - sg->sigma2 / var_y : 0.0;
+    }
+
+    if (!silent)
+        fprintf(stderr, "gibbs: %ld post-burn-in samples, h2_snp=%.4f sigma2=%.4f\n",
+                nsamp, sg->h2_snp, sg->sigma2);
+
+    free(g); free(r); free(lw); free(cnt); free(relgrid); free(beta_sum); free(pi_sum);
+}
+
+/* Set by --stage1-gibbs / --gibbs-iter / --gibbs-burn (see sargent.c). */
+static int s1_gibbs_on = 0, s1_gibbs_iter = 3000, s1_gibbs_burn = 1000;
+
+void var_fixed_set_gibbs(int on, int niter, int burn)
+{
+    s1_gibbs_on = on;
+    if (niter > 0) s1_gibbs_iter = niter;
+    if (burn  >= 0) s1_gibbs_burn = burn;
+}
+
 void var_fixed(sargent_t *sg, int silent)
 {
+    if (s1_gibbs_on) {
+        int burn = s1_gibbs_burn < s1_gibbs_iter ? s1_gibbs_burn : s1_gibbs_iter / 2;
+        int freeze = 0;
+        { const char *e = getenv("SARGENT_GIBBS_FREEZE_SCALE"); if (e && atoi(e) != 0) freeze = 1; }
+        uint64_t sd = 0xD1B54A32D192ED03ULL;
+        { const char *e = getenv("SARGENT_GIBBS_SEED"); if (e) sd = (uint64_t)strtoull(e, NULL, 10); }
+
+        /* Warm-start the chain from the variational fit.  sargent_new leaves
+         * pi uniform (1/K), i.e. (K-1)/K of SNPs non-null; at p > n a sampler
+         * started there saturates immediately and sigma2 runs away (observed:
+         * 1111/1596 non-null on sweep 1, sigma2 -> 139 against var_y ~ 1).
+         * The variational fit supplies a sparse pi and a sensible sigma2 in
+         * ~3 s, which is also a standard way to cut MCMC burn-in.
+         * SARGENT_GIBBS_COLDSTART=1 skips it (diagnostic). */
+        int cold = 0;
+        { const char *e = getenv("SARGENT_GIBBS_COLDSTART"); if (e && atoi(e) != 0) cold = 1; }
+        if (!cold) {
+            if (!silent) fprintf(stderr, "gibbs: warm-starting from the variational fit\n");
+            var_fixed_run(sg, silent, 0, 0, 0);
+        }
+        var_fixed_gibbs(sg, silent, s1_gibbs_iter, burn, sd, !freeze);
+        return;
+    }
+
     int nrestart = 1;
     { const char *e = getenv("SARGENT_STAGE1_RESTARTS");
       if (e) { int v = atoi(e); if (v >= 1) nrestart = v; } }
