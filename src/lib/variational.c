@@ -867,8 +867,17 @@ static void var_fixed_gibbs(sargent_t *sg, int silent, int niter, int burn,
             double bold = sg->beta[j];
             if (bold != 0.0) for (int i = 0; i < n; i++) r[i] += bold * g[i];  /* r_{-j} */
 
-            double xr = 0.0;
-            for (int i = 0; i < n; i++) xr += g[i] * r[i];
+            /* x_j'r_{-j} and x_j'x_j.  The per-SNP x'x MUST be used, not n:
+             * GENO_STANDARDIZE scales by the Hardy-Weinberg sd
+             * 1/sqrt(2p(1-p)), not the empirical sd, so x'x = n only
+             * approximately.  var_fixed absorbs that error into a damped
+             * deterministic iteration, but for a sampler a mis-stated
+             * precision is a WRONG CONDITIONAL: the chain then has the wrong
+             * stationary distribution and, at p > n, drifts along the null
+             * space of X instead of equilibrating. */
+            double xr = 0.0, xx = 0.0;
+            for (int i = 0; i < n; i++) { xr += g[i] * r[i]; xx += g[i] * g[i]; }
+            if (xx < 1e-12) { sg->beta[j] = 0.0; cnt[0] += 1.0; continue; }
 
             /* component log-weights; the exp(-r'r/2s2) factor is common and cancels */
             double lmax = -1e300;
@@ -878,7 +887,7 @@ static void var_fixed_gibbs(sargent_t *sg, int silent, int niter, int burn,
                 if (sk2 <= 0.0) {
                     lw[k] = lpi;
                 } else {
-                    double v  = 1.0 / ((double)n / sg->sigma2 + 1.0 / sk2);
+                    double v  = 1.0 / (xx / sg->sigma2 + 1.0 / sk2);
                     double mu = v * xr / sg->sigma2;
                     lw[k] = lpi + 0.5 * log(v / sk2) + mu * mu / (2.0 * v);
                 }
@@ -893,7 +902,7 @@ static void var_fixed_gibbs(sargent_t *sg, int silent, int niter, int burn,
 
             double bnew = 0.0;
             if (sg->sigma2_mix[ksel] > 0.0) {
-                double v  = 1.0 / ((double)n / sg->sigma2 + 1.0 / sg->sigma2_mix[ksel]);
+                double v  = 1.0 / (xx / sg->sigma2 + 1.0 / sg->sigma2_mix[ksel]);
                 double mu = v * xr / sg->sigma2;
                 bnew = mu + sqrt(v) * vf_norm(&st);
                 if (relgrid[ksel] > 0.0) { ss_scaled += bnew * bnew / relgrid[ksel]; m_nonnull++; }
