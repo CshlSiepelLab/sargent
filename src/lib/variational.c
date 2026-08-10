@@ -42,6 +42,10 @@
  * ancestry covariates in Stage 1 (see issue #22 / ROADMAP). Env override:
  * SARGENT_S2_VFCAP (0 disables). */
 #define VAR_FIXED_VFCAP      0.6
+/* Relaxed trust region used when ELBO-selected multi-start is active; see the
+ * rationale at its use site in var_fixed_run. A 0.9 cap never binds on the
+ * 500 kb h2=0.8 grid (identical to no cap) but still catches genuine blow-up. */
+#define VAR_FIXED_VFCAP_MULTISTART 0.9
 
 /* Block 2.6 — fused-lasso proximal helpers (sparsity-on-levels +
  * sparsity-on-differences on theta = log ws² − mean log ws²).
@@ -318,7 +322,114 @@ void sargent_free(sargent_t *sg)
  *     π_k  ← (Σ_j γ_jk) / p
  *     σ²   ← r^T r / n
  * ---------------------------------------------------------------------- */
-void var_fixed(sargent_t *sg, int silent)
+/* xorshift64* — small deterministic RNG for restart sweep-order permutations.
+ * Self-contained so restarts reproduce from their seed alone and do not
+ * disturb any global rand() state. */
+static uint64_t vf_rng_next(uint64_t *s)
+{
+    uint64_t x = *s;
+    x ^= x >> 12; x ^= x << 25; x ^= x >> 27;
+    *s = x;
+    return x * 2685821657736338717ULL;
+}
+
+static void vf_shuffle(int *a, int m, uint64_t *s)
+{
+    for (int i = m - 1; i > 0; i--) {
+        int j = (int)(vf_rng_next(s) % (uint64_t)(i + 1));
+        int t = a[i]; a[i] = a[j]; a[j] = t;
+    }
+}
+
+/* Evaluate the mean-field variational objective (ELBO) at the current
+ * variational parameters.  Used only to RANK restarts; the identical criterion
+ * is applied to each, so the ranking is meaningful even though the
+ * responsibilities are recomputed here from the committed beta rather than
+ * carried out of the sweep (they differ slightly under Polyak averaging).
+ *
+ *   ELBO = -n/2 log(2 pi s2) - (||r||^2 + n * sum_j Var_q[beta_j]) / (2 s2)
+ *          + sum_j sum_k    gamma_jk log(pi_k / gamma_jk)
+ *          + sum_j sum_k>0  gamma_jk [ 1/2 log(v_jk/s_k^2) + 1/2
+ *                                      - (mu_jk^2 + v_jk)/(2 s_k^2) ]
+ *
+ * with standardised genotypes (x_j'x_j = n).  Two genotype passes.
+ * Returns -HUGE_VAL on allocation failure. */
+static double var_fixed_elbo(sargent_t *sg, double *g, double *r)
+{
+    const int n = sg->n, p = sg->p, K = sg->K;
+    const double se = sg->sigma2;
+    if (!(se > 0.0)) return -HUGE_VAL;
+    const double u_bar = (double)n / se;
+
+    /* pass 1: residual from the committed beta */
+    memcpy(r, sg->y, (size_t)n * sizeof(double));
+    geno_rewind(sg->gr);
+    for (int j = 0; j < p; j++) {
+        if (geno_read_variant(sg->gr, g, GENO_STANDARDIZE) <= 0) break;
+        double b = sg->beta[j];
+        if (b != 0.0) for (int i = 0; i < n; i++) r[i] -= b * g[i];
+    }
+
+    double *lg = malloc((size_t)K * sizeof(double));
+    double *gm = malloc((size_t)K * sizeof(double));
+    if (!lg || !gm) { free(lg); free(gm); return -HUGE_VAL; }
+
+    double var_sum = 0.0, kl = 0.0;
+
+    /* pass 2: per-SNP variational terms at the final hyperparameters */
+    geno_rewind(sg->gr);
+    for (int j = 0; j < p; j++) {
+        if (geno_read_variant(sg->gr, g, GENO_STANDARDIZE) <= 0) break;
+        double bj = sg->beta[j];
+        double xr = 0.0;
+        for (int i = 0; i < n; i++) xr += g[i] * (r[i] + bj * g[i]);
+        double t_j  = xr / se;
+        double z_sq = t_j * t_j / u_bar;
+
+        double lmax = -1e300;
+        for (int k = 0; k < K; k++) {
+            double sk2 = sg->sigma2_mix[k];
+            double lpi = log(sg->pi_mix[k] + PI_FLOOR);
+            if (sk2 == 0.0) lg[k] = lpi - 0.5 * z_sq;
+            else {
+                double s_k = u_bar * sk2 + 1.0;
+                lg[k] = lpi - 0.5 * (log(s_k) + z_sq / s_k);
+            }
+            if (lg[k] > lmax) lmax = lg[k];
+        }
+        double sum_g = 0.0;
+        for (int k = 0; k < K; k++) { gm[k] = exp(lg[k] - lmax); sum_g += gm[k]; }
+        for (int k = 0; k < K; k++) gm[k] /= sum_g;
+
+        double mean = 0.0, m2 = 0.0;
+        for (int k = 0; k < K; k++) {
+            if (gm[k] > 0.0)
+                kl += gm[k] * (log(sg->pi_mix[k] + PI_FLOOR) - log(gm[k] + 1e-300));
+            double sk2 = sg->sigma2_mix[k];
+            if (sk2 == 0.0) continue;
+            double v  = 1.0 / (u_bar + 1.0 / sk2);
+            double mu = t_j * v;
+            mean += gm[k] * mu;
+            m2   += gm[k] * (mu * mu + v);
+            kl   += gm[k] * (0.5 * log(v / sk2) + 0.5 - (mu * mu + v) / (2.0 * sk2));
+        }
+        var_sum += m2 - mean * mean;
+    }
+    free(lg); free(gm);
+
+    double rr = 0.0;
+    for (int i = 0; i < n; i++) rr += r[i] * r[i];
+    double ll = -0.5 * (double)n * log(2.0 * M_PI * se)
+                - (rr + (double)n * var_sum) / (2.0 * se);
+    return ll + kl;
+}
+
+/* One Stage-1 fit.  randomized=0 keeps the historical sequential sweep order
+ * (and the streaming genotype read) so a single non-randomized run is
+ * byte-identical to <=0.4.0.  randomized=1 permutes the sweep order each
+ * sweep, which is what lets restarts explore different basins. */
+static void var_fixed_run(sargent_t *sg, int silent, uint64_t rseed, int randomized,
+                          int multistart)
 {
     int n = sg->n;
     int p = sg->p;
@@ -334,11 +445,14 @@ void var_fixed(sargent_t *sg, int silent)
     double *log_g     = malloc((size_t)K * sizeof(double));
     double *gamma     = malloc((size_t)K * sizeof(double));
     double *gamma_sum = malloc((size_t)K * sizeof(double));
-    if (!g || !r || !log_g || !gamma || !gamma_sum) {
+    int    *order     = randomized ? malloc((size_t)p * sizeof(int)) : NULL;
+    if (!g || !r || !log_g || !gamma || !gamma_sum || (randomized && !order)) {
         fprintf(stderr, "var_fixed: out of memory\n");
-        free(g); free(r); free(log_g); free(gamma); free(gamma_sum);
+        free(g); free(r); free(log_g); free(gamma); free(gamma_sum); free(order);
         return;
     }
+    uint64_t rng_state = rseed ? rseed : 0x9E3779B97F4A7C15ULL;
+    if (randomized) for (int j = 0; j < p; j++) order[j] = j;
 
     /* Initialise residuals r = y - X β.
      * On first call β = 0 so r = y; on re-entry the current β is used. */
@@ -356,7 +470,18 @@ void var_fixed(sargent_t *sg, int silent)
 
     /* Fixed-effect variance cap (see VAR_FIXED_VFCAP above). Env override;
      * SARGENT_S2_VFCAP=0 disables. */
-    double vf_cap = VAR_FIXED_VFCAP;
+    /* The 0.6 clamp is tight enough to BIND on h2=0.8 traits, where it
+     * under-scales beta and costs ~0.015 held-out r2 on every well-behaved
+     * cell.  It earns that cost only because the single-start optimiser can
+     * collapse into a dead basin (observed on 1 of 10 WGS h08 seeds:
+     * h2_snp 0.80 -> 0.20, r2 0.74 -> 0.005 with the cap removed).
+     * ELBO-selected multi-start removes that failure mode at the source, so
+     * with restarts on the cap relaxes to a pure divergence guard that never
+     * binds in practice.  Measured (10 seeds, dens3800, h2=0.8): restarts
+     * with a 0.9 cap gain +0.0203 held-out r2 over the 0.6 default, 10/10
+     * seeds, min 0.7173 (no collapse); a 0.9 cap and no cap are identical.
+     * At h2=0.5 the cap never binds and the change is null (+0.0022). */
+    double vf_cap = multistart ? VAR_FIXED_VFCAP_MULTISTART : VAR_FIXED_VFCAP;
     { const char *e = getenv("SARGENT_S2_VFCAP"); if (e) { double v = atof(e); if (v >= 0.0) vf_cap = v; } }
 
     /* Learn the BayesR mixture scale (EM on sigma2_mix each sweep, keeping the
@@ -390,7 +515,16 @@ void var_fixed(sargent_t *sg, int silent)
     double *beta_sum = NULL; long navg = 0;
     if (polyak) { beta_sum = calloc((size_t)p, sizeof(double)); if (!beta_sum) polyak = 0; }
 
-    for (int iter = 0; iter < VAR_FIXED_MAX_ITER; iter++) {
+    /* Convergence knobs (diagnostic; defaults reproduce <=0.4.0 exactly).
+     * The stopping rule watches sigma2, which the file's own Polyak note
+     * records as blind to a beta limit cycle -- so whether each restart is
+     * actually AT an optimum is testable only by tightening these. */
+    int    max_iter = VAR_FIXED_MAX_ITER;
+    double s1_tol   = VAR_FIXED_TOL;
+    { const char *e = getenv("SARGENT_S1_MAXITER"); if (e) { int v = atoi(e); if (v > 0) max_iter = v; } }
+    { const char *e = getenv("SARGENT_S1_TOL");     if (e) { double v = atof(e); if (v > 0) s1_tol = v; } }
+
+    for (int iter = 0; iter < max_iter; iter++) {
 
         /* u_bar = n/σ² is constant across all SNPs for standardised genotypes */
         double u_bar = (double)n / sg->sigma2;
@@ -400,8 +534,12 @@ void var_fixed(sargent_t *sg, int silent)
         double scale_num = 0.0, scale_den = 0.0;   /* EM sufficient stats for the mixture scale */
         int n_read = 0;
 
-        geno_rewind(sg->gr);
-        for (int j = 0; j < p; j++) {
+        if (randomized) vf_shuffle(order, p, &rng_state);
+        else            geno_rewind(sg->gr);
+
+        for (int oi = 0; oi < p; oi++) {
+            int j = randomized ? order[oi] : oi;
+            if (randomized) geno_seek(sg->gr, j);
             if (geno_read_variant(sg->gr, g, GENO_STANDARDIZE) <= 0) break;
             n_read++;
 
@@ -554,7 +692,7 @@ void var_fixed(sargent_t *sg, int silent)
         }
 
         old_sigma2 = sg->sigma2;
-        if (rel_dsig < VAR_FIXED_TOL) break;
+        if (rel_dsig < s1_tol) break;
     }
 
     /* Commit the Polyak average and recompute sigma2/h2_snp from it for consistency. */
@@ -581,6 +719,410 @@ void var_fixed(sargent_t *sg, int silent)
     free(log_g);
     free(gamma);
     free(gamma_sum);
+    free(order);
+}
+
+/* Stage 1 entry point: optional ELBO-selected multi-start.
+ *
+ * SARGENT_STAGE1_RESTARTS=N (default 1) runs N fits and keeps the one with the
+ * highest ELBO.  N=1 takes the historical sequential-sweep path and is
+ * byte-identical to <=0.4.0; N>1 randomises the sweep order per restart.
+ *
+ * Motivation (sargent-paper D1, 2026-08-09): the mean-field objective is
+ * multimodal on high-coverage 500 kb cells.  A python mean-field mimic gained
+ * +0.0353 held-out r2 (mean over 3 seeds) from best-of-6 ELBO-selected
+ * restarts, and a single sequential fit collapsed outright on 1 of 10 seeds
+ * (h2_snp 0.80 -> 0.20) once the var(X beta) trust region was relaxed.  Both
+ * are basin-selection failures rather than a limitation of mean-field itself.
+ */
+/* ---------------------------------------------------------------------------
+ * Stage 1, alternative inference: BayesR Gibbs (SSVS)
+ *
+ * Same model var_fixed fits variationally --
+ *   y = X beta + e,  e ~ N(0, s2),  beta_j ~ sum_k pi_k N(0, s2_mix[k]),
+ *   s2_mix[0] = 0 --
+ * but sampled rather than approximated by a factorised posterior, so it does
+ * not inherit mean-field's LD failure mode.  beta is reported as the
+ * post-burn-in posterior mean.
+ *
+ * Why: on 500 kb WGS cells the variational fit sits ~0.017 held-out r2 below
+ * BayesR (GCTB) even with ELBO-selected multi-start, and the sargent-paper D1
+ * prototype put a Gibbs sampler at GCTB parity (+0.0010 over 3 seeds).  Every
+ * mean-field-level lever was exhausted first: restart count saturates, an
+ * oracle selector is worth only +0.0052, scale-learning is null, and tighter
+ * convergence is actively harmful.
+ *
+ * Per sweep this costs about one var_fixed sweep, so the run cost is set by
+ * the iteration count rather than by convergence.
+ * ------------------------------------------------------------------------- */
+
+static double vf_unif(uint64_t *s)
+{
+    return (double)(vf_rng_next(s) >> 11) * (1.0 / 9007199254740992.0);  /* [0,1) */
+}
+
+static double vf_norm(uint64_t *s)
+{
+    double u1, u2;
+    do { u1 = vf_unif(s); } while (u1 <= 1e-300);
+    u2 = vf_unif(s);
+    return sqrt(-2.0 * log(u1)) * cos(2.0 * M_PI * u2);
+}
+
+/* Marsaglia-Tsang gamma(shape, 1) */
+static double vf_gamma_rand(uint64_t *s, double shape)
+{
+    if (shape <= 0.0) return 0.0;
+    if (shape < 1.0) {
+        double u = vf_unif(s);
+        if (u <= 0.0) u = 1e-300;
+        return vf_gamma_rand(s, shape + 1.0) * pow(u, 1.0 / shape);
+    }
+    double d = shape - 1.0 / 3.0, c = 1.0 / sqrt(9.0 * d);
+    for (;;) {
+        double x = vf_norm(s);
+        double v = 1.0 + c * x;
+        if (v <= 0.0) continue;
+        v = v * v * v;
+        double u = vf_unif(s);
+        if (u <= 0.0) u = 1e-300;
+        if (u < 1.0 - 0.0331 * x * x * x * x) return d * v;
+        if (log(u) < 0.5 * x * x + d * (1.0 - v + log(v))) return d * v;
+    }
+}
+
+static void var_fixed_gibbs(sargent_t *sg, int silent, int niter, int burn,
+                            uint64_t seed, int sample_scale)
+{
+    const int n = sg->n, p = sg->p, K = sg->K;
+
+    if (!sg->beta) {
+        sg->beta = calloc((size_t)p, sizeof(double));
+        if (!sg->beta) { fprintf(stderr, "var_fixed_gibbs: out of memory\n"); return; }
+    }
+
+    double *g        = malloc((size_t)n * sizeof(double));
+    double *r        = malloc((size_t)n * sizeof(double));
+    double *lw       = malloc((size_t)K * sizeof(double));
+    double *cnt      = malloc((size_t)K * sizeof(double));
+    double *relgrid  = malloc((size_t)K * sizeof(double));
+    double *beta_sum = calloc((size_t)p, sizeof(double));
+    double *pi_sum   = calloc((size_t)K, sizeof(double));
+    if (!g || !r || !lw || !cnt || !relgrid || !beta_sum || !pi_sum) {
+        fprintf(stderr, "var_fixed_gibbs: out of memory\n");
+        free(g); free(r); free(lw); free(cnt); free(relgrid); free(beta_sum); free(pi_sum);
+        return;
+    }
+
+    /* Relative mixture grid, held fixed; only its common scale is sampled. */
+    for (int k = 0; k < K; k++) relgrid[k] = sg->sigma2_mix[k];
+
+    const double var_y = vec_var(sg->y, n);
+    uint64_t st = seed ? seed : 0xD1B54A32D192ED03ULL;
+
+    /* Common scale factor on the relative grid: sigma2_mix[k] = relgrid[k]*f.
+     * f_max keeps the largest component at or below var_y (no single SNP
+     * explains more than the phenotype); f_min stops total collapse. */
+    double relmax = 0.0;
+    for (int k = 0; k < K; k++) if (relgrid[k] > relmax) relmax = relgrid[k];
+    const double f_max = (relmax > 0.0 && var_y > 0.0) ? var_y / relmax : 1e6;
+    const double f_min = 1e-6;
+    double scale_f = 1.0;
+
+    /* r = y - X beta (beta is 0 on a cold start) */
+    memcpy(r, sg->y, (size_t)n * sizeof(double));
+    geno_rewind(sg->gr);
+    for (int j = 0; j < p; j++) {
+        if (geno_read_variant(sg->gr, g, GENO_STANDARDIZE) <= 0) break;
+        double b = sg->beta[j];
+        if (b != 0.0) for (int i = 0; i < n; i++) r[i] -= b * g[i];
+    }
+
+    long nsamp = 0;
+    double sigma2_sum = 0.0;
+
+    int resync = 0;
+    { const char *e = getenv("SARGENT_GIBBS_RESYNC"); if (e && atoi(e) != 0) resync = 1; }
+
+    for (int it = 0; it < niter; it++) {
+        /* Diagnostic: rebuild r = y - X beta from scratch instead of trusting
+         * the incremental +=/-= maintained across ~p*niter updates. */
+        if (resync) {
+            memcpy(r, sg->y, (size_t)n * sizeof(double));
+            geno_rewind(sg->gr);
+            for (int j = 0; j < p; j++) {
+                if (geno_read_variant(sg->gr, g, GENO_STANDARDIZE) <= 0) break;
+                double b = sg->beta[j];
+                if (b != 0.0) for (int i = 0; i < n; i++) r[i] -= b * g[i];
+            }
+        }
+        memset(cnt, 0, (size_t)K * sizeof(double));
+        double ss_scaled = 0.0;      /* sum_j beta_j^2 / relgrid[k_j], non-null only */
+        long   m_nonnull = 0;
+
+        geno_rewind(sg->gr);
+        for (int j = 0; j < p; j++) {
+            if (geno_read_variant(sg->gr, g, GENO_STANDARDIZE) <= 0) break;
+
+            double bold = sg->beta[j];
+            if (bold != 0.0) for (int i = 0; i < n; i++) r[i] += bold * g[i];  /* r_{-j} */
+
+            /* x_j'r_{-j} and x_j'x_j.  The per-SNP x'x MUST be used, not n:
+             * GENO_STANDARDIZE scales by the Hardy-Weinberg sd
+             * 1/sqrt(2p(1-p)), not the empirical sd, so x'x = n only
+             * approximately.  var_fixed absorbs that error into a damped
+             * deterministic iteration, but for a sampler a mis-stated
+             * precision is a WRONG CONDITIONAL: the chain then has the wrong
+             * stationary distribution and, at p > n, drifts along the null
+             * space of X instead of equilibrating. */
+            double xr = 0.0, xx = 0.0;
+            for (int i = 0; i < n; i++) { xr += g[i] * r[i]; xx += g[i] * g[i]; }
+            if (xx < 1e-12) { sg->beta[j] = 0.0; cnt[0] += 1.0; continue; }
+
+            /* component log-weights; the exp(-r'r/2s2) factor is common and cancels */
+            double lmax = -1e300;
+            for (int k = 0; k < K; k++) {
+                double sk2 = sg->sigma2_mix[k];
+                double lpi = log(sg->pi_mix[k] + PI_FLOOR);
+                if (sk2 <= 0.0) {
+                    lw[k] = lpi;
+                } else {
+                    double v  = 1.0 / (xx / sg->sigma2 + 1.0 / sk2);
+                    double mu = v * xr / sg->sigma2;
+                    lw[k] = lpi + 0.5 * log(v / sk2) + mu * mu / (2.0 * v);
+                }
+                if (lw[k] > lmax) lmax = lw[k];
+            }
+            double tot = 0.0;
+            for (int k = 0; k < K; k++) { lw[k] = exp(lw[k] - lmax); tot += lw[k]; }
+
+            double u = vf_unif(&st) * tot, acc = 0.0;
+            int ksel = K - 1;
+            for (int k = 0; k < K; k++) { acc += lw[k]; if (u <= acc) { ksel = k; break; } }
+
+            double bnew = 0.0;
+            if (sg->sigma2_mix[ksel] > 0.0) {
+                double v  = 1.0 / (xx / sg->sigma2 + 1.0 / sg->sigma2_mix[ksel]);
+                double mu = v * xr / sg->sigma2;
+                bnew = mu + sqrt(v) * vf_norm(&st);
+                if (relgrid[ksel] > 0.0) { ss_scaled += bnew * bnew / relgrid[ksel]; m_nonnull++; }
+            }
+            sg->beta[j] = bnew;
+            cnt[ksel] += 1.0;
+            if (bnew != 0.0) for (int i = 0; i < n; i++) r[i] -= bnew * g[i];
+        }
+
+        /* pi ~ Dirichlet(1 + counts) */
+        double psum = 0.0;
+        for (int k = 0; k < K; k++) { sg->pi_mix[k] = vf_gamma_rand(&st, 1.0 + cnt[k]); psum += sg->pi_mix[k]; }
+        if (psum > 0.0) for (int k = 0; k < K; k++) sg->pi_mix[k] /= psum;
+
+        /* Common mixture scale f, with sigma2_mix[k] = relgrid[k] * f.
+         *
+         *   f ~ Inv-Gamma(a0 + m/2, b0 + ss_scaled/2)
+         *
+         * The prior must be PROPER.  Under a flat prior (a0=b0=0) a single
+         * large beta landing in the smallest component contributes
+         * beta^2/1e-4 to ss_scaled, f explodes, every component saturates at
+         * var_y, the mixture degenerates to one diffuse component and sigma2
+         * runs away (observed: sigma2 -> 133 against var_y ~ 1).  a0=2, b0=1
+         * is a weak proper prior with mean f=1, i.e. centred on SARGENT's
+         * frozen grid with ~4 degrees of freedom -- the same role GCTB's
+         * scaled-inverse-chi-square prior on sigma2_beta plays. */
+        if (sample_scale) {
+            const double a0 = 2.0, b0 = 1.0;
+            double gs = vf_gamma_rand(&st, a0 + 0.5 * (double)m_nonnull);
+            if (gs > 0.0) {
+                double f = (b0 + 0.5 * ss_scaled) / gs;
+                /* Bound f itself, never the components individually.  Clamping
+                 * each sigma2_mix[k] separately desynchronises sampling from
+                 * the update: beta would be drawn with variance var_y but
+                 * scored as beta^2/relgrid[k] (1e-4), inflating ss_scaled
+                 * ~1e4-fold and pinning the chain at the cap forever. */
+                if (f < f_min) f = f_min;
+                if (f > f_max) f = f_max;
+                scale_f = f;
+                for (int k = 0; k < K; k++) sg->sigma2_mix[k] = relgrid[k] * scale_f;
+            }
+        }
+
+        /* sigma2 ~ Inv-Gamma(n/2, r'r/2), flat prior */
+        double rr = 0.0;
+        for (int i = 0; i < n; i++) rr += r[i] * r[i];
+        double gs2 = vf_gamma_rand(&st, 0.5 * (double)n);
+        if (gs2 > 0.0) {
+            double s2 = (0.5 * rr) / gs2;
+            if (s2 < 1e-10 * var_y) s2 = 1e-10 * var_y;
+            sg->sigma2 = s2;
+        }
+
+        if (it >= burn) {
+            for (int j = 0; j < p; j++) beta_sum[j] += sg->beta[j];
+            for (int k = 0; k < K; k++) pi_sum[k]   += sg->pi_mix[k];
+            sigma2_sum += sg->sigma2;
+            nsamp++;
+        }
+        if (!silent && (it % 50 == 0 || it == niter - 1)) {
+            double bmax = 0.0, bss = 0.0;
+            for (int j = 0; j < p; j++) { double a = fabs(sg->beta[j]); if (a > bmax) bmax = a; bss += a*a; }
+            fprintf(stderr, "gibbs %4d/%d: s2=%.4g pi0=%.4f m=%ld f=%.4g max|b|=%.4g sum b^2=%.4g s2mix3=%.4g\n",
+                    it + 1, niter, sg->sigma2, sg->pi_mix[0], m_nonnull, scale_f, bmax, bss,
+                    sg->sigma2_mix[K-1]);
+        }
+    }
+
+    /* Posterior means, then sigma2/h2_snp recomputed from the mean beta so the
+     * reported summary is coherent with the beta actually written out. */
+    if (nsamp > 0) {
+        for (int j = 0; j < p; j++) sg->beta[j] = beta_sum[j] / (double)nsamp;
+        for (int k = 0; k < K; k++) sg->pi_mix[k] = pi_sum[k] / (double)nsamp;
+
+        memcpy(r, sg->y, (size_t)n * sizeof(double));
+        geno_rewind(sg->gr);
+        for (int j = 0; j < p; j++) {
+            if (geno_read_variant(sg->gr, g, GENO_STANDARDIZE) <= 0) break;
+            double b = sg->beta[j];
+            if (b != 0.0) for (int i = 0; i < n; i++) r[i] -= b * g[i];
+        }
+        double rr = 0.0;
+        for (int i = 0; i < n; i++) rr += r[i] * r[i];
+        double s2 = rr / n;
+        if (s2 < 1e-10 * var_y) s2 = 1e-10 * var_y;
+        sg->sigma2 = s2;
+        sg->h2_snp = (var_y > 0.0) ? 1.0 - sg->sigma2 / var_y : 0.0;
+    }
+
+    if (!silent)
+        fprintf(stderr, "gibbs: %ld post-burn-in samples, h2_snp=%.4f sigma2=%.4f\n",
+                nsamp, sg->h2_snp, sg->sigma2);
+
+    free(g); free(r); free(lw); free(cnt); free(relgrid); free(beta_sum); free(pi_sum);
+}
+
+/* Set by --stage1-gibbs / --gibbs-iter / --gibbs-burn (see sargent.c). */
+static int s1_gibbs_on = 0, s1_gibbs_iter = 3000, s1_gibbs_burn = 1000;
+
+void var_fixed_set_gibbs(int on, int niter, int burn)
+{
+    s1_gibbs_on = on;
+    if (niter > 0) s1_gibbs_iter = niter;
+    if (burn  >= 0) s1_gibbs_burn = burn;
+}
+
+void var_fixed(sargent_t *sg, int silent)
+{
+    if (s1_gibbs_on) {
+        int burn = s1_gibbs_burn < s1_gibbs_iter ? s1_gibbs_burn : s1_gibbs_iter / 2;
+        int freeze = 0;
+        { const char *e = getenv("SARGENT_GIBBS_FREEZE_SCALE"); if (e && atoi(e) != 0) freeze = 1; }
+        uint64_t sd = 0xD1B54A32D192ED03ULL;
+        { const char *e = getenv("SARGENT_GIBBS_SEED"); if (e) sd = (uint64_t)strtoull(e, NULL, 10); }
+
+        /* Warm-start the chain from the variational fit.  sargent_new leaves
+         * pi uniform (1/K), i.e. (K-1)/K of SNPs non-null; at p > n a sampler
+         * started there saturates immediately and sigma2 runs away (observed:
+         * 1111/1596 non-null on sweep 1, sigma2 -> 139 against var_y ~ 1).
+         * The variational fit supplies a sparse pi and a sensible sigma2 in
+         * ~3 s, which is also a standard way to cut MCMC burn-in.
+         * SARGENT_GIBBS_COLDSTART=1 skips it (diagnostic). */
+        int cold = 0;
+        { const char *e = getenv("SARGENT_GIBBS_COLDSTART"); if (e && atoi(e) != 0) cold = 1; }
+        if (!cold) {
+            if (!silent) fprintf(stderr, "gibbs: warm-starting from the variational fit\n");
+            var_fixed_run(sg, silent, 0, 0, 0);
+        }
+        var_fixed_gibbs(sg, silent, s1_gibbs_iter, burn, sd, !freeze);
+        return;
+    }
+
+    int nrestart = 1;
+    { const char *e = getenv("SARGENT_STAGE1_RESTARTS");
+      if (e) { int v = atoi(e); if (v >= 1) nrestart = v; } }
+
+    if (nrestart == 1) {          /* historical path, bit-for-bit */
+        var_fixed_run(sg, silent, 0, 0, 0);
+        return;
+    }
+
+    const int n = sg->n, p = sg->p, K = sg->K;
+
+    /* Snapshot the entering state so every restart begins identically. */
+    double *beta0 = sg->beta ? malloc((size_t)p * sizeof(double)) : NULL;
+    double *pi0   = malloc((size_t)K * sizeof(double));
+    double *s2m0  = malloc((size_t)K * sizeof(double));
+    double *best_beta = malloc((size_t)p * sizeof(double));
+    double *best_pi   = malloc((size_t)K * sizeof(double));
+    double *best_s2m  = malloc((size_t)K * sizeof(double));
+    double *gs        = malloc((size_t)n * sizeof(double));
+    double *rs        = malloc((size_t)n * sizeof(double));
+    if (!pi0 || !s2m0 || !best_beta || !best_pi || !best_s2m || !gs || !rs) {
+        fprintf(stderr, "var_fixed: out of memory (restarts); falling back to 1 fit\n");
+        free(beta0); free(pi0); free(s2m0);
+        free(best_beta); free(best_pi); free(best_s2m); free(gs); free(rs);
+        var_fixed_run(sg, silent, 0, 0, 0);
+        return;
+    }
+    if (beta0) memcpy(beta0, sg->beta, (size_t)p * sizeof(double));
+    memcpy(pi0,  sg->pi_mix,     (size_t)K * sizeof(double));
+    memcpy(s2m0, sg->sigma2_mix, (size_t)K * sizeof(double));
+    const double sigma2_0 = sg->sigma2;
+
+    double best_elbo = -HUGE_VAL, best_sigma2 = sg->sigma2, best_h2 = sg->h2_snp;
+    int best_k = -1;
+
+    for (int k = 0; k < nrestart; k++) {
+        /* restore the entering state */
+        if (beta0 && sg->beta) memcpy(sg->beta, beta0, (size_t)p * sizeof(double));
+        else if (sg->beta)     memset(sg->beta, 0, (size_t)p * sizeof(double));
+        memcpy(sg->pi_mix,     pi0,  (size_t)K * sizeof(double));
+        memcpy(sg->sigma2_mix, s2m0, (size_t)K * sizeof(double));
+        sg->sigma2 = sigma2_0;
+
+        /* restart 0 is the historical sequential sweep, so multi-start can
+         * never do worse than the default fit by more than ELBO mis-ranking */
+        var_fixed_run(sg, silent, 0x9E3779B97F4A7C15ULL + 0x1000ULL * (uint64_t)(k + 1),
+                      k == 0 ? 0 : 1, 1);
+
+        double e = var_fixed_elbo(sg, gs, rs);
+        /* Diagnostic: SARGENT_STAGE1_DUMP_RESTARTS=<prefix> writes each
+         * restart's beta so the ELBO ranking can be scored against held-out
+         * r2 offline (is selection, or search, the bottleneck?). Debug only. */
+        { const char *dp = getenv("SARGENT_STAGE1_DUMP_RESTARTS");
+          if (dp && *dp) {
+              char path[4096];
+              snprintf(path, sizeof path, "%s_restart%d.beta.tsv", dp, k);
+              FILE *fp = fopen(path, "w");
+              if (fp) {
+                  fprintf(fp, "# elbo %.10g h2_snp %.10g sigma2 %.10g\n",
+                          e, sg->h2_snp, sg->sigma2);
+                  for (int j = 0; j < p; j++) fprintf(fp, "%.10g\n", sg->beta[j]);
+                  fclose(fp);
+              }
+          } }
+        if (!silent)
+            fprintf(stderr, "var_fixed restart %d/%d: elbo=%.4f h2_snp=%.4f sigma2=%.4f\n",
+                    k + 1, nrestart, e, sg->h2_snp, sg->sigma2);
+        if (e > best_elbo) {
+            best_elbo = e; best_k = k;
+            memcpy(best_beta, sg->beta,       (size_t)p * sizeof(double));
+            memcpy(best_pi,   sg->pi_mix,     (size_t)K * sizeof(double));
+            memcpy(best_s2m,  sg->sigma2_mix, (size_t)K * sizeof(double));
+            best_sigma2 = sg->sigma2; best_h2 = sg->h2_snp;
+        }
+    }
+
+    if (best_k >= 0) {
+        memcpy(sg->beta,       best_beta, (size_t)p * sizeof(double));
+        memcpy(sg->pi_mix,     best_pi,   (size_t)K * sizeof(double));
+        memcpy(sg->sigma2_mix, best_s2m,  (size_t)K * sizeof(double));
+        sg->sigma2 = best_sigma2; sg->h2_snp = best_h2;
+        if (!silent)
+            fprintf(stderr, "var_fixed: selected restart %d/%d (elbo=%.4f)\n",
+                    best_k + 1, nrestart, best_elbo);
+    }
+
+    free(beta0); free(pi0); free(s2m0);
+    free(best_beta); free(best_pi); free(best_s2m); free(gs); free(rs);
 }
 
 /* =========================================================================

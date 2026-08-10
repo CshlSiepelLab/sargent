@@ -130,6 +130,33 @@ MAIN OPTIONS:
                       genome (not yet implemented; see ROADMAP.md Phase 7).
 
 ALGORITHMIC VARIANTS (for systematic comparison):
+    --stage1-gibbs
+          Replace Stage 1's mean-field variational BayesR fit with a Gibbs
+          sampler (BayesR SSVS) over the same model, reporting the
+          post-burn-in posterior mean of beta.  Mean-field under-fits in high
+          LD: on 500 kb WGS cells the variational fit sits ~0.017-0.037
+          held-out r2 below BayesR (GCTB), while the sampler is statistically
+          indistinguishable from it at h2=0.8 and slightly ahead at h2=0.5
+          (10 seeds per cell, densities 3800/1400/830 SNPs/Mb).
+
+          The chain is warm-started from the variational fit, which supplies
+          a sparse pi; started cold from the uniform pi that sargent_new sets
+          it saturates at p > n.  Cost is ~58 s against the variational fit's
+          ~3 s at p ~ 1600, n = 1000.
+
+          CAVEAT: a better Stage 1 claims more of the variance that is tagged
+          but not typed, and the sequential fit hands Stage 2 only what is
+          left.  At intermediate coverage (~250 SNPs/Mb) that crowds out the
+          ARG and makes the COMBINED arms slightly worse than under the
+          variational fit, even though Stage 1 itself improves.  Use with
+          --snp-only, or where coverage is high or very low.
+
+    --gibbs-iter <N>
+          Gibbs sweeps.  Default: 3000.
+
+    --gibbs-burn <N>
+          Gibbs burn-in sweeps discarded before averaging.  Default: 1000.
+
     --uniform-arg, -U
         Replace Stage 2's per-tree REML with a single shared variance
         component on the uniformly-weighted kinship K = (1/S) sum_s G_s.
@@ -171,6 +198,32 @@ ALGORITHMIC VARIANTS (for systematic comparison):
         when joint EM was briefly the default.  --snp-only / --arg-only
         also imply sequential.
 
+
+ENVIRONMENT VARIABLES (Stage 1):
+    SARGENT_STAGE1_RESTARTS=N
+          Run N variational Stage-1 fits and keep the highest-ELBO one.
+          Default 1, which is byte-identical to <=0.4.0.  The mean-field
+          objective is multimodal on high-coverage cells; N=6 gains +0.0203
+          held-out r2 (10 seeds, 3800 SNPs/Mb, h2=0.8, improving 10/10) and
+          removes a collapse mode that the var(X beta) trust region was
+          otherwise needed to suppress.  With restarts on, that trust region
+          relaxes from 0.6 to 0.9 automatically.  Cost is ~N x Stage 1.
+
+    SARGENT_S2_VFCAP=<x>
+          Override the var(X beta) trust region (0 disables it).
+
+    SARGENT_POLYAK_BETA=0
+          Disable Polyak-Ruppert averaging of beta (on by default since
+          0.4.0).
+
+    SARGENT_LEARN_SCALE=1
+          Learn the BayesR mixture scale in the variational fit.  r2-neutral;
+          a stability/h2_snp-calibration option.
+
+    SARGENT_GIBBS_SEED=<n>, SARGENT_GIBBS_FREEZE_SCALE=1,
+    SARGENT_GIBBS_COLDSTART=1, SARGENT_GIBBS_RESYNC=1
+          Gibbs chain seed, and diagnostics: freeze the mixture scale, skip
+          the variational warm start, rebuild the residual each sweep.
 
 OUTPUT FILES:
     <outroot>.beta.tsv

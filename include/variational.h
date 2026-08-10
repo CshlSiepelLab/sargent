@@ -17,6 +17,12 @@
    If silent != 0, per-iteration progress is suppressed. */
 void var_fixed(sargent_t *sg, int silent);
 
+/* Select the Stage-1 inference engine.  on=0 (default) keeps the variational
+ * fit; on=1 replaces it with a BayesR Gibbs sampler (SSVS), reporting the
+ * post-burn-in posterior mean of beta.  niter<=0 / burn<0 keep the defaults
+ * (3000 / 1000).  Set from --stage1-gibbs, --gibbs-iter, --gibbs-burn. */
+void var_fixed_set_gibbs(int on, int niter, int burn);
+
 /* Joint variational coordinate descent: each outer iteration performs one
    V-solve, one sweep of beta updates using the V-aware precision tr(V^{-1}),
    and one REML EM step on (ws^2, sigma^2).  Initialised with beta=0 and a

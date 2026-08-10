@@ -197,6 +197,7 @@ int main(int argc, char *argv[])
     int silent      = 0;
     int ts_geno     = 0;
     int snp_only    = 0;
+    int stage1_gibbs = 0, gibbs_iter = 0, gibbs_burn = -1;
     int arg_only    = 0;
     int nprobe      = 0;   /* 0 = use sargent_t default (10) */
     int uniform_arg = 0;
@@ -243,6 +244,9 @@ int main(int argc, char *argv[])
         {"test-geno",      1, 0, 0x104},
         {"test-pheno",     1, 0, 0x105},
         {"predict-out",    1, 0, 0x106},
+        {"stage1-gibbs",   0, 0, 0x107},
+        {"gibbs-iter",     1, 0, 0x108},
+        {"gibbs-burn",     1, 0, 0x109},
         {"precompute",     0, 0, 'X'},
         {"version",        0, 0, 'v'},
         {"help",           0, 0, 'h'},
@@ -254,6 +258,9 @@ int main(int argc, char *argv[])
         case 'z': silent      = 1;                break;
         case 'G': ts_geno     = 1;                break;
         case 'S': snp_only    = 1;                break;
+        case 0x107: stage1_gibbs = 1;             break;
+        case 0x108: gibbs_iter   = atoi(optarg);  break;
+        case 0x109: gibbs_burn   = atoi(optarg);  break;
         case 'A': arg_only    = 1;                break;
         case 'U': uniform_arg = 1;                break;
         case 'E': em_iters    = atoi(optarg);
@@ -292,6 +299,13 @@ int main(int argc, char *argv[])
         fprintf(stderr, "ERROR: --mode localize not yet implemented "
                 "(see ROADMAP.md, Phase 7).\n");
         exit(EXIT_FAILURE);
+    }
+
+    var_fixed_set_gibbs(stage1_gibbs, gibbs_iter, gibbs_burn);
+    if (stage1_gibbs && arg_only) {
+        fprintf(stderr, "ERROR: --stage1-gibbs has no effect with --arg-only "
+                        "(Stage 1 is skipped).\n");
+        return 1;
     }
 
     if (snp_only && arg_only) {
