@@ -5,6 +5,7 @@ add_library(sargent_core STATIC
     trees.c
     variational.c
     conjgrad.c
+    threads.c
     hutchinson.c
     gall.c
     predict.c

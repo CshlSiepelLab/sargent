@@ -19,6 +19,7 @@
 #include "gall.h"
 #include "variational.h"
 #include "predict.h"
+#include "threads.h"
 #include "sargent.help.h"
 
 /* Read n phenotype values from f.
@@ -207,6 +208,7 @@ int main(int argc, char *argv[])
     int em_flag_set = 0;     /* tracks whether --em was explicitly passed */
     int pheno_col   = 0;     /* 0 = last whitespace field (legacy); >0 = 1-indexed column */
     int precompute  = 0;     /* --precompute: force rebuild of .gall eigen cache */
+    int threads     = 0;     /* --threads N; 0 = resolve from env, else library default */
     double pi0      = -1.0; /* < 0 means unset */
     /* Block 2.6 — sparse fused-lasso prior on log ws². Both default to 0 (off).
      * --ws2-l1 LAMBDA   — sparsity-on-levels strength.
@@ -232,6 +234,7 @@ int main(int argc, char *argv[])
         {"pi0",            1, 0, 'P'},
         {"outroot",        1, 0, 'o'},
         {"nprobe",         1, 0, 'N'},
+        {"threads",        1, 0, 'T'},
         {"uniform-arg",    0, 0, 'U'},
         {"em",             1, 0, 'E'},
         {"sequential",     0, 0, 'Q'},
@@ -253,7 +256,7 @@ int main(int argc, char *argv[])
         {0, 0, 0, 0}
     };
 
-    while ((c = getopt_long(argc, argv, "zGSAUQXE:C:M:o:N:P:vh", long_opts, &opt_idx)) != -1) {
+    while ((c = getopt_long(argc, argv, "zGSAUQXE:C:M:o:N:P:T:vh", long_opts, &opt_idx)) != -1) {
         switch (c) {
         case 'z': silent      = 1;                break;
         case 'G': ts_geno     = 1;                break;
@@ -271,6 +274,7 @@ int main(int argc, char *argv[])
         case 'P': pi0         = atof(optarg);     break;
         case 'o': outroot     = optarg;           break;
         case 'N': nprobe      = atoi(optarg);     break;
+        case 'T': threads     = atoi(optarg);     break;
         case 0x100: ws2_l1    = atof(optarg);     break;
         case 0x101: ws2_l2    = atof(optarg);     break;
         case 0x102: predict_oos    = 1;           break;
@@ -286,6 +290,11 @@ int main(int argc, char *argv[])
             exit(EXIT_FAILURE);
         }
     }
+
+    /* Establish one thread budget across OpenMP and BLAS before any linear
+     * algebra runs.  See include/threads.h for why a single env var was not
+     * enough. */
+    sargent_init_threads(threads, silent);
 
     /* Resolve mode */
     int mode_predict = (strcmp(mode_str, "predict") == 0);
