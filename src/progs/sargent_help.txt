@@ -244,8 +244,14 @@ OUTPUT FILES:
         Coherent record of the fit: mode, h2_snp, h2_arg, h2 (total),
         sigma2, plus context (n_indiv, n_variants, n_trees, etc.).
 
-    <geno_prefix>.gall  (when Stage 2 runs; cached next to the inputs,
-                         not under <outroot>)
+    <trees_prefix>.gall / <trees_prefix>.span.gall
+                        (when Stage 2 runs; cached next to the .trees file,
+                         not under <outroot>.  TWO FILES, because there are two
+                         kernels: .gall is the plain sum_s G_s used by the
+                         learned arms, .span.gall the span-weighted eGRM used
+                         by --uniform-arg.  They are NOT interchangeable -- for
+                         --uniform-arg G_all is the model, not a preconditioner
+                         -- and each file's header records which it holds.)
         Binary cache of the aggregate kinship G_all = sum_s G_s and its
         eigendecomposition (U, lambda, w_ones = U^T * 1).  Used inside
         Stage 2 as:

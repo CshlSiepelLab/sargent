@@ -69,6 +69,8 @@ gall_t *gall_build(const tsk_treeseq_t *ts,
     }
 
     g->n = n;
+    g->use_span = use_span;   /* recorded in the .gall header (v4) so a cached
+                                 file can never be mistaken for the other kernel */
 
     /* Compute the span-weighted eGRM G_all = Σ_s span_s G_s one column at a time
      * using unit-vector inputs (gall_acc_visit applies the per-tree span weight).
@@ -204,12 +206,14 @@ int gall_save(const gall_t *g, const char *path, long trees_size)
     uint32_t ver   = GALL_VERSION;
     int32_t  n32   = g->n;
     int64_t  ts_sz = (int64_t)trees_size;
+    uint32_t span  = (uint32_t)(g->use_span ? 1u : 0u);
 
     int ok = 1;
     ok &= (fwrite(&magic, 8, 1, f) == 1);
     ok &= (fwrite(&ver,   4, 1, f) == 1);
     ok &= (fwrite(&n32,   4, 1, f) == 1);
     ok &= (fwrite(&ts_sz, 8, 1, f) == 1);
+    ok &= (fwrite(&span,  4, 1, f) == 1);
     ok &= (fwrite(g->U,      sizeof(double), (size_t)g->n * g->n, f)
                == (size_t)g->n * g->n);
     ok &= (fwrite(g->lambda, sizeof(double), (size_t)g->n, f)
@@ -222,20 +226,22 @@ int gall_save(const gall_t *g, const char *path, long trees_size)
     return 0;
 }
 
-gall_t *gall_load(const char *path, int n_expected, long trees_size_expected)
+gall_t *gall_load(const char *path, int n_expected, long trees_size_expected,
+                  int use_span_expected)
 {
     FILE *f = fopen(path, "rb");
     if (!f) return NULL;
 
-    uint64_t magic; uint32_t ver; int32_t n32; int64_t ts_sz;
+    uint64_t magic; uint32_t ver; int32_t n32; int64_t ts_sz; uint32_t span;
     int ok = 1;
     ok &= (fread(&magic, 8, 1, f) == 1);
     ok &= (fread(&ver,   4, 1, f) == 1);
     ok &= (fread(&n32,   4, 1, f) == 1);
     ok &= (fread(&ts_sz, 8, 1, f) == 1);
+    ok &= (fread(&span,  4, 1, f) == 1);
 
     if (!ok || magic != GALL_MAGIC || ver != GALL_VERSION) {
-        fprintf(stderr, "gall_load: bad header in %s\n", path);
+        fprintf(stderr, "gall_load: bad or pre-v4 header in %s; will rebuild\n", path);
         fclose(f); return NULL;
     }
     if ((int)n32 != n_expected) {
@@ -247,11 +253,21 @@ gall_t *gall_load(const char *path, int n_expected, long trees_size_expected)
         fprintf(stderr, "gall_load: .trees file changed; will rebuild .gall\n");
         fclose(f); return NULL;
     }
+    /* The kernel check.  Without it a cache written by the learned path
+     * (use_span=0) is silently handed to --uniform-arg, where G_all is the
+     * MODEL, not a preconditioner. */
+    if ((int)(span != 0u) != (use_span_expected != 0)) {
+        fprintf(stderr, "gall_load: kernel mismatch in %s "
+                "(file use_span=%u, need %d); will rebuild\n",
+                path, span, use_span_expected != 0);
+        fclose(f); return NULL;
+    }
 
     int n = (int)n32;
     gall_t *g = calloc(1, sizeof(*g));
     if (!g) { fclose(f); return NULL; }
-    g->n      = n;
+    g->n        = n;
+    g->use_span = (span != 0u);
     g->U      = malloc((size_t)n * n * sizeof(double));
     g->lambda = malloc((size_t)n * sizeof(double));
     g->w_ones = malloc((size_t)n * sizeof(double));

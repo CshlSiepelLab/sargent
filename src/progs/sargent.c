@@ -462,12 +462,24 @@ int main(int argc, char *argv[])
      * -------------------------------------------------------------------- */
     gall_t *gall = NULL;
     {
-        /* Derive .gall path from .trees path by stripping extension. */
+        /* Derive the .gall path from the .trees path by stripping the extension.
+         *
+         * TWO KERNELS, TWO FILES.  gall_build produces the span-weighted eGRM
+         * (Σ_s span_s·G_s) under --uniform-arg and the plain Σ_s G_s otherwise;
+         * these are different matrices and, for --uniform-arg, G_all is the
+         * MODEL rather than a preconditioner.  Before v4 both shared one path,
+         * so the driver order (`--predict` → `--arg-only` → `--uniform-arg`,
+         * all in one cell dir) had the uniform pass silently adopt the learned
+         * pass's un-span cache.  Separate names keep BOTH caches valid, so
+         * neither pass has to rebuild the other's; the use_span field in the
+         * header (checked by gall_load) is the belt-and-braces guard for any
+         * pre-existing or hand-copied file. */
         char gall_path[4096];
         snprintf(gall_path, sizeof(gall_path), "%s", trees_file);
         char *ext = strrchr(gall_path, '.');
         if (ext && strcmp(ext, ".trees") == 0) *ext = '\0';
-        strncat(gall_path, ".gall", sizeof(gall_path) - strlen(gall_path) - 1);
+        strncat(gall_path, uniform_arg ? ".span.gall" : ".gall",
+                sizeof(gall_path) - strlen(gall_path) - 1);
 
         /* Get current .trees file size for cache validation. */
         struct stat ts_stat;
@@ -477,8 +489,8 @@ int main(int argc, char *argv[])
             if (!silent)
                 fprintf(stderr, "G_all: --precompute: rebuilding %s\n", gall_path);
         } else {
-            /* Try loading cached .gall */
-            gall = gall_load(gall_path, sg->n, trees_sz);
+            /* Try loading cached .gall (must hold the kernel this run needs) */
+            gall = gall_load(gall_path, sg->n, trees_sz, uniform_arg);
             if (gall && !silent)
                 fprintf(stderr, "G_all: loaded %s\n", gall_path);
         }

@@ -29,21 +29,40 @@
  *      κ(P⁻¹V) ≈ O(1), reducing CG iteration count from ~64 to ~5.
  *
  * File format (.gall):
- *   uint64  magic   = 0x4C4C41475247_4153  ('SARGGALL')
- *   uint32  version = 2
+ *   uint64  magic    = 0x4C4C41475247_4153  ('SARGGALL')
+ *   uint32  version  = 4
  *   int32   n
  *   int64   trees_size  (st_size of .trees file at build time; used for
  *                        cache invalidation — reload if size changes)
+ *   uint32  use_span    (1 = span-weighted eGRM Sum_s span_s G_s, the uniform
+ *                        arms' kernel; 0 = plain Sum_s G_s, the learned arms'
+ *                        CG preconditioner.  v4 ADDITION — see below.)
  *   double  U[n*n]      (eigenvectors, col-major; U[:,k] = k-th eigenvector)
  *   double  lambda[n]   (eigenvalues of G_all, ascending order)
  *   double  w_ones[n]   (= U^T 1_n; used for REML intercept projection)
+ *
+ * WHY use_span IS IN THE HEADER (v4, and why v3 caches are invalidated).
+ * gall_build() produces two DIFFERENT matrices depending on use_span, but the
+ * v3 header recorded only {magic, version, n, trees_size} and the path is
+ * derived from the .trees name — so both kernels shared one cache slot.  A
+ * learned run (use_span=0) writing the cache and a later `--uniform-arg` run
+ * reading it would silently load the WRONG kernel, and for --uniform-arg
+ * G_all is the MODEL (var_random_emma), not merely a preconditioner.  The
+ * drivers hit exactly that order: `--predict` (learned, writes un-span), then
+ * `--arg-only`, then `--uniform-arg` (loads it).  Recording the flag and
+ * checking it on load turns the collision into a cache miss + rebuild.
+ * The version bump is deliberate: an existing v3 file cannot be trusted
+ * because it does not say which kernel it holds.
  */
 
 #define GALL_MAGIC   UINT64_C(0x4C4C414753524741)
-#define GALL_VERSION 3u   /* v3: span-weighted eGRM (G_all = Sum_s span_s G_s) */
+#define GALL_VERSION 4u   /* v4: header records use_span (v3: span-weighted eGRM) */
 
 typedef struct {
     int     n;          /* number of individuals */
+    int     use_span;   /* which kernel this holds: 1 = Sum_s span_s G_s
+                           (uniform arms), 0 = Sum_s G_s (learned arms'
+                           preconditioner).  Persisted in the .gall header. */
     double *U;          /* n×n eigenvectors, col-major */
     double *lambda;     /* n eigenvalues, ascending */
     double *w_ones;     /* n entries: (U^T 1_n)[k]; used in REML profile LL */
@@ -76,10 +95,14 @@ void gall_free(gall_t *g);
  *             invalidation in gall_load).
  * gall_save() returns 0 on success, -1 on I/O error.
  * gall_load() returns NULL on I/O error, format mismatch (n != n_expected),
- *             or stale cache (trees_size != trees_size_expected).
+ *             stale cache (trees_size != trees_size_expected), or a
+ *             KERNEL mismatch (use_span != use_span_expected).  The last is
+ *             the v4 addition: the caller must say which of the two kernels
+ *             it needs, and a cache holding the other one is a miss, not a hit.
  */
 int    gall_save(const gall_t *g, const char *path, long trees_size);
-gall_t *gall_load(const char *path, int n_expected, long trees_size_expected);
+gall_t *gall_load(const char *path, int n_expected, long trees_size_expected,
+                  int use_span_expected);
 
 /*
  * Build (or rebuild) the diagonal preconditioner:

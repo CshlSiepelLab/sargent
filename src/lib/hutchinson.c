@@ -75,6 +75,16 @@ static double vdot(const double *a, const double *b, int n)
     return s;
 }
 
+/* Mean genomic span per tree = sequence_length / num_trees.  Mirrors
+ * trees.c:tree_seq_mean_span so the per-tree weight (span_s / mean_span) is
+ * the SAME normalisation the walker applies, i.e. Σ_s weight == S_orig. */
+static double hutch_mean_span(const tsk_treeseq_t *ts)
+{
+    double     L  = tsk_treeseq_get_sequence_length(ts);
+    tsk_size_t nt = tsk_treeseq_get_num_trees(ts);
+    return (nt > 0 && L > 0.0) ? L / (double)nt : 1.0;
+}
+
 /* One batch: draw batch_size probes, solve V z = eps for each, then walk the
  * tree sequence accumulating B[s] estimates.
  *
@@ -90,7 +100,8 @@ static void run_batch(cg_state_t *cg, cg_matvec_fn Av, void *av_data,
                       double *eps_buf, double *z_buf,
                       double *tree_work, tsk_id_t *order_buf,
                       double *gv_buf,
-                      double *B, double *B0_accum, double scale)
+                      double *B, double *B0_accum, double scale,
+                      int use_span)
 {
     /* Step 1: draw probe vectors */
     for (int k = 0; k < batch_size; k++) {
@@ -120,18 +131,24 @@ static void run_batch(cg_state_t *cg, cg_matvec_fn Av, void *av_data,
         return;
     }
 
+    const double mean_span = hutch_mean_span(ts);
+
     int s = 0;
     for (ret = tsk_tree_first(&tree); ret == TSK_TREE_OK;
          ret = tsk_tree_next(&tree), s++) {
         if (s >= S_orig) break;
         int sp = prune_map[s];
+        /* dV/dws2_s = span_s·G_s when V is span-weighted; = G_s otherwise.
+         * tree_cov_matvec has no span concept, so apply it here. */
+        double span = use_span
+            ? (tree.interval.right - tree.interval.left) / mean_span : 1.0;
 
         for (int k = 0; k < batch_size; k++) {
             const double *eps_k = eps_buf + (size_t)k * n;
             const double *z_k   = z_buf   + (size_t)k * n;
 
             tree_cov_matvec(gv_buf, z_k, n, &tree, tree_work, order_buf, hap_to_indiv);
-            B[sp] += scale * vdot(eps_k, gv_buf, n);
+            B[sp] += scale * span * vdot(eps_k, gv_buf, n);
         }
     }
     if (ret < 0)
@@ -143,7 +160,7 @@ static void run_batch(cg_state_t *cg, cg_matvec_fn Av, void *av_data,
 void hutch_accumulate(const double *eps, const double *z, int nprobe, int n,
                       const tsk_treeseq_t *ts, const int *hap_to_indiv,
                       double *B, int S, int S_orig, const int *prune_map,
-                      double *B0_out)
+                      double *B0_out, int use_span)
 {
     tsk_size_t n_nodes  = tsk_treeseq_get_num_nodes(ts);
     double    *tree_work = malloc(2 * n_nodes * sizeof(double));
@@ -173,16 +190,20 @@ void hutch_accumulate(const double *eps, const double *z, int nprobe, int n,
         return;
     }
 
+    const double mean_span = hutch_mean_span(ts);
+
     int s = 0;
     for (ret = tsk_tree_first(&tree); ret == TSK_TREE_OK;
          ret = tsk_tree_next(&tree), s++) {
         if (s >= S_orig) break;
         int sp = prune_map[s];
+        double span = use_span
+            ? (tree.interval.right - tree.interval.left) / mean_span : 1.0;
         for (int k = 0; k < nprobe; k++) {
             const double *eps_k = eps + (size_t)k * n;
             const double *z_k   = z   + (size_t)k * n;
             tree_cov_matvec(gv_buf, z_k, n, &tree, tree_work, order_buf, hap_to_indiv);
-            B[sp] += vdot(eps_k, gv_buf, n);
+            B[sp] += span * vdot(eps_k, gv_buf, n);
         }
     }
 
@@ -200,7 +221,8 @@ void hutch_accumulate(const double *eps, const double *z, int nprobe, int n,
 void hutch_trace_all(cg_state_t *cg, cg_matvec_fn Av, void *av_data,
                      const tsk_treeseq_t *ts, const int *hap_to_indiv,
                      int n, int S, int S_orig, const int *prune_map,
-                     double *B, double *B0_out, const hutch_opts_t *opts)
+                     double *B, double *B0_out, const hutch_opts_t *opts,
+                     int use_span)
 {
     /* resolve options */
     hutch_opts_t o = {
@@ -256,7 +278,7 @@ void hutch_trace_all(cg_state_t *cg, cg_matvec_fn Av, void *av_data,
         run_batch(probe_cg, Av, av_data, ts, hap_to_indiv, n, S, S_orig, prune_map,
                   cur, o.use_gaussian, &rng,
                   eps_buf, z_buf, tree_work, order_buf, gv_buf,
-                  B, B0_out, scale);
+                  B, B0_out, scale, use_span);
 
         remaining -= cur;
     }
