@@ -306,8 +306,31 @@ typedef struct {
                          * ws2 is absent (--snp-only): the learned arm is skipped */
     const double *ws2_full;   /* NULL iff sg is NULL */
     int n_total;
+    int sg_span;        /* apply span to the LEARNED accumulator?  See below. */
 } kin_ctx_t;
 
+/* WHY sg_span EXISTS (and is 0 for the learned arms).
+ *
+ * The prediction kernel must be the kernel the fit was performed under, or the
+ * BLUP is solving a different model than the one whose weights it was handed.
+ * Since 52e04f5 the span weight in Stage 2 is conditional on --uniform-arg
+ * (variational.c: v_matvec / compute_quad_all take use_span = sg->uniform_arg,
+ * and trees.c sets st.span = 1.0 when it is 0).  So:
+ *
+ *   uniform arms  (uniform_arg=1): fit V = Σ_s ws2·span_s·G_s  -> predict WITH span
+ *   learned arms  (uniform_arg=0): fit V = Σ_s ŵ²_s·G_s        -> predict WITHOUT span
+ *
+ * The generative model span-weights (simulate.py: branch increment variance
+ * scales with the tree's span), so an un-spanned learned fit is *supposed* to
+ * return ŵ²_s ≈ ws2_true_s·span_s — span already absorbed into the estimate.
+ * Multiplying by span again here weighted every tree by span twice, which is
+ * a systematic reweighting toward long trees and not the fitted model.
+ *
+ * The uniform accumulator always keeps span: it IS the span-weighted eGRM
+ * (GALL_VERSION 3+), which is what arg_lmm / sargent_u are defined against.
+ *
+ * SARGENT_PREDICT_SPAN_LEGACY=1 restores the pre-fix behaviour for
+ * bit-comparison against grids fitted before this change. */
 static void kin_visit(const tree_walk_state_t *st, void *vctx)
 {
     kin_ctx_t *c = vctx;
@@ -319,7 +342,7 @@ static void kin_visit(const tree_walk_state_t *st, void *vctx)
         for (int i = 0; i < c->n_total; i++) c->uni[i] += span * gv[i];
         return;
     }
-    double w = c->ws2_full[st->s_orig] * span;
+    double w = c->ws2_full[st->s_orig] * (c->sg_span ? span : 1.0);
     for (int i = 0; i < c->n_total; i++) {
         double g = gv[i];
         c->uni[i] += span * g;
@@ -332,7 +355,7 @@ static int build_kinship_blocks(const tsk_treeseq_t *full, int n_tr, int n_te,
                                 const double *ws2_full,
                                 double *K_uni_train, double *K_uni_cross,
                                 double *K_sg_train,  double *K_sg_cross,
-                                int silent)
+                                int silent, int sg_span)
 {
     int n_total = n_tr + n_te;
     tree_cov_matvec_inc_state_t inc;
@@ -355,7 +378,8 @@ static int build_kinship_blocks(const tsk_treeseq_t *full, int n_tr, int n_te,
 
     kin_ctx_t ctx = { .uni = uni, .sg = sgc,
                       .ws2_full = have_sg ? ws2_full : NULL,
-                      .n_total = n_total };
+                      .n_total = n_total,
+                      .sg_span = sg_span };
 
     if (!silent)
         fprintf(stderr, "predict: building kinship blocks "
@@ -598,9 +622,23 @@ int sargent_predict(sargent_t *sg,
     if (!K_uni_train || !K_uni_cross || (have_ws2 && (!K_sg_train || !K_sg_cross)))
         goto cleanup_kin;
 
+    /* The learned kernel is span-weighted only if the Stage-2 fit was, i.e. only
+     * under --uniform-arg (see kin_visit).  Legacy override for reproducing
+     * pre-fix grids. */
+    int sg_span = sg->uniform_arg;
+    {
+        const char *e = getenv("SARGENT_PREDICT_SPAN_LEGACY");
+        if (e && atoi(e) != 0) {
+            sg_span = 1;
+            if (!silent)
+                fprintf(stderr, "predict: SARGENT_PREDICT_SPAN_LEGACY=1 — "
+                        "span-weighting the learned kernel regardless of the fit\n");
+        }
+    }
+
     if (build_kinship_blocks(&full, n_tr, n_te, h2i_full, S_full, ws2_full,
                              K_uni_train, K_uni_cross,
-                             K_sg_train, K_sg_cross, silent) != 0) {
+                             K_sg_train, K_sg_cross, silent, sg_span) != 0) {
         fprintf(stderr, "predict: kinship block build failed\n");
         goto cleanup_kin;
     }

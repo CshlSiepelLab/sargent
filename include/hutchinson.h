@@ -52,7 +52,15 @@ typedef struct {
 /* S is the pruned segment count (length of B).
  * S_orig is the original tree count (for tskit iteration).
  * prune_map[s_orig] = s_pruned; only the representative (first) tree of each
- * pruned segment has its G_s MVP evaluated. */
+ * pruned segment has its G_s MVP evaluated.
+ *
+ * use_span MUST match the operator V that Av implements.  B[s] is the REML
+ * score's tr(V^{-1} dV/dws2_s); when V is the span-weighted kernel
+ * (V = Σ_s ws2_s·span_s·G_s, i.e. the uniform arms), dV/dws2_s = span_s·G_s,
+ * so each tree's contribution carries span_s = (span/mean_span).  Passing 0
+ * against a span-weighted V leaves B un-spanned while compute_quad_all's A[s]
+ * is spanned, which biases the A/B ratio the EM divides.  Pass
+ * sg->uniform_arg, exactly as v_matvec and compute_quad_all do. */
 void hutch_trace_all(cg_state_t          *cg,
                      cg_matvec_fn         Av,
                      void                *av_data,
@@ -64,7 +72,8 @@ void hutch_trace_all(cg_state_t          *cg,
                      const int           *prune_map,
                      double              *B,
                      double              *B0_out,
-                     const hutch_opts_t  *opts);
+                     const hutch_opts_t  *opts,
+                     int                  use_span);
 
 /* Lower-level: given pre-computed probe matrix eps[nprobe*n] and solution
  * matrix z[nprobe*n] (row-major, each row a vector of length n), walk the
@@ -80,4 +89,5 @@ void hutch_accumulate(const double        *eps,
                       int                  S,
                       int                  S_orig,
                       const int           *prune_map,
-                      double              *B0_out);
+                      double              *B0_out,
+                      int                  use_span);

@@ -1349,8 +1349,13 @@ void var_random(sargent_t *sg, int silent)
         compute_quad_all(&inc, n, S, sg->S_orig, sg->prune_map,
                          r_tilde, A, gv, sg->uniform_arg);
 
+        /* use_span must match v_matvec's operator AND compute_quad_all's A[s]:
+         * B[s] is tr(V^{-1} dV/dws2_s), and dV/dws2_s = span_s·G_s whenever V
+         * is span-weighted.  Passing sg->uniform_arg keeps A and B on the same
+         * footing so the EM's A/B ratio is unbiased. */
         hutch_trace_all(cg, v_matvec, &vd, sg->ts, sg->hap_to_indiv,
-                        n, S, sg->S_orig, sg->prune_map, B, &B_0, &hopts);
+                        n, S, sg->S_orig, sg->prune_map, B, &B_0, &hopts,
+                        sg->uniform_arg);
 
         /* REML EM update for segment weights.
          *
@@ -1742,8 +1747,13 @@ void var_joint(sargent_t *sg, int silent)
         for (int i = 0; i < n; i++) A_0 += r_tilde[i] * r_tilde[i];
         compute_quad_all(&inc, n, S, sg->S_orig, sg->prune_map,
                          r_tilde, A, gv, sg->uniform_arg);
+        /* use_span must match v_matvec's operator AND compute_quad_all's A[s]:
+         * B[s] is tr(V^{-1} dV/dws2_s), and dV/dws2_s = span_s·G_s whenever V
+         * is span-weighted.  Passing sg->uniform_arg keeps A and B on the same
+         * footing so the EM's A/B ratio is unbiased. */
         hutch_trace_all(cg, v_matvec, &vd, sg->ts, sg->hap_to_indiv,
-                        n, S, sg->S_orig, sg->prune_map, B, &B_0, &hopts);
+                        n, S, sg->S_orig, sg->prune_map, B, &B_0, &hopts,
+                        sg->uniform_arg);
 
         /* --- 4. One β sweep with constant V-aware precision v_jj ≈ tr(V^{-1}) ---
          *
