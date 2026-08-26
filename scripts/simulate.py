@@ -513,6 +513,36 @@ def main():
     ap.add_argument("--unobs-maf-max", type=float, default=0.5,
                     help="maximum MAF for SV-class carve-out (default 0.5 = no upper filter). "
                          "Set e.g. 0.05 to restrict to rare-variant SV class.")
+    # ---- structure of the unobserved class --------------------------------
+    # WHY THESE EXIST.  Under infinite sites an untyped variant sits on exactly
+    # ONE branch, and a COMMON variant's branch is old and widely carried, so
+    # nearby typed SNPs tag it almost perfectly.  Measured on these cells: at 830
+    # SNPs/Mb, of 1384 untyped variants exactly ONE has MAF > 5% -- and it is well
+    # tagged.  A carve-out selected by FREQUENCY is therefore untyped but not
+    # untagged: the SNP arms lose nothing by not typing it and the ARG has no
+    # advantage to demonstrate.  That is what the first SV experiment measured
+    # (+0.010) and what a 20-cell repeat at h2_arg = 0 reproduced
+    # (+0.0095 +/- 0.0080).  Both knobs below break the one-variant-one-branch
+    # correspondence that makes "untyped" imply "tagged".
+    #
+    # Defaults (1 / 0.0) are OFF and the legacy code path is kept literally, so
+    # existing seeds reproduce bit for bit.
+    ap.add_argument("--unobs-series-k", type=int, default=1,
+                    help="allelic series: place the unobserved class as groups of K "
+                         "DISTINCT causal variants within one locus, with same-sign effects, "
+                         "instead of independent singletons (default 1 = off).  The aggregate "
+                         "carrier set is then a union of K branches, which no single marker "
+                         "can tag -- the reason gene-based burden tests exist -- while a "
+                         "branch-additive ARG random effect still spans it.")
+    ap.add_argument("--unobs-series-kb", type=float, default=25.0,
+                    help="locus half-width in kb for --unobs-series-k (default 25): the K "
+                         "variants of a series are drawn within this distance of the anchor.")
+    ap.add_argument("--unobs-mask-kb", type=float, default=0.0,
+                    help="locally-sparse markers: exclude typed SNPs within this many kb of an "
+                         "unobserved causal variant (default 0 = off).  Models SVs arising in "
+                         "repetitive regions where arrays and short-read calling under-perform. "
+                         "The panel SIZE is held fixed -- markers are redistributed elsewhere -- "
+                         "so overall density is unchanged and only the LOCAL depletion differs.")
     # BayesR-style mixture for fixed effects (sigma² relative to var_pheno=1)
     ap.add_argument("--sigma2-mix",  type=float, nargs="+",
                     default=[0.0, 1e-4, 1e-3, 1e-2],
@@ -902,18 +932,63 @@ def main():
             sys.exit(f"ERROR: only {len(eligible)} variants in MAF "
                      f"[{args.unobs_maf_min}, {args.unobs_maf_max}], need "
                      f"{n_unobs_causal}.  Lengthen --length or widen MAF range.")
-        if var_tau is not None:
-            ew = var_tau[eligible].astype(float)
-            unobs_idx = rng.choice(eligible, size=n_unobs_causal, replace=False,
-                                   p=ew / ew.sum())
+        if args.unobs_series_k > 1:
+            # ---- allelic series -------------------------------------------
+            # Draw n_loci anchors, then take K-1 further ELIGIBLE variants within
+            # +/- unobs_series_kb of each.  The K variants are distinct sites (an
+            # allelic series, not one recurrent mutation), so each still sits on
+            # its own branch; what changes is that the class's variance is carried
+            # by a UNION of K branches per locus.  No single marker correlates
+            # with that union, while a branch-additive random effect spans it.
+            # unobs_series[] records group membership so the effect draw can give
+            # one locus a common sign (see the beta_unobs block).
+            K = args.unobs_series_k
+            n_loci = max(1, n_unobs_causal // K)
+            win = args.unobs_series_kb * 1e3
+            posv = np.asarray(positions, dtype=float)
+            picked, groups, used = [], [], set()
+            anchors = rng.permutation(eligible)
+            for a in anchors:
+                if len(picked) >= n_loci * K:
+                    break
+                if a in used:
+                    continue
+                near = eligible[(np.abs(posv[eligible] - posv[a]) <= win)]
+                near = np.array([j for j in near if j not in used])
+                if len(near) < K:
+                    continue          # locus too sparse to host a series
+                sel = rng.choice(near, size=K, replace=False)
+                gid = len(groups)
+                for j in sel:
+                    picked.append(int(j)); groups.append(gid); used.add(int(j))
+                groups_last = gid
+            if len(picked) < K:
+                sys.exit(f"ERROR: --unobs-series-k {K} could not find any locus with "
+                         f"{K} eligible variants within +/-{args.unobs_series_kb} kb.  "
+                         f"Widen --unobs-series-kb, lower --unobs-series-k, or widen "
+                         f"the MAF range.")
+            order = np.argsort(picked)
+            unobs_idx    = np.array(picked, dtype=int)[order]
+            unobs_series = np.array(groups, dtype=int)[order]
+            n_unobs_causal = len(unobs_idx)
+            print(f"  Allelic series: {len(set(groups))} loci x K={K} "
+                  f"= {n_unobs_causal} unobserved causal variants", flush=True)
         else:
-            unobs_idx = rng.choice(eligible, size=n_unobs_causal, replace=False)
-        unobs_idx.sort()
+            # Legacy path, kept literally so existing seeds reproduce bit for bit.
+            if var_tau is not None:
+                ew = var_tau[eligible].astype(float)
+                unobs_idx = rng.choice(eligible, size=n_unobs_causal, replace=False,
+                                       p=ew / ew.sum())
+            else:
+                unobs_idx = rng.choice(eligible, size=n_unobs_causal, replace=False)
+            unobs_idx.sort()
+            unobs_series = np.arange(len(unobs_idx))   # each variant its own group
         unobs_set = set(unobs_idx.tolist())
         remaining = np.array([j for j in range(p) if j not in unobs_set])
     else:
         n_unobs_causal = 0
         unobs_idx = np.zeros(0, dtype=int)
+        unobs_series = np.zeros(0, dtype=int)
         remaining = np.arange(p)
 
     # --bed-snps-per-mb targets the panel SIZE directly.  --bed-coverage's meaning
@@ -938,6 +1013,43 @@ def main():
             _maf = np.minimum(_af, 1.0 - _af)
             _het = 2.0 * _maf * (1.0 - _maf)
             _elig = np.flatnonzero(_het > 0.0)   # monomorphic sites are ineligible
+            # Locally-sparse markers: drop candidates near an unobserved causal
+            # variant BEFORE the draw, not after.  Doing it before keeps _k -- and
+            # hence the panel size and overall density -- unchanged: the markers
+            # are redistributed to the rest of the region rather than deleted.
+            # That is what makes the contrast attributable to LOCAL depletion
+            # rather than to a thinner panel, which would confound it with the
+            # density axis this experiment is trying to escape.
+            if args.unobs_mask_kb > 0.0 and len(unobs_idx):
+                _posv = np.asarray(positions, dtype=float)
+                _win  = args.unobs_mask_kb * 1e3
+                _near = np.abs(_posv[_elig][:, None] - _posv[unobs_idx][None, :]).min(axis=1)
+                _keep = _near > _win
+                _dropped = int((~_keep).sum())
+                # The panel size that WOULD have been achieved without masking:
+                # the request, clamped by how many eligible sites exist at all.
+                # Comparing against the unclamped request would reject regions
+                # that were already variant-limited, which masking did not cause.
+                _want = _target_k if _target_k is not None else int(round(args.bed_coverage * p))
+                _want = max(1, min(_want, len(_elig)))
+                if _keep.sum() < _want:
+                    # The panel could only be filled by re-using masked sites, so
+                    # the "same density, locally depleted" property this knob is
+                    # for would silently become "thinner panel" -- which is the
+                    # density axis, i.e. exactly the confound the experiment
+                    # exists to avoid.  Refuse rather than quietly conflate them.
+                    sys.exit(
+                        f"ERROR: --unobs-mask-kb {args.unobs_mask_kb} leaves only "
+                        f"{int(_keep.sum())} eligible sites but the panel needs {_want}. "
+                        f"The masked windows ({len(unobs_idx)} variants x +/-"
+                        f"{args.unobs_mask_kb} kb) cover too much of a {args.length/1e3:.0f} kb "
+                        f"region. Lengthen --length, lower --unobs-mask-kb or "
+                        f"--n-unobs-causal, or reduce --bed-snps-per-mb.")
+                _elig = _elig[_keep]
+                print(f"  Locally-sparse markers: {_dropped} candidate sites within "
+                      f"{args.unobs_mask_kb} kb of an unobserved causal variant removed "
+                      f"from the panel pool ({len(_elig)} remain, panel size {_want} "
+                      f"unchanged)", flush=True)
             if args.bed_freq_weight == 0.0:
                 _pw = None
             else:
@@ -1194,6 +1306,16 @@ def main():
         else:  # laplace
             # Laplace(0, b) has var = 2b² ⇒ b = scale/sqrt(2) to match Gaussian variance.
             eff = rng.laplace(0.0, scale / math.sqrt(2), size=n_unobs_causal)
+        if args.unobs_series_k > 1:
+            # SAME SIGN WITHIN A LOCUS -- this is the point of an allelic series.
+            # Distinct alleles of one gene converge on the same functional
+            # consequence, so their effects point the same way; that is why the
+            # BURDEN carries signal a single marker does not.  With random signs
+            # the K effects would partly cancel and the series would look like
+            # noise to every method, ARG included.  Magnitudes keep their draw;
+            # only the sign is imposed, one Rademacher draw per locus.
+            _sgn = rng.choice([-1.0, 1.0], size=int(unobs_series.max()) + 1)
+            eff = np.abs(eff) * _sgn[unobs_series]
         beta_unobs[unobs_idx] = eff
         y_unobs = dosage_std.T @ beta_unobs
 
@@ -1530,6 +1652,12 @@ def main():
         "n_unobs_causal":    n_unobs_causal,
         "unobs_effect_dist":  args.unobs_effect_dist if args.h2_unobs > 0 else None,
         "unobs_effect_scale": args.unobs_effect_scale if args.h2_unobs > 0 else None,
+        "unobs_series_k":  args.unobs_series_k  if args.h2_unobs > 0 else None,
+        "unobs_series_kb": args.unobs_series_kb if args.h2_unobs > 0
+                                                  and args.unobs_series_k > 1 else None,
+        "unobs_mask_kb":   args.unobs_mask_kb   if args.h2_unobs > 0 else None,
+        "n_unobs_loci":    (int(len(set(unobs_series.tolist()))) if args.h2_unobs > 0
+                            and len(unobs_series) else None),
         "unobs_maf_min":      args.unobs_maf_min      if args.h2_unobs > 0 else None,
         "unobs_maf_max":      args.unobs_maf_max      if args.h2_unobs > 0 else None,
         "sigma2":          sigma2,
