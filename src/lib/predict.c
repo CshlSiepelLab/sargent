@@ -21,6 +21,7 @@
 #include "predict.h"
 #include "geno.h"
 #include "sargent.h"
+#include "branchsel.h"
 
 /* ------------------------------------------------------------------------- *
  * Portable LAPACK declarations (Fortran ABI; same as gall.c's dsyev_).
@@ -156,13 +157,26 @@ static void center_kinship(double *K_train, int n_tr,
 }
 
 /* ------------------------------------------------------------------------- *
- * fit_blup (predict.py:fit_blup): REML-EM variance components + BLUP alpha.
- * K is row-major n×n (centered).  Returns 0 on success.
- * alpha[n] receives (K + lam I)^{-1} (y - mean_y); *mean_y = mean(y).
+ * fit_blup_m (predict.py:fit_blup, generalized to nK variance components).
+ *
+ * V = sum_k su2[k] K[k] + s2 I, fitted by the same multiplicative REML-EM as
+ * the single-component original, then
+ *
+ *     alpha = A^{-1} y_c,  A = sum_k (su2[k]/su2[0]) K[k] + (s2/su2[0]) I
+ *
+ * so that yhat = sum_k (su2[k]/su2[0]) K_cross[k] alpha.  That scaling is
+ * chosen so nK = 1 collapses to the original expression (K + lam I)^{-1} y_c
+ * with lam = s2/su2 term for term, keeping every pre-existing arm bit-identical.
+ *
+ * K[k] are row-major n x n (centered).  P_out, when non-NULL, receives the REML
+ * projector P = V^{-1} - V^{-1} 1 1' V^{-1} / (1' V^{-1} 1) at the fitted
+ * variance components — the background against which branch scores are taken.
+ * ratio_out, when non-NULL, receives su2[k]/su2[0] for the cross-block combine.
  * ------------------------------------------------------------------------- */
-static int fit_blup(const double *y, const double *K, int n,
-                    double *out_s2, double *out_su2,
-                    double *alpha, double *out_mean_y)
+static int fit_blup_m(const double *y, const double *const *K, int nK, int n,
+                      double *out_s2, double *out_su2,
+                      double *alpha, double *out_mean_y,
+                      double *ratio_out, double *P_out)
 {
     const int max_iter = 50;
     const double tol = 1e-5;
@@ -175,7 +189,9 @@ static int fit_blup(const double *y, const double *K, int n,
     for (int i = 0; i < n; i++) { yc[i] = y[i] - mean; var_y += yc[i] * yc[i]; }
     var_y /= n;
 
-    double su2 = 0.5 * var_y, s2 = 0.5 * var_y;
+    double su2[8], s2 = 0.5 * var_y;
+    if (nK < 1 || nK > 8) { free(yc); return -1; }
+    for (int k = 0; k < nK; k++) su2[k] = 0.5 * var_y / nK;
 
     double *V     = malloc((size_t)n * n * sizeof(double));
     double *Vinv  = malloc((size_t)n * n * sizeof(double));
@@ -187,8 +203,10 @@ static int fit_blup(const double *y, const double *K, int n,
     }
 
     for (int iter = 0; iter < max_iter; iter++) {
-        /* V = su2*K + s2*I */
-        for (size_t k = 0; k < (size_t)n * n; k++) V[k] = su2 * K[k];
+        /* V = sum_k su2[k]*K[k] + s2*I */
+        for (size_t q = 0; q < (size_t)n * n; q++) V[q] = su2[0] * K[0][q];
+        for (int k = 1; k < nK; k++)
+            for (size_t q = 0; q < (size_t)n * n; q++) V[q] += su2[k] * K[k][q];
         for (int i = 0; i < n; i++) V[(size_t)i * n + i] += s2;
 
         /* Cholesky; on failure add 1e-6 I and retry once (matches predict.py). */
@@ -207,38 +225,77 @@ static int fit_blup(const double *y, const double *K, int n,
         symmetrize_full(Vinv, n);
 
         matvec(Vinv, yc, Vy, n);           /* Vinv_y */
-        matvec(K, Vy, KVy, n);             /* K Vinv_y */
 
-        double a_u = 0.0, a_e = 0.0;
-        for (int i = 0; i < n; i++) { a_u += KVy[i] * Vy[i]; a_e += Vy[i] * Vy[i]; }
+        double a_e = 0.0;
+        for (int i = 0; i < n; i++) a_e += Vy[i] * Vy[i];
+        double tr_Vinv = 0.0;
+        for (int i = 0; i < n; i++) tr_Vinv += Vinv[(size_t)i * n + i];
 
-        double tr_VinvK = 0.0, tr_Vinv = 0.0;
-        for (int i = 0; i < n; i++) {
-            const double *Vi = Vinv + (size_t)i * n;
-            const double *Ki = K + (size_t)i * n;
-            double row = 0.0;
-            for (int j = 0; j < n; j++) row += Vi[j] * Ki[j];
-            tr_VinvK += row;
-            tr_Vinv += Vi[i];
+        double floor_v = 1e-8 * var_y;
+        int converged = 1;
+        for (int k = 0; k < nK; k++) {
+            matvec(K[k], Vy, KVy, n);      /* K_k Vinv_y */
+            double a_u = 0.0;
+            for (int i = 0; i < n; i++) a_u += KVy[i] * Vy[i];
+
+            double tr_VinvK = 0.0;
+            for (int i = 0; i < n; i++) {
+                const double *Vi = Vinv + (size_t)i * n;
+                const double *Ki = K[k] + (size_t)i * n;
+                double row = 0.0;
+                for (int j = 0; j < n; j++) row += Vi[j] * Ki[j];
+                tr_VinvK += row;
+            }
+
+            double new_su2 = su2[k] * a_u / fmax(tr_VinvK, 1e-30);
+            if (new_su2 < floor_v) new_su2 = floor_v;
+            if (!(fabs(new_su2 - su2[k]) / fmax(su2[k], 1e-30) < tol))
+                converged = 0;
+            su2[k] = new_su2;
         }
 
-        double new_su2 = su2 * a_u / fmax(tr_VinvK, 1e-30);
-        double new_s2  = s2  * a_e / fmax(tr_Vinv,  1e-30);
-        double floor_v = 1e-8 * var_y;
-        if (new_su2 < floor_v) new_su2 = floor_v;
-        if (new_s2  < floor_v) new_s2  = floor_v;
+        double new_s2 = s2 * a_e / fmax(tr_Vinv, 1e-30);
+        if (new_s2 < floor_v) new_s2 = floor_v;
+        if (!(fabs(new_s2 - s2) / fmax(s2, 1e-30) < tol)) converged = 0;
+        s2 = new_s2;
 
-        int converged =
-            fabs(new_su2 - su2) / fmax(su2, 1e-30) < tol &&
-            fabs(new_s2  - s2 ) / fmax(s2,  1e-30) < tol;
-        su2 = new_su2; s2 = new_s2;
         if (converged) break;
     }
 
-    /* alpha = (K + lam I)^{-1} y_c, lam = s2/su2 */
-    double lam = s2 / fmax(su2, 1e-30);
+    if (P_out) {
+        /* Rebuild V at the fitted components and form the REML projector. */
+        for (size_t q = 0; q < (size_t)n * n; q++) P_out[q] = su2[0] * K[0][q];
+        for (int k = 1; k < nK; k++)
+            for (size_t q = 0; q < (size_t)n * n; q++) P_out[q] += su2[k] * K[k][q];
+        for (int i = 0; i < n; i++) P_out[(size_t)i * n + i] += s2;
+        int info = 0;
+        dpotrf_("L", &n, P_out, &n, &info);
+        if (info == 0) dpotri_("L", &n, P_out, &n, &info);
+        if (info != 0) { free(yc); free(V); free(Vinv); free(Vy); free(KVy); return -1; }
+        symmetrize_full(P_out, n);
+        double *v1 = Vy;                   /* reuse: v1 = V^{-1} 1 = row sums */
+        double s11 = 0.0;
+        for (int i = 0; i < n; i++) {
+            const double *Pi = P_out + (size_t)i * n;
+            double r = 0.0;
+            for (int j = 0; j < n; j++) r += Pi[j];
+            v1[i] = r; s11 += r;
+        }
+        if (!(fabs(s11) > 0.0)) { free(yc); free(V); free(Vinv); free(Vy); free(KVy); return -1; }
+        for (int i = 0; i < n; i++)
+            for (int j = 0; j < n; j++)
+                P_out[(size_t)i * n + j] -= v1[i] * v1[j] / s11;
+    }
+
+    /* alpha = A^{-1} y_c with A = sum_k (su2_k/su2_0) K_k + (s2/su2_0) I. */
+    double base = fmax(su2[0], 1e-30);
+    double lam = s2 / base;
     double *A = V;   /* reuse V buffer */
-    memcpy(A, K, (size_t)n * n * sizeof(double));
+    memcpy(A, K[0], (size_t)n * n * sizeof(double));
+    for (int k = 1; k < nK; k++) {
+        double r = su2[k] / base;
+        for (size_t q = 0; q < (size_t)n * n; q++) A[q] += r * K[k][q];
+    }
     for (int i = 0; i < n; i++) A[(size_t)i * n + i] += lam;
     memcpy(alpha, yc, (size_t)n * sizeof(double));
     int nrhs = 1, info = 0;
@@ -248,9 +305,21 @@ static int fit_blup(const double *y, const double *K, int n,
         return -1;
     }
 
-    *out_s2 = s2; *out_su2 = su2; *out_mean_y = mean;
+    *out_s2 = s2;
+    for (int k = 0; k < nK; k++) out_su2[k] = su2[k];
+    if (ratio_out) for (int k = 0; k < nK; k++) ratio_out[k] = su2[k] / base;
+    *out_mean_y = mean;
     free(yc); free(V); free(Vinv); free(Vy); free(KVy);
     return 0;
+}
+
+/* Single-component form used by every pre-existing arm. */
+static int fit_blup(const double *y, const double *K, int n,
+                    double *out_s2, double *out_su2,
+                    double *alpha, double *out_mean_y)
+{
+    return fit_blup_m(y, &K, 1, n, out_s2, out_su2, alpha, out_mean_y,
+                      NULL, NULL);
 }
 
 /* out[c] = (K_cross @ alpha)[c] + mean_y for the (n_cr × n_tr) cross block. */
@@ -262,6 +331,24 @@ static void predict_blup(const double *K_cross, int n_cr, int n_tr,
         double s = 0.0;
         for (int j = 0; j < n_tr; j++) s += Kc[j] * alpha[j];
         out[c] = s + mean_y;
+    }
+}
+
+/* Multi-component form: yhat[c] = sum_k ratio[k] (K_cross[k] @ alpha)[c] + mean_y. */
+static void predict_blup_m(const double *const *K_cross, const double *ratio,
+                           int nK, int n_cr, int n_tr,
+                           const double *alpha, double mean_y, double *out)
+{
+    for (int c = 0; c < n_cr; c++) out[c] = mean_y;
+    for (int k = 0; k < nK; k++) {
+        const double *Kk = K_cross[k];
+        double r = ratio[k];
+        for (int c = 0; c < n_cr; c++) {
+            const double *Kc = Kk + (size_t)c * n_tr;
+            double s = 0.0;
+            for (int j = 0; j < n_tr; j++) s += Kc[j] * alpha[j];
+            out[c] += r * s;
+        }
     }
 }
 
@@ -559,6 +646,7 @@ int sargent_predict(sargent_t *sg,
                     const char *test_geno_prefix,
                     const char *test_pheno_path,
                     const char *out_json_path,
+                    const branchsel_opts_t *bsel,
                     int silent)
 {
     int rc = -1;
@@ -695,9 +783,24 @@ int sargent_predict(sargent_t *sg,
     double *rtrain = malloc((size_t)n_tr * sizeof(double));   /* residual y - Xβ */
     for (int i = 0; i < n_tr; i++) rtrain[i] = y_train[i] - prs_train[i];
 
-    metrics_t m_bayes, m_snp, m_arg, m_su, m_sg;
+    metrics_t m_bayes, m_snp, m_arg, m_su, m_sg, m_w, m_wf;
     double snp_h2 = NAN, arg_h2 = NAN, sargent_sigma2 = NAN, sargent_rand_r = NAN;
+    double arg_su2 = NAN, arg_sigma2 = NAN;
     double s2, su2, mean_fit;
+
+    /* Branch selection (--branch-select).  P is the REML projector of the
+     * uniform-ARG fit in arm (c), which is exactly the background the branch
+     * score is taken against; it is filled there and consumed below. */
+    const int do_bsel = (bsel != NULL);
+    double *P_uni = NULL;
+    branchsel_t bs; memset(&bs, 0, sizeof(bs));
+    double *K_sel_train = NULL, *K_sel_cross = NULL;
+    int    bsel_ok = 0;
+    double w_h2 = NAN, w_h2_uni = NAN, w_share_sel = NAN, wf_h2 = NAN;
+    if (do_bsel) {
+        P_uni = malloc((size_t)n_tr * n_tr * sizeof(double));
+        if (!P_uni) goto cleanup_pred;
+    }
 
     /* (a) bayesR: yhat = Xtestᵀβ + mean_y */
     for (int c = 0; c < n_te; c++) yhat[c] = prs_test[c] + mean_y_train;
@@ -718,12 +821,15 @@ int sargent_predict(sargent_t *sg,
         memcpy(Kt, K_uni_train, (size_t)n_tr * n_tr * sizeof(double));
         memcpy(Kc, K_uni_cross, (size_t)n_te * n_tr * sizeof(double));
         center_kinship(Kt, n_tr, Kc, n_te);
-        if (fit_blup(y_train, Kt, n_tr, &s2, &su2, alpha, &mean_fit) != 0) {
+        const double *Karr[1] = { Kt };
+        if (fit_blup_m(y_train, Karr, 1, n_tr, &s2, &su2, alpha, &mean_fit,
+                       NULL, P_uni) != 0) {
             free(Kt); free(Kc); goto cleanup_pred;
         }
         predict_blup(Kc, n_te, n_tr, alpha, mean_fit, yhat);
         m_arg = compute_metrics(yhat, y_test, n_te);
         arg_h2 = su2 / (su2 + s2);
+        arg_su2 = su2; arg_sigma2 = s2;
         free(Kt); free(Kc);
     }
 
@@ -761,6 +867,95 @@ int sargent_predict(sargent_t *sg,
     }
     }   /* end if (have_ws2) -- the `sargent` arm */
 
+    /* (f) sargent_w / sargent_wf: branch selection in place of the Stage-2 EM.
+     *
+     *     Rank branches by the marginal LMM score against the uniform-ARG
+     *     background, keep the top k, and fit a two-component REML
+     *     (K_uni + K_sel).  sargent_w is the pure-ARG arm — the direct
+     *     counterpart of arg_lmm, which it must reproduce at k = 0 since the
+     *     second component simply disappears.  sargent_wf adds the Stage-1 PRS,
+     *     making it the counterpart of sargent_u / sargent.
+     *
+     *     K_uni_train / K_uni_cross are already centered in place by (d). */
+    if (do_bsel) {
+        branchsel_opts_t o = *bsel;
+        o.silent = silent;
+        /* Validation hook: dump the projector and the centered uniform kinship
+         * it was built from, so an external reference can re-derive P itself
+         * rather than taking it on trust.  Off unless the env var is set. */
+        {
+            const char *mp = getenv("SARGENT_BRANCHSEL_DUMP_MAT");
+            if (mp && *mp) {
+                char pth[4200];
+                snprintf(pth, sizeof(pth), "%s.P.bin", mp);
+                FILE *pf = fopen(pth, "wb");
+                if (pf) { fwrite(P_uni, sizeof(double), (size_t)n_tr * n_tr, pf); fclose(pf); }
+                snprintf(pth, sizeof(pth), "%s.Kuni.bin", mp);
+                FILE *kf = fopen(pth, "wb");
+                if (kf) { fwrite(K_uni_train, sizeof(double), (size_t)n_tr * n_tr, kf); fclose(kf); }
+                snprintf(pth, sizeof(pth), "%s.Kuni_cross.bin", mp);
+                FILE *cf = fopen(pth, "wb");
+                if (cf) { fwrite(K_uni_cross, sizeof(double), (size_t)n_te * n_tr, cf); fclose(cf); }
+                snprintf(pth, sizeof(pth), "%s.meta.json", mp);
+                FILE *mf = fopen(pth, "w");
+                if (mf) {
+                    fprintf(mf, "{\"n_train\": %d, \"n_total\": %d, \"su2\": ", n_tr, n_total);
+                    json_num(mf, arg_su2);
+                    fprintf(mf, ", \"sigma2\": "); json_num(mf, arg_sigma2);
+                    fprintf(mf, "}\n");
+                    fclose(mf);
+                }
+                if (!silent)
+                    fprintf(stderr, "branchsel: wrote projector/kinship dumps to %s.*\n", mp);
+            }
+        }
+        double *y_c = malloc((size_t)n_tr * sizeof(double));
+        if (!y_c) goto cleanup_pred;
+        for (int i = 0; i < n_tr; i++) y_c[i] = y_train[i] - mean_y_train;
+        int brc = branchsel_run(&full, h2i_full, n_total, n_tr, P_uni, y_c,
+                                &o, &bs);
+        free(y_c);
+        if (brc != 0) {
+            fprintf(stderr, "predict: branch selection failed\n");
+            goto cleanup_pred;
+        }
+        /* k = 0 is the no-selection control: the second component simply is not
+         * there, so the fit is the SAME fit_blup_m call on the SAME centered
+         * K_uni that arm (c) makes.  sargent_w then equals arg_lmm by
+         * construction, which is what makes the arm no-regret. */
+        int nK = (bs.k > 0) ? 2 : 1;
+        if (nK == 2) {
+            K_sel_train = malloc((size_t)n_tr * n_tr * sizeof(double));
+            K_sel_cross = malloc((size_t)n_te * n_tr * sizeof(double));
+            if (!K_sel_train || !K_sel_cross) goto cleanup_pred;
+            branchsel_kinship(&bs, K_sel_train, K_sel_cross);
+            center_kinship(K_sel_train, n_tr, K_sel_cross, n_te);
+        }
+
+        const double *Ktr2[2] = { K_uni_train, K_sel_train };
+        const double *Kcr2[2] = { K_uni_cross, K_sel_cross };
+        double su2v[2] = { 0.0, 0.0 }, ratio[2] = { 0.0, 0.0 };
+
+        if (fit_blup_m(y_train, Ktr2, nK, n_tr, &s2, su2v, alpha, &mean_fit,
+                       ratio, NULL) != 0) goto cleanup_pred;
+        predict_blup_m(Kcr2, ratio, nK, n_te, n_tr, alpha, mean_fit, yhat);
+        m_w = compute_metrics(yhat, y_test, n_te);
+        /* The selected component's variance is upward-biased by selection, so
+         * w_h2_uni (the uniform component alone) is the defensible estimate and
+         * w_h2 is reported only for comparability with the prototype. */
+        w_h2        = (su2v[0] + su2v[1]) / (su2v[0] + su2v[1] + s2);
+        w_h2_uni    = su2v[0] / (su2v[0] + s2);
+        w_share_sel = su2v[1] / fmax(su2v[0] + su2v[1], 1e-300);
+
+        if (fit_blup_m(rtrain, Ktr2, nK, n_tr, &s2, su2v, alpha, &mean_fit,
+                       ratio, NULL) != 0) goto cleanup_pred;
+        predict_blup_m(Kcr2, ratio, nK, n_te, n_tr, alpha, mean_fit, yhat);
+        for (int c = 0; c < n_te; c++) yhat[c] += prs_test[c];
+        m_wf = compute_metrics(yhat, y_test, n_te);
+        wf_h2 = (su2v[0] + su2v[1]) / (su2v[0] + su2v[1] + s2);
+        bsel_ok = 1;
+    }
+
     /* ---- write JSON ---- */
     {
         FILE *f = fopen(out_json_path, "w");
@@ -784,6 +979,11 @@ int sargent_predict(sargent_t *sg,
         fprintf(f, "  \"snp_lmm_h2\": "); json_num(f, snp_h2); fprintf(f, ",\n");
         ARM("arg_lmm", m_arg);
         fprintf(f, "  \"arg_lmm_h2\": "); json_num(f, arg_h2); fprintf(f, ",\n");
+        /* The variance components of this fit define V, hence the REML projector
+         * P that branch scores are taken against.  Emitted so an external
+         * reference implementation can rebuild exactly the same background. */
+        fprintf(f, "  \"arg_lmm_su2\": "); json_num(f, arg_su2); fprintf(f, ",\n");
+        fprintf(f, "  \"arg_lmm_sigma2\": "); json_num(f, arg_sigma2); fprintf(f, ",\n");
         ARM("sargent_u", m_su);
         /* `sargent` is OMITTED (not zeroed, not aliased to sargent_u) when there
          * is no Stage-2 ws2, so a consumer that expects it fails loudly rather
@@ -799,6 +999,24 @@ int sargent_predict(sargent_t *sg,
             fprintf(f, "  \"sargent_omitted\": \"no Stage-2 ws2 fit "
                        "(--snp-only); arms reported: bayesR, snp_lmm, arg_lmm, "
                        "sargent_u\"\n");
+        }
+        if (bsel_ok) {
+            fprintf(f, ",\n");
+            ARM("sargent_w", m_w);
+            ARM("sargent_wf", m_wf);
+            fprintf(f, "  \"sargent_w_h2\": ");        json_num(f, w_h2);
+            fprintf(f, ",\n  \"sargent_w_h2_uniform\": "); json_num(f, w_h2_uni);
+            fprintf(f, ",\n  \"sargent_w_share_sel\": ");  json_num(f, w_share_sel);
+            fprintf(f, ",\n  \"sargent_wf_h2\": ");    json_num(f, wf_h2);
+            fprintf(f, ",\n  \"sargent_w_k\": %d", bs.k);
+            fprintf(f, ",\n  \"sargent_w_n_branch\": %d", bs.n_branch);
+            fprintf(f, ",\n  \"sargent_w_n_trees_scanned\": %d", bs.n_trees);
+            fprintf(f, ",\n  \"sargent_w_score_top\": ");
+            json_num(f, bs.k > 0 ? bs.score[0] : NAN);
+            fprintf(f, ",\n  \"sargent_w_score_min\": ");
+            json_num(f, bs.k > 0 ? bs.score[bs.k - 1] : NAN);
+            fprintf(f, ",\n  \"sargent_w_seconds\": ");    json_num(f, bs.seconds);
+            fprintf(f, "\n");
         }
         #undef ARM
         fprintf(f, "}\n");
@@ -816,10 +1034,19 @@ int sargent_predict(sargent_t *sg,
             fprintf(stderr, "  sargent    R2=%+.3f r=%+.3f\n", m_sg.r2, m_sg.r);
         else
             fprintf(stderr, "  sargent    (omitted: no Stage-2 ws2)\n");
+        if (bsel_ok) {
+            fprintf(stderr, "  sargent_w  R2=%+.3f r=%+.3f   "
+                    "(k=%d of %d branches; dr2_calib vs arg_lmm = %+.4f)\n",
+                    m_w.r2, m_w.r, bs.k, bs.n_branch,
+                    m_w.r2_calib - m_arg.r2_calib);
+            fprintf(stderr, "  sargent_wf R2=%+.3f r=%+.3f\n", m_wf.r2, m_wf.r);
+        }
     }
     rc = 0;
 
 cleanup_pred:
+    branchsel_free(&bs);
+    free(P_uni); free(K_sel_train); free(K_sel_cross);
     free(yhat); free(alpha); free(rtrain);
     free(prs_train); free(prs_test);
     free(K_g_train); free(K_g_cross);

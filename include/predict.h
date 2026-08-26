@@ -11,6 +11,7 @@
 #pragma once
 
 #include "sargent.h"
+#include "branchsel.h"
 
 /*
  * Native out-of-sample prediction (scope 3b of native_prediction_proposal.md).
@@ -36,6 +37,8 @@
  *                    read from <test_geno_prefix>.true_components.tsv if present.
  *   test_pheno_path  <case>.test.phen.
  *   out_json_path    output JSON (<outroot>.predict.json).
+ *   bsel             branch-selection options, or NULL to skip the
+ *                    sargent_w / sargent_wf arms entirely.
  *   silent           suppress progress on stderr.
  *
  * Returns 0 on success, -1 on error.
@@ -47,4 +50,5 @@ int sargent_predict(sargent_t *sg,
                     const char *test_geno_prefix,
                     const char *test_pheno_path,
                     const char *out_json_path,
+                    const branchsel_opts_t *bsel,
                     int silent);

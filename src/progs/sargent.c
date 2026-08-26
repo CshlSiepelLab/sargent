@@ -226,6 +226,13 @@ int main(int argc, char *argv[])
     const char *test_pheno_arg = NULL;   /* default <geno_prefix>.test.phen */
     const char *predict_out_arg = NULL;  /* default <outroot>.predict.json */
 
+    /* Branch selection (--branch-select): the Stage-2 replacement.  Adds the
+     * sargent_w / sargent_wf arms to --predict.  Opt-in for now; flipping it to
+     * the default is deferred until Figs 2-4 have been regenerated on it. */
+    int bsel_on    = 0;
+    int bsel_k     = BRANCHSEL_DEFAULT_K;
+    int bsel_trees = BRANCHSEL_DEFAULT_TREES;
+
     struct option long_opts[] = {
         {"silent",         0, 0, 'z'},
         {"ts-geno",        0, 0, 'G'},
@@ -250,6 +257,9 @@ int main(int argc, char *argv[])
         {"stage1-gibbs",   0, 0, 0x107},
         {"gibbs-iter",     1, 0, 0x108},
         {"gibbs-burn",     1, 0, 0x109},
+        {"branch-select",  0, 0, 0x10a},
+        {"select-k",       1, 0, 0x10b},
+        {"select-trees",   1, 0, 0x10c},
         {"precompute",     0, 0, 'X'},
         {"version",        0, 0, 'v'},
         {"help",           0, 0, 'h'},
@@ -282,6 +292,9 @@ int main(int argc, char *argv[])
         case 0x104: test_geno_arg  = optarg;      break;
         case 0x105: test_pheno_arg = optarg;      break;
         case 0x106: predict_out_arg= optarg;      break;
+        case 0x10a: bsel_on    = 1;               break;
+        case 0x10b: bsel_k     = atoi(optarg); bsel_on = 1; break;
+        case 0x10c: bsel_trees = atoi(optarg); bsel_on = 1; break;
         case 'X': precompute  = 1;                break;
         case 'v': printf("sargent version %s\n", SARGENT_VERSION); exit(0);
         case 'h': printf("%s", HELP); exit(0);
@@ -320,6 +333,22 @@ int main(int argc, char *argv[])
     if (snp_only && arg_only) {
         fprintf(stderr, "ERROR: --snp-only and --arg-only are mutually exclusive.\n");
         exit(EXIT_FAILURE);
+    }
+
+    if (bsel_on) {
+        if (!predict_oos) {
+            fprintf(stderr, "ERROR: --branch-select only has an effect with "
+                    "--predict (it produces prediction arms, not a fit).\n");
+            exit(EXIT_FAILURE);
+        }
+        if (bsel_k < 0) {
+            fprintf(stderr, "ERROR: --select-k must be >= 0.\n");
+            exit(EXIT_FAILURE);
+        }
+        if (bsel_trees < 0) {
+            fprintf(stderr, "ERROR: --select-trees must be >= 0 (0 = all trees).\n");
+            exit(EXIT_FAILURE);
+        }
     }
 
     /* Resolve em / sequential flags.
@@ -642,8 +671,11 @@ int main(int argc, char *argv[])
         else                 snprintf(predict_out, sizeof(predict_out), "%s.predict.json", outroot);
 
         if (!silent) fprintf(stderr, "\nStage 3: out-of-sample prediction ...\n");
+        branchsel_opts_t bopts = { .k = bsel_k, .max_trees = bsel_trees,
+                                   .silent = silent };
         predict_rc = sargent_predict(sg, y, geno_prefix, full_trees,
-                                     test_geno, test_pheno, predict_out, silent);
+                                     test_geno, test_pheno, predict_out,
+                                     bsel_on ? &bopts : NULL, silent);
         if (predict_rc != 0)
             fprintf(stderr, "ERROR: prediction stage failed.\n");
     }

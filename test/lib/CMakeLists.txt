@@ -9,3 +9,7 @@ target_link_libraries(check_tree_matvec PRIVATE sargent_core)
 add_executable(bench_tree_matvec bench_tree_matvec.c)
 target_compile_options(bench_tree_matvec PRIVATE -Wall -Wextra)
 target_link_libraries(bench_tree_matvec PRIVATE sargent_core)
+
+add_executable(check_branchsel check_branchsel.c)
+target_compile_options(check_branchsel PRIVATE -Wall -Wextra)
+target_link_libraries(check_branchsel PRIVATE sargent_core)

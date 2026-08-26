@@ -93,6 +93,31 @@ MAIN OPTIONS:
           --test-pheno <path>   test phenotypes  (<geno_prefix>.test.phen)
           --predict-out <path>  output JSON      (<outroot>.predict.json)
 
+    --branch-select
+        Add the branch-selection arms to --predict.  Instead of a per-tree
+        weight, rank every ARG branch by the marginal LMM score against the
+        uniform-ARG background,
+
+            z_b = | x_b' P y | / sqrt( x_b' P x_b ),
+
+        keep the top k, and fit a two-component REML (K_uniform + K_selected).
+        Two arms are written to the predict JSON: `sargent_w` (pure ARG, the
+        direct counterpart of arg_lmm) and `sargent_wf` (with the Stage-1 PRS,
+        the counterpart of sargent_u).  This is the Stage-2 replacement: it
+        costs seconds rather than the tens of minutes the per-tree EM takes,
+        and it needs no Stage-2 ws2 fit at all, so it composes with
+        --uniform-arg or --snp-only.  Reported h2: `sargent_w_h2_uniform` is
+        the defensible estimate; `sargent_w_h2` includes the selected
+        component, whose variance is upward-biased by selection.
+
+          --select-k N       branches to keep (default 25; flat over 10-50)
+          --select-trees N   evenly-spaced local trees to scan (default 200;
+                             0 = every tree)
+
+        Both sub-options imply --branch-select.  Selection and the selected
+        kinship are computed on the full (train + test) ARG with the score
+        restricted to train rows -- test phenotypes are never touched.
+
     --precompute, -X
         Force-rebuild the G_all eigendecomposition cache (see OUTPUT
         FILES: <prefix>.gall) before Stage 2.  In normal use the cache
