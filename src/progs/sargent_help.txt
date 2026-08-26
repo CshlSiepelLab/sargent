@@ -126,6 +126,21 @@ MAIN OPTIONS:
         a sargent upgrade that bumps GALL_VERSION (e.g. dadeca1's REML
         correction was such a bump).
 
+    --threads <N>, -T <N>
+        Cap every thread pool sargent can reach -- our own OpenMP loops AND
+        the BLAS behind LAPACK -- at N.  This matters because OpenBLAS keeps
+        its own pool and does not consult OMP_NUM_THREADS, so before this
+        option a caller's limit held for our loops while the
+        eigendecomposition (and, with --branch-select, the per-block dsymm)
+        still took every core on the machine.
+
+        Resolved in this order, first match wins:
+          --threads N  >  SARGENT_THREADS  >  OPENBLAS_NUM_THREADS /
+          MKL_NUM_THREADS  >  OMP_NUM_THREADS  >  library default
+
+        so OMP_NUM_THREADS now caps the BLAS too.  With nothing requested,
+        library defaults are untouched.  Set this on any shared machine.
+
     --outroot <prefix>, -o <prefix>
         Set the output file prefix (default: "sargent").  Output files
         are named <prefix>.beta.tsv and <prefix>.w2.tsv.
