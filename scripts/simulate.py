@@ -527,6 +527,32 @@ def main():
     #
     # Defaults (1 / 0.0) are OFF and the legacy code path is kept literally, so
     # existing seeds reproduce bit for bit.
+    # ---- the unobserved class as a SEPARATE MUTATIONAL PROCESS -------------
+    # WHY.  The --h2-unobs machinery above draws the unobserved class from the
+    # SNV pool and then hides those variants from the panel.  But hiding an SNV
+    # does not make it untaggable: OTHER SNVs on the SAME BRANCH are still in the
+    # panel and tag it exactly, which is why the carve-out was only ever worth
+    # ~+0.01 (20 cells, +0.0095 +/- 0.0080).
+    #
+    # A structural variant is not a hidden SNV.  It arises by its own mutational
+    # process, at its own (much lower) rate, and is absent from an SNV callset by
+    # construction.  Whether it is tagged is then EMERGENT: it depends on whether
+    # an SNV happened to land on the same branch -- a Poisson hit with mean
+    # mu_snv * l_b * span_b.  Measured on these cells, ~80% of branch weight
+    # carries no SNV, so most SVs land untagged without anything being imposed.
+    #
+    # --sv-rate turns the class on.  Human de novo SV estimates (~0.16 per genome
+    # per generation over ~3.1 Gb) give ~5e-11 /bp/gen, about 1/250 of the SNV
+    # rate; at 1.25e-8 that is --sv-rate 5e-11.  Default 0 = off, and the legacy
+    # code path is kept literally so existing seeds reproduce bit for bit.
+    ap.add_argument("--sv-rate", type=float, default=0.0,
+                    help="per-bp per-generation mutation rate for a SEPARATE "
+                         "structural-variant class, overlaid on the same ARG and "
+                         "never placed in the BED panel (default 0 = off). When "
+                         "> 0 the --h2-unobs class is drawn from these variants "
+                         "rather than from hidden SNVs, so 'untyped' is no longer "
+                         "the same as 'tagged'. Suggested: 5e-11 (~1/250 of the "
+                         "SNV rate, from human de novo SV estimates).")
     ap.add_argument("--unobs-series-k", type=int, default=1,
                     help="allelic series: place the unobserved class as groups of K "
                          "DISTINCT causal variants within one locus, with same-sign effects, "
@@ -787,6 +813,21 @@ def main():
         )
     ts = msprime.sim_mutations(ts, rate=args.mut_rate, random_seed=args.seed + 1)
 
+    # Second, INDEPENDENT mutational process for the structural-variant class.
+    # Overlaid on the same genealogy, so an SV is a real mutation on a real
+    # branch -- not an effect attached to a branch by fiat. Identified by the
+    # site positions that did not exist before the overlay; a collision with an
+    # existing SNV position makes the site multiallelic and it is dropped by the
+    # biallelic filter below, which is the conservative outcome.
+    sv_positions = set()
+    if args.sv_rate > 0.0:
+        _pre = set(ts.tables.sites.position.tolist())
+        ts = msprime.sim_mutations(ts, rate=args.sv_rate,
+                                   random_seed=args.seed + 7, keep=True)
+        sv_positions = set(ts.tables.sites.position.tolist()) - _pre
+        print(f"  SV class: {len(sv_positions)} sites at rate {args.sv_rate:g} "
+              f"({args.sv_rate/args.mut_rate:.4f} x the SNV rate)", flush=True)
+
     # F_ST between train_pop and test_pop (stdpopsim only, computed on the
     # full tree sequence using tskit's Hudson estimator).
     fst_train_test = None
@@ -835,6 +876,7 @@ def main():
     dosage_list = []   # each entry: dosage vector (n_indiv,)
     pos_list    = []
     age_list    = []   # per-variant age (generations), from mutation time
+    is_sv_list  = []   # True when the variant came from the SV overlay
 
     # Pre-build a tree iterator so we can resolve mutation.node → branch parent
     # time when the mutation's own `time` field is unknown (older tskit).
@@ -859,6 +901,7 @@ def main():
             parent_node = tree.parent(mut.node)
             age = float(tree.time(parent_node)) if parent_node != tskit.NULL else 0.0
         age_list.append(age)
+        is_sv_list.append(var.site.position in sv_positions)
 
     p = len(dosage_list)
     if p == 0:
@@ -868,6 +911,10 @@ def main():
     dosage = np.stack(dosage_list)   # (p, n_indiv)
     positions = pos_list
     ages = np.array(age_list, dtype=float)  # per-variant age in generations
+    is_sv = np.array(is_sv_list, dtype=bool)
+    if is_sv.any():
+        print(f"  {int(is_sv.sum())} of {p} polymorphic variants are SV-class",
+              flush=True)
 
     # ---- Block 2.2: gene-structured annotation partition -------------------
     # Build the exon/promoter/intergenic partition (dedicated rng so the
@@ -928,6 +975,13 @@ def main():
         maf  = np.minimum(freq, 1.0 - freq)
         eligible = np.where((maf >= args.unobs_maf_min) &
                             (maf <= args.unobs_maf_max))[0]
+        # With a real SV class present, the unobserved variants ARE the SVs.
+        # Their untaggability is then emergent (did an SNV land on the same
+        # branch?) rather than imposed by hiding an SNV that has twins.
+        if is_sv.any():
+            eligible = np.array([j for j in eligible if is_sv[j]], dtype=int)
+            print(f"  unobserved class drawn from the SV pool: "
+                  f"{len(eligible)} eligible SV variants", flush=True)
         if len(eligible) < n_unobs_causal:
             sys.exit(f"ERROR: only {len(eligible)} variants in MAF "
                      f"[{args.unobs_maf_min}, {args.unobs_maf_max}], need "
@@ -1067,12 +1121,53 @@ def main():
     if args.h2_unobs > 0:
         bed_mask[unobs_idx] = False
 
+    # An SNV callset contains no structural variants, causal or not. Excluding
+    # only the causal ones would leak the class into the panel and understate
+    # how much of it is unassayed.
+    if is_sv.any():
+        bed_mask &= ~is_sv
+
     # Block 2.2: common-SNP / array-like typed panel.  Drop rare variants from
     # the BED so they are untyped (only the ARG can see them).
     if args.bed_maf_min > 0.0:
         freq_all = dosage.mean(axis=1) / 2.0
         maf_all  = np.minimum(freq_all, 1.0 - freq_all)
         bed_mask &= (maf_all >= args.bed_maf_min)
+
+    # ---- SV-class validation -------------------------------------------------
+    # The mechanism claims an SV is untaggable when no SNV landed on its branch.
+    # Two checks, both reported rather than assumed:
+    #   exact  -- does any PANEL SNV have precisely this carrier set? (a mutation
+    #             on the same branch produces exactly that vector)
+    #   max r2 -- realised best tagging, so PARTIAL tagging is visible too
+    # Independent branch-weight calculation predicts ~80% untagged; a large
+    # departure means the overlay is not behaving as intended.
+    sv_diag = None
+    if is_sv.any():
+        _panel = np.flatnonzero(bed_mask)
+        _svv   = np.flatnonzero(is_sv)
+        _keys  = {dosage[j].astype(np.int8).tobytes() for j in _panel}
+        _exact = np.array([dosage[j].astype(np.int8).tobytes() in _keys for j in _svv])
+        _P = dosage[_panel].T
+        _Pc = _P - _P.mean(0); _Pn = np.sqrt((_Pc * _Pc).sum(0)); _Pn[_Pn < 1e-12] = 1.0
+        _r2 = []
+        for j in _svv:
+            t = dosage[j] - dosage[j].mean()
+            tn = math.sqrt(float(t @ t))
+            if tn < 1e-12:
+                _r2.append(0.0); continue
+            r = (t @ _Pc) / (tn * _Pn)
+            _r2.append(float(np.max(r * r)))
+        _r2 = np.array(_r2)
+        sv_diag = {"n_sv_variants": int(len(_svv)),
+                   "frac_no_exact_snv_match": float(1.0 - _exact.mean()),
+                   "mean_max_r2_to_panel": float(_r2.mean()),
+                   "median_max_r2_to_panel": float(np.median(_r2)),
+                   "frac_max_r2_below_0.2": float((_r2 < 0.2).mean())}
+        print(f"  SV validation: {100*sv_diag['frac_no_exact_snv_match']:.0f}% have no exact "
+              f"panel match (branch-weight prediction ~80%); "
+              f"median max r2 to panel {sv_diag['median_max_r2_to_panel']:.3f}, "
+              f"{100*sv_diag['frac_max_r2_below_0.2']:.0f}% below r2=0.2", flush=True)
 
     if not bed_mask.any():
         sys.exit("ERROR: bed mask produced an empty BED panel; raise --bed-coverage")
@@ -1603,6 +1698,9 @@ def main():
         # and record how rare the causal set actually was when it did not.
         "causal_maf_min":  args.causal_maf_min,
         "alpha":           args.alpha,
+        "sv_rate":         args.sv_rate,
+        "n_sv_variants":   int(is_sv.sum()) if is_sv.size else 0,
+        "sv_validation":   sv_diag,
         "causal_maf_realised": {
             "min":    float(np.min(_maf_params)),
             "q25":    float(np.percentile(_maf_params, 25)),
