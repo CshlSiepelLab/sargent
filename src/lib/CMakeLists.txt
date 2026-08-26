@@ -8,6 +8,7 @@ add_library(sargent_core STATIC
     hutchinson.c
     gall.c
     predict.c
+    branchsel.c
 )
 
 target_include_directories(sargent_core PUBLIC
