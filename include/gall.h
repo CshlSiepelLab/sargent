@@ -56,7 +56,8 @@
  */
 
 #define GALL_MAGIC   UINT64_C(0x4C4C414753524741)
-#define GALL_VERSION 4u   /* v4: header records use_span (v3: span-weighted eGRM) */
+#define GALL_VERSION 5u   /* v5: span weighting unconditional; v4 files may hold
+                           * either kernel and are rejected rather than trusted */
 
 typedef struct {
     int     n;          /* number of individuals */

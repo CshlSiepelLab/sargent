@@ -1142,7 +1142,9 @@ typedef struct {
     const int           *hap_to_indiv;
     double              *gv;         /* n scratch (borrowed) */
     tree_cov_matvec_inc_state_t *inc; /* borrowed; long-lived incremental state */
-    int                  use_span;   /* span-weight the kernel? (uniform arms yes, learned no) */
+    int                  use_span;   /* span-weight the kernel?  ALWAYS 1 since the
+                                      * per-segment weights were retired; see the
+                                      * note above kin_visit in predict.c. */
 } v_matvec_data_t;
 
 /* --- v_matvec via tree_walker_run --- */
@@ -1303,7 +1305,7 @@ void var_random(sargent_t *sg, int silent)
         .ts = sg->ts, .ws2 = sg->ws2, .sigma2 = sg->sigma2,
         .n = n, .S = S, .S_orig = sg->S_orig, .prune_map = sg->prune_map,
         .hap_to_indiv = sg->hap_to_indiv,
-        .gv = gv, .inc = &inc, .use_span = sg->uniform_arg,
+        .gv = gv, .inc = &inc, .use_span = 1,
     };
     hutch_opts_t hopts = {
         .nprobe = nprobe, .batch_size = 0, .use_gaussian = 0, .seed = 0,
@@ -1347,7 +1349,7 @@ void var_random(sargent_t *sg, int silent)
         for (int i = 0; i < n; i++) A_0 += r_tilde[i] * r_tilde[i];
 
         compute_quad_all(&inc, n, S, sg->S_orig, sg->prune_map,
-                         r_tilde, A, gv, sg->uniform_arg);
+                         r_tilde, A, gv, /*use_span=*/1);
 
         /* use_span must match v_matvec's operator AND compute_quad_all's A[s]:
          * B[s] is tr(V^{-1} dV/dws2_s), and dV/dws2_s = span_s·G_s whenever V
@@ -1355,7 +1357,7 @@ void var_random(sargent_t *sg, int silent)
          * footing so the EM's A/B ratio is unbiased. */
         hutch_trace_all(cg, v_matvec, &vd, sg->ts, sg->hap_to_indiv,
                         n, S, sg->S_orig, sg->prune_map, B, &B_0, &hopts,
-                        sg->uniform_arg);
+                        /*use_span=*/1);
 
         /* REML EM update for segment weights.
          *
@@ -1697,7 +1699,7 @@ void var_joint(sargent_t *sg, int silent)
         .ts = sg->ts, .ws2 = sg->ws2, .sigma2 = sg->sigma2,
         .n = n, .S = S, .S_orig = sg->S_orig, .prune_map = sg->prune_map,
         .hap_to_indiv = sg->hap_to_indiv,
-        .gv = gv, .inc = &inc, .use_span = sg->uniform_arg,
+        .gv = gv, .inc = &inc, .use_span = 1,
     };
     hutch_opts_t hopts = {
         .nprobe = sg->nprobe, .batch_size = 0, .use_gaussian = 0, .seed = 0,
@@ -1746,14 +1748,14 @@ void var_joint(sargent_t *sg, int silent)
         double A_0 = 0.0, B_0 = 0.0;
         for (int i = 0; i < n; i++) A_0 += r_tilde[i] * r_tilde[i];
         compute_quad_all(&inc, n, S, sg->S_orig, sg->prune_map,
-                         r_tilde, A, gv, sg->uniform_arg);
+                         r_tilde, A, gv, /*use_span=*/1);
         /* use_span must match v_matvec's operator AND compute_quad_all's A[s]:
          * B[s] is tr(V^{-1} dV/dws2_s), and dV/dws2_s = span_s·G_s whenever V
          * is span-weighted.  Passing sg->uniform_arg keeps A and B on the same
          * footing so the EM's A/B ratio is unbiased. */
         hutch_trace_all(cg, v_matvec, &vd, sg->ts, sg->hap_to_indiv,
                         n, S, sg->S_orig, sg->prune_map, B, &B_0, &hopts,
-                        sg->uniform_arg);
+                        /*use_span=*/1);
 
         /* --- 4. One β sweep with constant V-aware precision v_jj ≈ tr(V^{-1}) ---
          *

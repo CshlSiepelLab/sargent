@@ -396,7 +396,19 @@ typedef struct {
     int sg_span;        /* apply span to the LEARNED accumulator?  See below. */
 } kin_ctx_t;
 
-/* WHY sg_span EXISTS (and is 0 for the learned arms).
+/* WHY sg_span EXISTS (it is now ALWAYS 1; kept as a switch for the legacy path).
+ *
+ * UPDATE 2026-08-26: span weighting is now unconditional.  The conditional below
+ * existed only to serve the per-segment weights, which are being retired in
+ * favour of branch selection: an un-spanned learned FIT returned ws2 with the
+ * span already absorbed, so applying span again at predict time double-counted
+ * it.  With the fit span-weighted in every mode (variational.c: use_span = 1),
+ * fit and prediction agree and one kernel serves every arm.  This also collapses
+ * the .gall / .span.gall cache split, which was a live footgun: the same cell
+ * fitted in two modes silently used two different eGRMs.
+ * SARGENT_PREDICT_SPAN_LEGACY is retained to reproduce pre-fix grids.
+ *
+ * Historical rationale follows.
  *
  * The prediction kernel must be the kernel the fit was performed under, or the
  * BLUP is solving a different model than the one whose weights it was handed.
@@ -713,7 +725,7 @@ int sargent_predict(sargent_t *sg,
     /* The learned kernel is span-weighted only if the Stage-2 fit was, i.e. only
      * under --uniform-arg (see kin_visit).  Legacy override for reproducing
      * pre-fix grids. */
-    int sg_span = sg->uniform_arg;
+    int sg_span = 1;
     {
         const char *e = getenv("SARGENT_PREDICT_SPAN_LEGACY");
         if (e && atoi(e) != 0) {

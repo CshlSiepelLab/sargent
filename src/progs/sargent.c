@@ -516,7 +516,10 @@ int main(int argc, char *argv[])
         snprintf(gall_path, sizeof(gall_path), "%s", trees_file);
         char *ext = strrchr(gall_path, '.');
         if (ext && strcmp(ext, ".trees") == 0) *ext = '\0';
-        strncat(gall_path, uniform_arg ? ".span.gall" : ".gall",
+        /* ONE kernel, one file: span weighting is unconditional since the
+         * per-segment weights were retired, so the .span.gall / .gall split is
+         * gone.  The v5 header rejects any file written under the old scheme. */
+        strncat(gall_path, ".gall",
                 sizeof(gall_path) - strlen(gall_path) - 1);
 
         /* Get current .trees file size for cache validation. */
@@ -528,7 +531,7 @@ int main(int argc, char *argv[])
                 fprintf(stderr, "G_all: --precompute: rebuilding %s\n", gall_path);
         } else {
             /* Try loading cached .gall (must hold the kernel this run needs) */
-            gall = gall_load(gall_path, sg->n, trees_sz, uniform_arg);
+            gall = gall_load(gall_path, sg->n, trees_sz, /*use_span=*/1);
             if (gall && !silent)
                 fprintf(stderr, "G_all: loaded %s\n", gall_path);
         }
@@ -542,7 +545,7 @@ int main(int argc, char *argv[])
             /* Span-weight G_all only for the uniform arms (their kernel is the
              * span-weighted eGRM). For the learned arms G_all is used solely as the
              * CG preconditioner, which must match the un-span learned operator. */
-            gall = gall_build(&ts, sg->hap_to_indiv, sg->n, uniform_arg);
+            gall = gall_build(&ts, sg->hap_to_indiv, sg->n, /*use_span=*/1);
             if (gall) {
                 if (trees_sz >= 0) {
                     if (gall_save(gall, gall_path, trees_sz) == 0 && !silent)
