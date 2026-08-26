@@ -21,6 +21,7 @@ Outputs (all with --out prefix):
 import argparse
 import json
 import math
+import os
 import sys
 
 import msprime
@@ -564,6 +565,18 @@ def main():
     # This is a SIMULATION construct only.  The inference methods are blind to
     # it; they see a phenotype and a panel, which is what keeps the comparison
     # fair.  Default 1 = off, legacy path kept literally.
+    ap.add_argument("--unobs-recurrence-zipf", type=float, default=0.0,
+                    help="draw each unobserved variant's number of origins K from "
+                         "a Zipf(a) distribution with MODE 1 instead of fixing it "
+                         "(default 0 = off; try a=2.0). More defensible than a "
+                         "fixed K: most structural variants are single-origin and "
+                         "a minority (VNTRs, NAHR-hotspot CNVs) recur heavily, so "
+                         "phi emerges from the mixture rather than being dialled, "
+                         "and there is no arbitrary K to justify. Capped by "
+                         "--unobs-recurrence-kmax.")
+    ap.add_argument("--unobs-recurrence-kmax", type=int, default=20,
+                    help="cap on K when --unobs-recurrence-zipf is used (default 20). "
+                         "Zipf has an infinite mean for a<=2, so a cap is required.")
     ap.add_argument("--unobs-recurrence-k", type=int, default=1,
                     help="build each unobserved causal variant as a RECURRENT "
                          "variant with K independent origins at one locus, its "
@@ -997,17 +1010,20 @@ def main():
     # legacy behaviour (no MAF filter).
     # ---- recurrent (union-of-branches) unobserved variants -----------------
     recurrence_built = False
-    if args.h2_unobs > 0 and args.unobs_recurrence_k > 1:
+    if args.h2_unobs > 0 and (args.unobs_recurrence_k > 1 or args.unobs_recurrence_zipf > 0):
         K = args.unobs_recurrence_k
         rec_rng = np.random.default_rng(args.seed + 99_991)
         node_to_indiv = np.full(ts.num_nodes, -1, dtype=np.int64)
         for _i in range(n_indiv):
             for _nd in ts.individual(_i).nodes:
                 node_to_indiv[_nd] = _i
-        new_dos, new_pos, new_age = [], [], []
+        new_dos, new_pos, new_age, k_used = [], [], [], []
         tries = 0
         while len(new_dos) < args.n_unobs_causal and tries < 200 * args.n_unobs_causal:
             tries += 1
+            if args.unobs_recurrence_zipf > 0:
+                K = int(min(rec_rng.zipf(args.unobs_recurrence_zipf),
+                            args.unobs_recurrence_kmax))
             locus = float(rec_rng.uniform(0, args.length))
             tree = ts.at(locus)
             # Draw a target frequency for the composite, then take K origins of
@@ -1052,7 +1068,7 @@ def main():
                 continue
             if d.min() == d.max():
                 continue
-            new_dos.append(d); new_pos.append(int(locus))
+            new_dos.append(d); new_pos.append(int(locus)); k_used.append(K)
             new_age.append(float(np.mean([tree.time(tree.parent(cand[j])) for j in pick])))
         if len(new_dos) < args.n_unobs_causal:
             sys.exit(f"ERROR: could only build {len(new_dos)} of "
@@ -1069,8 +1085,15 @@ def main():
         unobs_series   = np.arange(n_unobs_causal)
         unobs_set      = set(unobs_idx.tolist())
         recurrence_built = True
+        # The typed-causal pool excludes the composites, exactly as the
+        # non-recurrent path excludes its unobs_idx.
+        remaining = np.array([j for j in range(p) if j not in unobs_set])
         _f = dosage[unobs_idx].mean(axis=1) / 2.0
-        print(f"  recurrence: {n_unobs_causal} variants, K={K} origins each, "
+        _kdesc = (f"K~Zipf({args.unobs_recurrence_zipf}) capped {args.unobs_recurrence_kmax}, "
+                  f"mean {np.mean(k_used):.1f}, max {int(np.max(k_used))}, "
+                  f"{100*np.mean(np.asarray(k_used)==1):.0f}% single-origin"
+                  if args.unobs_recurrence_zipf > 0 else f"K={K}")
+        print(f"  recurrence: {n_unobs_causal} variants, {_kdesc}, "
               f"MAF {np.min(np.minimum(_f,1-_f)):.3f}-{np.max(np.minimum(_f,1-_f)):.3f}",
               flush=True)
 
@@ -1144,7 +1167,12 @@ def main():
             unobs_series = np.arange(len(unobs_idx))   # each variant its own group
         unobs_set = set(unobs_idx.tolist())
         remaining = np.array([j for j in range(p) if j not in unobs_set])
-    else:
+    elif not recurrence_built:
+        # Only clear when there is genuinely no unobserved class. Guarding on
+        # `not recurrence_built` matters: the recurrence branch above has already
+        # populated unobs_idx / n_unobs_causal, and falling through to here would
+        # silently wipe them -- the class would be built and then never given
+        # effects, leaving the phenotype with no unassayed component at all.
         n_unobs_causal = 0
         unobs_idx = np.zeros(0, dtype=int)
         unobs_series = np.zeros(0, dtype=int)
@@ -1273,6 +1301,15 @@ def main():
               f"panel match (branch-weight prediction ~80%); "
               f"median max r2 to panel {sv_diag['median_max_r2_to_panel']:.3f}, "
               f"{100*sv_diag['frac_max_r2_below_0.2']:.0f}% below r2=0.2", flush=True)
+
+    # ---- phi, MEASURED -------------------------------------------------------
+    # phi = sum_j beta_j^2 (1 - rho_j^2) / sum_j beta_j^2, rho_j = max r^2 to the
+    # panel.  It is not binary: a causal variant tagged at r2 = 0.88 still leaves
+    # 12% of its variance unassayed.  Computed over ALL causal variants (assayed
+    # and unassayed) after effects are drawn, so phi is an OUTPUT of a cell, not
+    # a knob -- which is how it should be quoted.  Filled in below once betas
+    # exist; the panel-side machinery is set up here.
+    _phi_panel = np.flatnonzero(bed_mask)
 
     if not bed_mask.any():
         sys.exit("ERROR: bed mask produced an empty BED panel; raise --bed-coverage")
@@ -1784,6 +1821,46 @@ def main():
     if _maf_params.size == 0:                     # h2_snp == 0: no causal SNPs
         _maf_params = np.zeros(1)
 
+    # ---- measured phi --------------------------------------------------------
+    phi_measured = None
+    # beta and beta_unobs are both in PER-SD units (y is built from dosage_std),
+    # so the variance a causal variant explains is beta^2 -- not beta^2 * Var(x).
+    # beta_all is defined only inside a conditional upstream, so combine the two
+    # arrays directly rather than relying on it existing.
+    _b = np.asarray(beta) + np.asarray(beta_unobs)
+    _cidx = np.flatnonzero(_b != 0.0)
+    if os.environ.get("SIM_PHI_DEBUG"):
+        _u = np.flatnonzero(np.asarray(beta_unobs) != 0.0)
+        print(f"  [phi-dbg] p={p} len(beta)={len(beta)} len(beta_unobs)={len(beta_unobs)} "
+              f"n_causal_nonzero={_cidx.size} n_unobs_nonzero={_u.size}", flush=True)
+        print(f"  [phi-dbg] unobs_idx[:5]={list(unobs_idx[:5]) if args.h2_unobs>0 else []} "
+              f"beta_unobs nonzero idx[:5]={list(_u[:5])}", flush=True)
+        print(f"  [phi-dbg] sum b^2 total={float((_b**2).sum()):.4f} "
+              f"unobs={float((np.asarray(beta_unobs)**2).sum()):.4f} "
+              f"typed={float((np.asarray(beta)**2).sum()):.4f}", flush=True)
+    if _cidx.size and _phi_panel.size:
+        _P = dosage[_phi_panel].T
+        _Pc = _P - _P.mean(0); _Pn = np.sqrt((_Pc * _Pc).sum(0)); _Pn[_Pn < 1e-12] = 1.0
+        _num = _den = 0.0
+        _rows = []
+        for j in _cidx:
+            t = dosage[j] - dosage[j].mean()
+            tn = math.sqrt(float(t @ t))
+            rho2 = 0.0
+            if tn >= 1e-12:
+                r = (t @ _Pc) / (tn * _Pn)
+                rho2 = float(np.max(r * r))
+            v = float(_b[j]) ** 2
+            _num += v * (1.0 - rho2); _den += v
+            _rows.append((int(j), rho2, v))
+        phi_measured = float(_num / _den) if _den > 0 else None
+        _unob = set(unobs_idx.tolist()) if args.h2_unobs > 0 else set()
+        _nu = sum(v * (1.0 - r2) for j, r2, v in _rows if j in _unob)
+        _na = sum(v * (1.0 - r2) for j, r2, v in _rows if j not in _unob)
+        print(f"  phi (measured) = {phi_measured:.4f}   "
+              f"[unassayed-class share {_nu/max(_num,1e-12):.2f}, "
+              f"typed-class share {_na/max(_num,1e-12):.2f}]", flush=True)
+
     params = {
         "n_indiv":         n_train,
         "n_test":          n_test,
@@ -1805,6 +1882,8 @@ def main():
         "alpha":           args.alpha,
         "sv_rate":         args.sv_rate,
         "unobs_recurrence_k": args.unobs_recurrence_k,
+        "unobs_recurrence_zipf": args.unobs_recurrence_zipf,
+        "phi_measured":    phi_measured,
         "n_sv_variants":   int(is_sv.sum()) if is_sv.size else 0,
         "sv_validation":   sv_diag,
         "causal_maf_realised": {
