@@ -545,6 +545,32 @@ def main():
     # per generation over ~3.1 Gb) give ~5e-11 /bp/gen, about 1/250 of the SNV
     # rate; at 1.25e-8 that is --sv-rate 5e-11.  Default 0 = off, and the legacy
     # code path is kept literally so existing seeds reproduce bit for bit.
+    # ---- RECURRENCE: one variant, k independent origins ---------------------
+    # WHY.  Validation of --sv-rate showed a single-origin SV is usually WELL
+    # TAGGED (median max r2 0.88-1.00): mutations land in proportion to
+    # branch_length x span, so they concentrate on LONG branches -- exactly the
+    # ones that also caught an SNV.  A carrier set that is a UNION of branches is
+    # the only kind no single mutation can match, because no mutation sits on
+    # more than one branch.
+    #
+    # Biologically this is ordinary: NAHR-recurrent CNVs, VNTR length classes and
+    # STR expansions all arise repeatedly at one locus on different haplotype
+    # backgrounds.  The composite variant is built from k branches drawn in
+    # proportion to branch length at one locus -- i.e. exactly where independent
+    # mutations would have fallen -- and its carriers are the union of their
+    # descendants.  It is never in the BED panel: an SNV callset contains no
+    # VNTR length alleles.
+    #
+    # This is a SIMULATION construct only.  The inference methods are blind to
+    # it; they see a phenotype and a panel, which is what keeps the comparison
+    # fair.  Default 1 = off, legacy path kept literally.
+    ap.add_argument("--unobs-recurrence-k", type=int, default=1,
+                    help="build each unobserved causal variant as a RECURRENT "
+                         "variant with K independent origins at one locus, its "
+                         "carriers being the union of K clades (default 1 = off). "
+                         "Models NAHR-recurrent CNVs, VNTRs and STR expansions. "
+                         "K > 1 is the only construct that makes a variant "
+                         "untaggable by ANY single marker.")
     ap.add_argument("--sv-rate", type=float, default=0.0,
                     help="per-bp per-generation mutation rate for a SEPARATE "
                          "structural-variant class, overlaid on the same ARG and "
@@ -969,7 +995,86 @@ def main():
     # so the carved-out variance is genuinely "missing" from BayesR rather
     # than leaked back through tag-SNP LD.  Default range [0, 0.5] keeps
     # legacy behaviour (no MAF filter).
-    if args.h2_unobs > 0:
+    # ---- recurrent (union-of-branches) unobserved variants -----------------
+    recurrence_built = False
+    if args.h2_unobs > 0 and args.unobs_recurrence_k > 1:
+        K = args.unobs_recurrence_k
+        rec_rng = np.random.default_rng(args.seed + 99_991)
+        node_to_indiv = np.full(ts.num_nodes, -1, dtype=np.int64)
+        for _i in range(n_indiv):
+            for _nd in ts.individual(_i).nodes:
+                node_to_indiv[_nd] = _i
+        new_dos, new_pos, new_age = [], [], []
+        tries = 0
+        while len(new_dos) < args.n_unobs_causal and tries < 200 * args.n_unobs_causal:
+            tries += 1
+            locus = float(rec_rng.uniform(0, args.length))
+            tree = ts.at(locus)
+            # Draw a target frequency for the composite, then take K origins of
+            # COMPARABLE size (~target/K each).  Sampling origins by branch
+            # length alone picks long branches, so one large clade dominates the
+            # union and a marker tagging that clade tags the union -- measured
+            # median max r2 0.68-0.90 even at K=8.  Real recurrent CNVs / VNTRs
+            # arise repeatedly on modest, recent backgrounds, so the union is
+            # several comparable rare clades; that is both the realistic model
+            # and the one no single marker can match.
+            f_target = float(rec_rng.uniform(max(args.unobs_maf_min, 0.02),
+                                             min(args.unobs_maf_max, 0.35)))
+            f_each = f_target / K
+            n_hap = 2 * n_indiv
+            cand, wts = [], []
+            for u in tree.nodes():
+                par = tree.parent(u)
+                if par == tskit.NULL:
+                    continue
+                bl = tree.time(par) - tree.time(u)
+                if bl <= 0:
+                    continue
+                fu = tree.num_samples(u) / n_hap
+                if not (0.4 * f_each <= fu <= 1.8 * f_each):
+                    continue
+                cand.append(u); wts.append(bl)
+            if len(cand) < K:
+                continue
+            wts = np.asarray(wts, dtype=float); wts /= wts.sum()
+            pick = rec_rng.choice(len(cand), size=K, replace=False, p=wts)
+            hap = set()
+            for j in pick:
+                hap.update(tree.samples(cand[j]))          # union of the K clades
+            d = np.zeros(n_indiv)
+            for h in hap:
+                ii = node_to_indiv[h]
+                if ii >= 0:
+                    d[ii] += 1.0                            # per-haplotype count
+            f = d.sum() / (2.0 * n_indiv)
+            m = min(f, 1.0 - f)
+            if m < max(args.unobs_maf_min, 1e-9) or m > args.unobs_maf_max:
+                continue
+            if d.min() == d.max():
+                continue
+            new_dos.append(d); new_pos.append(int(locus))
+            new_age.append(float(np.mean([tree.time(tree.parent(cand[j])) for j in pick])))
+        if len(new_dos) < args.n_unobs_causal:
+            sys.exit(f"ERROR: could only build {len(new_dos)} of "
+                     f"{args.n_unobs_causal} recurrent variants at K={K} in MAF "
+                     f"[{args.unobs_maf_min}, {args.unobs_maf_max}]; widen the MAF "
+                     f"range, lower K, or lengthen --length.")
+        dosage    = np.vstack([dosage, np.stack(new_dos)])
+        positions = list(positions) + new_pos
+        ages      = np.concatenate([ages, np.asarray(new_age, dtype=float)])
+        is_sv     = np.concatenate([is_sv, np.ones(len(new_dos), dtype=bool)])
+        unobs_idx = np.arange(p, p + len(new_dos), dtype=int)
+        p         = dosage.shape[0]
+        n_unobs_causal = len(unobs_idx)
+        unobs_series   = np.arange(n_unobs_causal)
+        unobs_set      = set(unobs_idx.tolist())
+        recurrence_built = True
+        _f = dosage[unobs_idx].mean(axis=1) / 2.0
+        print(f"  recurrence: {n_unobs_causal} variants, K={K} origins each, "
+              f"MAF {np.min(np.minimum(_f,1-_f)):.3f}-{np.max(np.minimum(_f,1-_f)):.3f}",
+              flush=True)
+
+    if args.h2_unobs > 0 and not recurrence_built:
         n_unobs_causal = min(args.n_unobs_causal, p)
         freq = dosage.mean(axis=1) / 2.0
         maf  = np.minimum(freq, 1.0 - freq)
@@ -1699,6 +1804,7 @@ def main():
         "causal_maf_min":  args.causal_maf_min,
         "alpha":           args.alpha,
         "sv_rate":         args.sv_rate,
+        "unobs_recurrence_k": args.unobs_recurrence_k,
         "n_sv_variants":   int(is_sv.sum()) if is_sv.size else 0,
         "sv_validation":   sv_diag,
         "causal_maf_realised": {
