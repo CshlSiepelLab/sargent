@@ -1562,6 +1562,32 @@ def main():
             beta_unobs *= scale_u
             y_unobs    *= scale_u
 
+    # ---- 4c. Joint rescale: make the TOTAL genetic variance hit its target --
+    #
+    # Each component above is scaled to its OWN target variance on norm_idx, but
+    # the components are correlated -- typed and untyped causal variants sit in
+    # the same window and are therefore in LD -- so their covariance is genetic
+    # variance that nothing budgeted for.  var(y) then lands above 1 and realised
+    # h2 above target.  Measured on the phi grid before this fix: var(y) ran
+    # 1.031 to 1.154 and true h2 (= 1 - sigma2/var(y)) ran 0.806 to 0.827
+    # against a 0.800 target, with the excess largest where the typed and
+    # untyped components were closest in size -- the signature of a cross term.
+    #
+    # Rescaling the SUM by one common factor makes the total exact while leaving
+    # every RATIO between components untouched, so phi_src (a ratio of component
+    # variances) is unchanged and only the overall trait scale moves.  ws2_vec is
+    # a variance, hence scale_g**2.
+    h2_total_target = args.h2_snp + args.h2_arg + args.h2_unobs
+    var_g_total = float(np.var((y_fixed + y_random + y_unobs)[norm_idx]))
+    if var_g_total > 0 and h2_total_target > 0:
+        scale_g = math.sqrt(h2_total_target / var_g_total)
+        beta       *= scale_g
+        beta_unobs *= scale_g
+        y_fixed    *= scale_g
+        y_random   *= scale_g
+        y_unobs    *= scale_g
+        ws2_vec    *= scale_g ** 2
+
     # ---- 5. Residual noise and final phenotype ----------------------------
     sigma2 = max(0.0, 1.0 - args.h2_snp - args.h2_arg - args.h2_unobs)
     y_noise = rng.normal(0.0, math.sqrt(sigma2) if sigma2 > 0 else 0.0, size=n_indiv)
