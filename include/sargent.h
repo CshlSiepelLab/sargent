@@ -28,6 +28,10 @@ typedef struct {
     double h2_arg;      /* additional variance captured by the ARG, after the
                            SNP fit; "missing heritability recovered" */
     double sigma2;      /* nongenetic (residual) variance */
+    double joint_su2;   /* ARG variance component from --joint; 0 if unused.
+                           Sequential fitting has no equivalent: there Stage 2
+                           estimates it from the RESIDUAL, and that estimate
+                           collapses to ~0 (0.008 vs 0.67 joint). */
 
     /* BayesR-style continuous mixture prior for SNP effects (beta).
      * sigma2_mix[k] is the prior variance for component k; component 0 is

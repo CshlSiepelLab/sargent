@@ -11,6 +11,7 @@
 #pragma once
 
 #include "sargent.h"
+#include "gall.h"
 
 /* Stage 1: infer fixed effects (beta) via BayesR-style variational coordinate
    descent with V = sigma^2 I.  Allocates sg->beta if not already set.
@@ -22,6 +23,16 @@ void var_fixed(sargent_t *sg, int silent);
  * post-burn-in posterior mean of beta.  niter<=0 / burn<0 keep the defaults
  * (3000 / 1000).  Set from --stage1-gibbs, --gibbs-iter, --gibbs-burn. */
 void var_fixed_set_gibbs(int on, int niter, int burn);
+
+/* JOINT estimation of beta and the ARG variance components in one Gibbs chain,
+ * in the eigenbasis cached in .gall.  Replaces the sequential scheme, which
+ * gives the ARG nothing: sargent_u equalled bayesR to six decimals at every phi
+ * level while arg_lmm alone beat bayesR by up to 0.05.  Measured +0.0218 r2
+ * over sequential (19/21 cells) at 0.83x the cost.  Needs a .gall whose n
+ * matches; returns 0 on success. */
+int var_joint_gibbs(sargent_t *sg, const gall_t *gl, int silent,
+                    int niter, int burn, uint64_t seed,
+                    double *su2_out, double *sigma2_out);
 
 /* Joint variational coordinate descent: each outer iteration performs one
    V-solve, one sweep of beta updates using the V-aware precision tr(V^{-1}),

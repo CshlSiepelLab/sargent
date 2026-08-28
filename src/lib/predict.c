@@ -749,8 +749,10 @@ static int stack_weights(const double *y, const double *a, const double *b,
  * --------------------------------------------------------------------------- */
 static int s1_cv_folds = 0;      /* 0 or 1 = off */
 static int s1_stack    = 0;      /* --stack: emit the stacked arm */
+static int s1_joint    = 0;      /* --joint: beta came from a JOINT fit */
 
 void predict_set_stack(int on) { s1_stack = on ? 1 : 0; }
+void predict_set_joint(int on) { s1_joint = on ? 1 : 0; }
 
 void predict_set_stage1_cv(int k) { s1_cv_folds = (k > 1) ? k : 0; }
 
@@ -1044,7 +1046,23 @@ int sargent_predict(sargent_t *sg,
 
     /* (d) sargent_u: residual r; center K_uni (in place now); BLUP; + Xβ */
     center_kinship(K_uni_train, n_tr, K_uni_cross, n_te);
-    if (fit_blup(rtrain, K_uni_train, n_tr, &s2, &su2, alpha, &mean_fit) != 0) goto cleanup_pred;
+    /* JOINT fit: nothing special is needed here, and that is the point.
+     *
+     * An earlier version passed the joint su2 straight through to the BLUP.
+     * That is WRONG on scale: var_joint_gibbs works in the eigenbasis of the
+     * .gall G_all, which is neither centred nor normalised, whereas
+     * K_uni_train here is double-centred and mean-diag normalised.  The two
+     * su2 live in different units (the C printed su2 = 0.00000 against the
+     * prototype's 0.955; sigma2 agreed to four decimals, which is what
+     * identified the mismatch as scale rather than failure).
+     *
+     * Re-fitting REML on the residual is both correctly scaled AND sound here,
+     * because the residual is now honest: beta came from a joint fit and so did
+     * not over-claim the shared signal.  The collapse this whole change exists
+     * to fix came from a SEQUENTIAL beta absorbing everything before Stage 2
+     * ever saw it -- not from re-fitting per se. */
+    if (fit_blup(rtrain, K_uni_train, n_tr, &s2, &su2, alpha, &mean_fit) != 0)
+        goto cleanup_pred;
     predict_blup(K_uni_cross, n_te, n_tr, alpha, mean_fit, yhat);
     for (int c = 0; c < n_te; c++) yhat[c] += prs_test[c];
     m_su = compute_metrics(yhat, y_test, n_te);
@@ -1166,6 +1184,41 @@ int sargent_predict(sargent_t *sg,
          * there, so the fit is the SAME fit_blup_m call on the SAME centered
          * K_uni that arm (c) makes.  sargent_w then equals arg_lmm by
          * construction, which is what makes the arm no-regret. */
+        /* Optional dump of the SELECTED-BRANCH carrier matrix Z.
+         *
+         * K_sel = Z Z' / k is rank k, so a joint (rather than sequential) fit
+         * can treat the selected branches as k extra design columns with a
+         * Gaussian prior instead of forming the kernel -- which keeps the
+         * eigenbasis of K_uniform diagonal and makes the joint fit cheap.  The
+         * Python prototype needs Z to test that; the existing
+         * SARGENT_BRANCHSEL_DUMP writes only scores and fingerprints.
+         * Columns are standardized by TRAIN mean and population sd, matching
+         * what branchsel_kinship consumes. */
+        {
+            const char *zp = getenv("SARGENT_BRANCHSEL_DUMP_Z");
+            if (zp && *zp && bs.k > 0 && bs.Z) {
+                char pth[4200];
+                snprintf(pth, sizeof(pth), "%s.Z.bin", zp);
+                FILE *zf = fopen(pth, "wb");
+                if (zf) {
+                    fwrite(bs.Z, sizeof(double),
+                           (size_t)bs.n_total * (size_t)bs.k, zf);
+                    fclose(zf);
+                }
+                snprintf(pth, sizeof(pth), "%s.Z.meta.json", zp);
+                FILE *mf = fopen(pth, "w");
+                if (mf) {
+                    fprintf(mf, "{\"n_total\": %d, \"n_train\": %d, \"k\": %d,"
+                                " \"layout\": \"row-major n_total x k\"}\n",
+                            bs.n_total, bs.n_train, bs.k);
+                    fclose(mf);
+                }
+                if (!silent)
+                    fprintf(stderr, "branchsel: wrote Z (%d x %d) to %s.Z.bin\n",
+                            bs.n_total, bs.k, zp);
+            }
+        }
+
         int nK = (bs.k > 0) ? 2 : 1;
         if (nK == 2) {
             K_sel_train = malloc((size_t)n_tr * n_tr * sizeof(double));
@@ -1217,7 +1270,16 @@ int sargent_predict(sargent_t *sg,
             fprintf(f, "    \"mse\": ");      json_num(f, (mm).mse);      fprintf(f, "\n"); \
             fprintf(f, "  },\n"); \
         } while (0)
-        ARM("bayesR", m_bayes);
+        /* `bayesR` is SARGENT-F: the Stage-1 PRS used ALONE.  Under --joint that
+         * reading is false and the number is misleading: beta is fitted to carry
+         * only its share of the signal alongside the ARG term, so beta on its own
+         * predicts badly BY CONSTRUCTION (measured 0.67 / 0.30 / 0.20 across phi,
+         * against 0.78 / 0.73 / 0.70 for a standalone BayesR fit on the same
+         * cells).  Emitting it under the same key would invite exactly the
+         * comparison it cannot support, so the arm is OMITTED -- following the
+         * precedent set by `sargent` when there is no ws2.  For a genuine
+         * SARGENT-F number, run the cell without --joint. */
+        if (!s1_joint) ARM("bayesR", m_bayes);
         ARM("snp_lmm", m_snp);
         fprintf(f, "  \"snp_lmm_h2\": "); json_num(f, snp_h2); fprintf(f, ",\n");
         ARM("arg_lmm", m_arg);

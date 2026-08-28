@@ -57,6 +57,11 @@ void predict_set_stage1_cv(int k);
  * signal. */
 void predict_set_stack(int on);
 
+/* Tell predict() that beta came from a JOINT fit, so the sargent_u BLUP uses the
+ * jointly estimated variance components instead of re-fitting REML on the
+ * residual (which would discard the joint fit and reproduce the collapse). */
+void predict_set_joint(int on);
+
 int sargent_predict(sargent_t *sg,
                     const double *y_train,
                     const char *case_prefix,
