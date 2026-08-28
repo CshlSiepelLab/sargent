@@ -191,6 +191,22 @@ ALGORITHMIC VARIANTS (for systematic comparison):
           variational fit, even though Stage 1 itself improves.  Use with
           --snp-only, or where coverage is high or very low.
 
+    --joint
+          Fit the SNP fixed effects and the ARG variance components TOGETHER in
+          one Gibbs chain, instead of fitting beta first and then the ARG on the
+          residual.  Sequential fitting gives the ARG almost nothing: beta claims
+          whatever the two terms share, so the residual is nearly unstructured
+          and REML drives the ARG variance to zero -- measured on the phi grid,
+          the combined arm reproduced the typed-SNP-only arm to six decimals at
+          every level, while the ARG alone predicted better than either.
+          Joint fitting recovers ~0.016 r2 on average and ~0.030 where the
+          untyped fraction is largest, and costs slightly LESS than the
+          sequential path because it replaces a separate REML stage.
+          Requires the .gall eigenbasis (available with --uniform-arg).
+          Note that SARGENT-F is refitted separately under this flag: it is the
+          fixed-effects-only model, so there is nothing in it to estimate
+          jointly.  Default: off.
+
     --stage1-cv <K>
           Cross-fit Stage 1 over K folds when forming the Stage-2 residual, so
           that no individual is scored by a Stage-1 model that saw them.
