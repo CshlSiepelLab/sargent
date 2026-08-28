@@ -623,6 +623,20 @@ int main(int argc, char *argv[])
                                     "cache miss)\n");
                     return 1;
                 }
+                /* SARGENT-F is the fixed-effects-only model and has no ARG
+                 * term, so there is nothing in it to estimate jointly: its beta
+                 * must come from fitting y = X.beta + eps on its own.  Do that
+                 * FIRST and stash the result, then let the joint fit overwrite
+                 * sg->beta.  Costs one extra Stage 1, which is the honest price
+                 * of reporting two different models from one invocation. */
+                if (!silent)
+                    fprintf(stderr, "  standalone Stage 1 for SARGENT-F "
+                                    "(fixed effects only)...\n");
+                var_fixed(sg, silent);
+                sg->beta_f = malloc((size_t)sg->p * sizeof(double));
+                if (!sg->beta_f) { fprintf(stderr, "ERROR: out of memory\n"); return 1; }
+                memcpy(sg->beta_f, sg->beta, (size_t)sg->p * sizeof(double));
+
                 if (!silent)
                     fprintf(stderr, "Stage 1+2 JOINT: beta and ARG variance "
                                     "components in one chain (%d SNPs, K=%d)...\n",

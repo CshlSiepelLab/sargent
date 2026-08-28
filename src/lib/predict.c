@@ -955,6 +955,18 @@ int sargent_predict(sargent_t *sg,
      * would only weaken the predictor every arm adds back. */
     compute_prs(X_test,  sg->beta, p, n_te, prs_test);
 
+    /* SARGENT-F is a DIFFERENT MODEL (fixed effects only, no ARG term), so it
+     * gets its own PRS from its own fit.  Without this it would inherit the
+     * joint beta, which is fitted to carry only its share alongside the ARG and
+     * so predicts badly alone -- 0.67/0.30/0.20 across phi against 0.78/0.73/0.70
+     * for a standalone fit.  Same vector when there is no separate fit. */
+    double *prs_test_f = NULL;
+    if (sg->beta_f) {
+        prs_test_f = malloc((size_t)n_te * sizeof(double));
+        if (!prs_test_f) goto cleanup_pred;
+        compute_prs(X_test, sg->beta_f, p, n_te, prs_test_f);
+    }
+
     if (s1_cv_folds > 1) {
         if (stage1_oof_prs(sg, X_train, y_train, p, n_tr, s1_cv_folds,
                            silent, prs_train) != 0) {
@@ -1010,8 +1022,12 @@ int sargent_predict(sargent_t *sg,
         if (!P_uni) goto cleanup_pred;
     }
 
-    /* (a) bayesR: yhat = Xtestᵀβ + mean_y */
-    for (int c = 0; c < n_te; c++) yhat[c] = prs_test[c] + mean_y_train;
+    /* (a) bayesR = SARGENT-F: yhat = Xtestᵀβ_F + mean_y, from the
+     *     fixed-effects-only fit whenever one was made. */
+    {
+        const double *pf = sg->beta_f ? prs_test_f : prs_test;
+        for (int c = 0; c < n_te; c++) yhat[c] = pf[c] + mean_y_train;
+    }
     m_bayes = compute_metrics(yhat, y_test, n_te);
 
     /* (b) snp_lmm: center K_g, fit on y_train, BLUP */
@@ -1270,16 +1286,7 @@ int sargent_predict(sargent_t *sg,
             fprintf(f, "    \"mse\": ");      json_num(f, (mm).mse);      fprintf(f, "\n"); \
             fprintf(f, "  },\n"); \
         } while (0)
-        /* `bayesR` is SARGENT-F: the Stage-1 PRS used ALONE.  Under --joint that
-         * reading is false and the number is misleading: beta is fitted to carry
-         * only its share of the signal alongside the ARG term, so beta on its own
-         * predicts badly BY CONSTRUCTION (measured 0.67 / 0.30 / 0.20 across phi,
-         * against 0.78 / 0.73 / 0.70 for a standalone BayesR fit on the same
-         * cells).  Emitting it under the same key would invite exactly the
-         * comparison it cannot support, so the arm is OMITTED -- following the
-         * precedent set by `sargent` when there is no ws2.  For a genuine
-         * SARGENT-F number, run the cell without --joint. */
-        if (!s1_joint) ARM("bayesR", m_bayes);
+        ARM("bayesR", m_bayes);
         ARM("snp_lmm", m_snp);
         fprintf(f, "  \"snp_lmm_h2\": "); json_num(f, snp_h2); fprintf(f, ",\n");
         ARM("arg_lmm", m_arg);
@@ -1359,7 +1366,7 @@ cleanup_pred:
     branchsel_free(&bs);
     free(P_uni); free(K_sel_train); free(K_sel_cross);
     free(yhat); free(alpha); free(rtrain);
-    free(prs_train); free(prs_test);
+    free(prs_train); free(prs_test); free(prs_test_f);
     free(K_g_train); free(K_g_cross);
     free(X_train); free(X_test);
     free(y_test); free(true_random);
