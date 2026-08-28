@@ -801,9 +801,17 @@ static void var_fixed_gibbs(sargent_t *sg, int silent, int niter, int burn,
         if (!sg->beta) { fprintf(stderr, "var_fixed_gibbs: out of memory\n"); return; }
     }
 
-    /* Divergence guard; see the use site below.  Relaxed cap, overridable by
-     * the same env var as the deterministic path.  0 disables. */
-    double gibbs_vf_cap = VAR_FIXED_VFCAP_MULTISTART;
+    /* Divergence guard; see the use site below.  OFF BY DEFAULT.
+     *
+     * It was briefly enabled at the relaxed 0.9 cap on the assumption -- taken
+     * from the deterministic path's comments -- that such a cap never binds on
+     * healthy fits.  That is false for the SAMPLER: on an ordinary phi-grid
+     * cell it bound on 3 of 3000 sweeps and moved every Stage-1 arm by -0.003
+     * r2.  A guard that perturbs well-behaved chains is not a guard, so it is
+     * opt-in: set SARGENT_S2_VFCAP to a positive value to enable it (0.9 is the
+     * value the deterministic path uses with restarts).  It remains useful when
+     * a chain genuinely diverges, which is why it is kept rather than removed. */
+    double gibbs_vf_cap = 0.0;
     { const char *e = getenv("SARGENT_S2_VFCAP");
       if (e) { double v = atof(e); if (v >= 0.0) gibbs_vf_cap = v; } }
     long n_cap_hits = 0;
