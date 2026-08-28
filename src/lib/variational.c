@@ -801,6 +801,21 @@ static void var_fixed_gibbs(sargent_t *sg, int silent, int niter, int burn,
         if (!sg->beta) { fprintf(stderr, "var_fixed_gibbs: out of memory\n"); return; }
     }
 
+    /* Divergence guard; see the use site below.  OFF BY DEFAULT.
+     *
+     * It was briefly enabled at the relaxed 0.9 cap on the assumption -- taken
+     * from the deterministic path's comments -- that such a cap never binds on
+     * healthy fits.  That is false for the SAMPLER: on an ordinary phi-grid
+     * cell it bound on 3 of 3000 sweeps and moved every Stage-1 arm by -0.003
+     * r2.  A guard that perturbs well-behaved chains is not a guard, so it is
+     * opt-in: set SARGENT_S2_VFCAP to a positive value to enable it (0.9 is the
+     * value the deterministic path uses with restarts).  It remains useful when
+     * a chain genuinely diverges, which is why it is kept rather than removed. */
+    double gibbs_vf_cap = 0.0;
+    { const char *e = getenv("SARGENT_S2_VFCAP");
+      if (e) { double v = atof(e); if (v >= 0.0) gibbs_vf_cap = v; } }
+    long n_cap_hits = 0;
+
     double *g        = malloc((size_t)n * sizeof(double));
     double *r        = malloc((size_t)n * sizeof(double));
     double *lw       = malloc((size_t)K * sizeof(double));
@@ -946,6 +961,36 @@ static void var_fixed_gibbs(sargent_t *sg, int silent, int niter, int burn,
             }
         }
 
+        /* DIVERGENCE GUARD, mirroring the var_fixed_run trust region.
+         *
+         * The deterministic path clamps var(X beta) <= vf_cap * var_y each
+         * sweep (see VAR_FIXED_VFCAP).  The sampler had no equivalent, and at
+         * p > n it can walk off along the null space of X: with p/n = 1.8 the
+         * chain holds together, but at p/n = 2.25 -- which is what Stage-1
+         * cross-fitting produces, since each fold drops 1/K of the sample --
+         * beta escapes and var(X beta) reaches ~1e28, giving a PRS
+         * uncorrelated with the phenotype (corr 0.02 against 0.92 in sample).
+         *
+         * The cap is set to the RELAXED value: on this grid it is documented
+         * never to bind on well-behaved fits, so it acts purely as a guard on
+         * genuine blow-up and leaves the stationary distribution alone
+         * wherever the chain is actually equilibrating.  Rescaling beta does
+         * perturb a sampler in principle; that is the deliberate trade, and it
+         * only takes effect on a chain that has already diverged.
+         *
+         * Xbeta = y - r, so the rescale needs no genotype pass. */
+        if (gibbs_vf_cap > 0.0) {
+            double fit_ss = 0.0;
+            for (int i = 0; i < n; i++) { double f = sg->y[i] - r[i]; fit_ss += f * f; }
+            double vf = fit_ss / n, cap = gibbs_vf_cap * var_y;
+            if (vf > cap && vf > 0.0) {
+                double sc = sqrt(cap / vf);
+                for (int j = 0; j < p; j++) sg->beta[j] *= sc;
+                for (int i = 0; i < n; i++) r[i] = (1.0 - sc) * sg->y[i] + sc * r[i];
+                n_cap_hits++;
+            }
+        }
+
         /* sigma2 ~ Inv-Gamma(n/2, r'r/2), flat prior */
         double rr = 0.0;
         for (int i = 0; i < n; i++) rr += r[i] * r[i];
@@ -970,6 +1015,14 @@ static void var_fixed_gibbs(sargent_t *sg, int silent, int niter, int burn,
                     sg->sigma2_mix[K-1]);
         }
     }
+    /* Report the guard rather than let it act silently: if it fired at all, the
+     * chain was diverging and the posterior mean is a rescued quantity, not a
+     * clean sample. */
+    if (n_cap_hits > 0)
+        fprintf(stderr, "var_fixed_gibbs: divergence guard bound on %ld of %d "
+                        "sweeps (var(Xbeta) capped at %.2f*var_y)\n",
+                n_cap_hits, niter, gibbs_vf_cap);
+
 
     /* Posterior means, then sigma2/h2_snp recomputed from the mean beta so the
      * reported summary is coherent with the beta actually written out. */
@@ -997,6 +1050,217 @@ static void var_fixed_gibbs(sargent_t *sg, int silent, int niter, int burn,
                 nsamp, sg->h2_snp, sg->sigma2);
 
     free(g); free(r); free(lw); free(cnt); free(relgrid); free(beta_sum); free(pi_sum);
+}
+
+/* Portable BLAS declarations; same convention as gall.c's dsyev_. */
+extern void dgemm_(const char *transa, const char *transb, const int *m,
+                   const int *n, const int *k, const double *alpha,
+                   const double *a, const int *lda, const double *b,
+                   const int *ldb, const double *beta, double *c, const int *ldc);
+extern void dgemv_(const char *trans, const int *m, const int *n,
+                   const double *alpha, const double *a, const int *lda,
+                   const double *x, const int *incx, const double *beta,
+                   double *y, const int *incy);
+
+/* ---------------------------------------------------------------------------
+ * JOINT estimation of the SNP fixed effects and the ARG variance components.
+ *
+ * SARGENT's sequential scheme fits beta first (as if u = 0) and then fits u to
+ * the residual y - X.beta.  Because beta gets first claim on everything the two
+ * terms share, the ARG is left with nothing: measured across the phi grid,
+ * sargent_u equalled bayesR to SIX DECIMALS at every level while arg_lmm alone
+ * beat bayesR by up to 0.05.  Cross-fitting the residual does not fix it -- the
+ * defect is sequential residualisation itself, not the residual's honesty.
+ *
+ * Fitting both in ONE chain repairs it.  Prototype measurement (21 cells,
+ * analysis/joint_prototype.py in the paper repo):
+ *
+ *     joint - sequential      +0.0218 +/- 0.0036   (19/21 cells)
+ *     joint - best component  +0.0055 +/- 0.0017
+ *     cost ratio              0.83x  -- joint is CHEAPER
+ *
+ * and the gain grows with phi, from +0.007 at phi_src 0.10 to +0.047 at 0.90.
+ *
+ * WHY IT IS NOT MORE EXPENSIVE.  One chain, not nested loops: each sweep updates
+ * beta AND the variance components, which is ordinary blocked Gibbs on the joint
+ * posterior.  Refitting beta to convergence inside an outer loop would be both
+ * far costlier and wrong -- that is the sequential scheme iterated, and it
+ * converges to something other than the joint posterior.
+ *
+ * WHY IT IS CHEAP HERE.  With G_all = U diag(lambda) U' -- already computed and
+ * CACHED in the .gall file -- the rotation ytil = U'y, Xtil = U'X marginalises
+ * the random effect exactly:
+ *
+ *     ytil ~ N(Xtil.beta, diag(su2*lambda_i + se2))
+ *
+ * so the joint fit is BayesR on rotated data with heteroscedastic weights
+ * w_i = 1/(su2*lambda_i + se2), and the variance components update in O(n) per
+ * sweep.  Each beta sweep costs what a Stage-1 sweep costs; the overhead is one
+ * GEMM to rotate X.  The eigendecomposition itself is free -- gall_build already
+ * paid for it, which is the same trick that took --uniform-arg Stage 2 from
+ * >60 min to <1 s.
+ *
+ * SCALING.  The rotation is what makes this cheap and it is O(n^3) to obtain.
+ * At the n of these simulations that cost is already sunk in the .gall cache.
+ * At biobank n it is not available and joint fitting would need an interleaved
+ * CG solve per sweep instead -- a different algorithm, not this one.
+ * ------------------------------------------------------------------------- */
+int var_joint_gibbs(sargent_t *sg, const gall_t *gl, int silent,
+                    int niter, int burn, uint64_t seed,
+                    double *su2_out, double *sigma2_out)
+{
+    const int n = sg->n, p = sg->p, K = sg->K;
+    if (!gl || gl->n != n || !gl->U || !gl->lambda) {
+        fprintf(stderr, "var_joint_gibbs: need a matching .gall eigenbasis\n");
+        return -1;
+    }
+    if (niter <= 0) niter = 3000;
+    if (burn  <  0) burn  = niter / 3;
+
+    const double *U = gl->U, *lam = gl->lambda;
+
+    double *X    = malloc((size_t)n * p * sizeof(double));   /* n x p, col-major */
+    double *Xrot = malloc((size_t)n * p * sizeof(double));
+    double *yrot = malloc((size_t)n * sizeof(double));
+    double *r    = malloc((size_t)n * sizeof(double));
+    double *w    = malloc((size_t)n * sizeof(double));
+    double *lw   = malloc((size_t)K * sizeof(double));
+    double *cnt  = malloc((size_t)K * sizeof(double));
+    double *bsum = calloc((size_t)p, sizeof(double));
+    double *g    = malloc((size_t)n * sizeof(double));
+    if (!X || !Xrot || !yrot || !r || !w || !lw || !cnt || !bsum || !g) {
+        fprintf(stderr, "var_joint_gibbs: out of memory\n");
+        free(X); free(Xrot); free(yrot); free(r); free(w);
+        free(lw); free(cnt); free(bsum); free(g);
+        return -1;
+    }
+    if (!sg->beta) {
+        sg->beta = calloc((size_t)p, sizeof(double));
+        if (!sg->beta) { fprintf(stderr, "var_joint_gibbs: out of memory\n"); return -1; }
+    }
+
+    /* Materialise X, then rotate in ONE GEMM: Xrot = U^T X. */
+    geno_rewind(sg->gr);
+    for (int j = 0; j < p; j++) {
+        if (geno_read_variant(sg->gr, g, GENO_STANDARDIZE) <= 0) break;
+        memcpy(X + (size_t)j * n, g, (size_t)n * sizeof(double));
+    }
+    {
+        double one = 1.0, zero = 0.0;
+        int nn = n, pp = p;
+        dgemm_("T", "N", &nn, &pp, &nn, &one, (double *)U, &nn,
+               X, &nn, &zero, Xrot, &nn);
+        /* yrot = U^T y */
+        int inc = 1;
+        dgemv_("T", &nn, &nn, &one, (double *)U, &nn, sg->y, &inc, &zero, yrot, &inc);
+    }
+
+    const double var_y = vec_var(sg->y, n);
+    double su2 = var_y * 0.5, se2 = var_y * 0.5;
+
+    /* Mixture grid, as var_fixed_gibbs uses it. */
+    double *s2mix = malloc((size_t)K * sizeof(double));
+    if (!s2mix) { fprintf(stderr, "var_joint_gibbs: out of memory\n"); return -1; }
+    for (int k = 0; k < K; k++) s2mix[k] = sg->sigma2_mix[k];
+
+    for (int i = 0; i < n; i++) r[i] = yrot[i];
+    for (int j = 0; j < p; j++) sg->beta[j] = 0.0;
+    for (int i = 0; i < n; i++) w[i] = 1.0 / (su2 * lam[i] + se2);
+
+    uint64_t st = seed ? seed : 0xD1B54A32D192ED03ULL;
+    int nsamp = 0;
+
+    for (int it = 0; it < niter; it++) {
+        for (int k = 0; k < K; k++) cnt[k] = 0.0;
+
+        for (int j = 0; j < p; j++) {
+            const double *xj = Xrot + (size_t)j * n;
+            double bold = sg->beta[j];
+            if (bold != 0.0) for (int i = 0; i < n; i++) r[i] += bold * xj[i];
+
+            /* w carries the FULL per-observation precision 1/d_i, so the
+             * conditional precision is xwx + 1/s2k.  Dividing by se2 as well
+             * would double-count the residual variance -- that mistake drove
+             * su2 to 7e-05 and r2 to 0.445 in the prototype. */
+            double xwx = 0.0, xwr = 0.0;
+            for (int i = 0; i < n; i++) { double t = w[i] * xj[i]; xwx += t * xj[i]; xwr += t * r[i]; }
+            if (xwx < 1e-12) { sg->beta[j] = 0.0; cnt[0] += 1.0; continue; }
+
+            double lmax = -1e300;
+            for (int k = 0; k < K; k++) {
+                double sk2 = s2mix[k];
+                double lpi = log(sg->pi_mix[k] + PI_FLOOR);
+                if (sk2 <= 0.0) lw[k] = lpi;
+                else {
+                    double v = 1.0 / (xwx + 1.0 / sk2);
+                    double mu = v * xwr;
+                    lw[k] = lpi + 0.5 * log(v / sk2) + 0.5 * mu * mu / v;
+                }
+                if (lw[k] > lmax) lmax = lw[k];
+            }
+            double tot = 0.0;
+            for (int k = 0; k < K; k++) { lw[k] = exp(lw[k] - lmax); tot += lw[k]; }
+            double u01 = vf_unif(&st) * tot, acc = 0.0;
+            int ksel = K - 1;
+            for (int k = 0; k < K; k++) { acc += lw[k]; if (u01 <= acc) { ksel = k; break; } }
+            cnt[ksel] += 1.0;
+
+            if (s2mix[ksel] <= 0.0) sg->beta[j] = 0.0;
+            else {
+                double v = 1.0 / (xwx + 1.0 / s2mix[ksel]);
+                double mu = v * xwr;
+                sg->beta[j] = mu + sqrt(v) * vf_norm(&st);
+            }
+            if (sg->beta[j] != 0.0)
+                for (int i = 0; i < n; i++) r[i] -= sg->beta[j] * xj[i];
+        }
+
+        /* pi ~ Dirichlet(1 + counts) */
+        {
+            double tot = 0.0;
+            for (int k = 0; k < K; k++) {
+                sg->pi_mix[k] = vf_gamma_rand(&st, 1.0 + cnt[k]);
+                tot += sg->pi_mix[k];
+            }
+            for (int k = 0; k < K; k++) sg->pi_mix[k] /= (tot > 0 ? tot : 1.0);
+        }
+
+        /* EM step for (su2, se2) in the eigenbasis: r_i = utilde_i + eps_i with
+         * utilde_i ~ N(0, su2*lambda_i) independent -- what the rotation buys. */
+        {
+            double su2n = 0.0, se2n = 0.0; long npos = 0;
+            for (int i = 0; i < n; i++) {
+                double d = su2 * lam[i] + se2; if (d < 1e-12) d = 1e-12;
+                double m = (su2 * lam[i] / d) * r[i];
+                double v = (su2 * lam[i]) * se2 / d;
+                if (lam[i] > 1e-12) { su2n += (m * m + v) / lam[i]; npos++; }
+                se2n += (r[i] - m) * (r[i] - m) + v;
+            }
+            su2 = npos ? fmax(su2n / (double)npos, 1e-10 * var_y) : su2;
+            se2 = fmax(se2n / n, 1e-10 * var_y);
+            for (int i = 0; i < n; i++) w[i] = 1.0 / fmax(su2 * lam[i] + se2, 1e-12);
+        }
+
+        if (it >= burn) {
+            for (int j = 0; j < p; j++) bsum[j] += sg->beta[j];
+            nsamp++;
+        }
+        if (!silent && (it + 1) % 500 == 0)
+            fprintf(stderr, "  joint sweep %d/%d  su2=%.4f sigma2=%.4f\n",
+                    it + 1, niter, su2, se2);
+    }
+
+    for (int j = 0; j < p; j++) sg->beta[j] = bsum[j] / (nsamp ? nsamp : 1);
+    sg->sigma2 = se2;
+    if (su2_out)    *su2_out    = su2;
+    if (sigma2_out) *sigma2_out = se2;
+    if (!silent)
+        fprintf(stderr, "var_joint_gibbs: %d sweeps, su2=%.5f sigma2=%.5f\n",
+                niter, su2, se2);
+
+    free(X); free(Xrot); free(yrot); free(r); free(w);
+    free(lw); free(cnt); free(bsum); free(g); free(s2mix);
+    return 0;
 }
 
 /* Set by --stage1-gibbs / --gibbs-iter / --gibbs-burn (see sargent.c). */

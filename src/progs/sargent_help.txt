@@ -191,6 +191,17 @@ ALGORITHMIC VARIANTS (for systematic comparison):
           variational fit, even though Stage 1 itself improves.  Use with
           --snp-only, or where coverage is high or very low.
 
+    --stage1-cv <K>
+          Cross-fit Stage 1 over K folds when forming the Stage-2 residual, so
+          that no individual is scored by a Stage-1 model that saw them.
+          Without it the residual y - Xb is in-sample: a well-fitting Stage 1
+          absorbs signal and noise alike, the residual looks like noise, and
+          REML drives the ARG variance component to zero.  Affects only the
+          arms built on that residual (sargent_u, sargent_wf); test-set
+          prediction still uses the full-data fit, so bayesR, snp_lmm, arg_lmm
+          and sargent_w are unchanged.  Costs K extra Stage-1 fits.
+          Default: off.
+
     --gibbs-iter <N>
           Gibbs sweeps.  Default: 3000.
 

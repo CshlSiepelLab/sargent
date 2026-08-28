@@ -43,6 +43,25 @@
  *
  * Returns 0 on success, -1 on error.
  */
+/* Stage-1 CROSS-FITTING for the Stage-2 residual.  With k > 1, the training
+ * PRS that forms rtrain = y - prs_train is assembled out of fold: Stage 1 is
+ * refitted k times and each individual scored by a model that did not see them.
+ * Without it the residual is in-sample, and a well-fitting Stage 1 drives the
+ * ARG variance component to zero.  prs_TEST is unaffected, so every arm that
+ * does not use rtrain is bit-identical either way.  k <= 1 disables. */
+void predict_set_stage1_cv(int k);
+
+/* --stack: emit sargent_stack, an out-of-fold-weighted blend of the Stage-1 PRS
+ * and the uniform ARG BLUP.  Addresses the case where sequential
+ * residualisation yields nothing because the two predictors capture the same
+ * signal. */
+void predict_set_stack(int on);
+
+/* Tell predict() that beta came from a JOINT fit, so the sargent_u BLUP uses the
+ * jointly estimated variance components instead of re-fitting REML on the
+ * residual (which would discard the joint fit and reproduce the collapse). */
+void predict_set_joint(int on);
+
 int sargent_predict(sargent_t *sg,
                     const double *y_train,
                     const char *case_prefix,

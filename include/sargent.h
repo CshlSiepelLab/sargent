@@ -28,6 +28,16 @@ typedef struct {
     double h2_arg;      /* additional variance captured by the ARG, after the
                            SNP fit; "missing heritability recovered" */
     double sigma2;      /* nongenetic (residual) variance */
+    double *beta_f;     /* fixed-effects-ONLY beta [p], or NULL.
+                           SARGENT-F is the model y = X.beta + eps with no ARG
+                           term, so its beta must come from fitting THAT model.
+                           Under --joint, sg->beta is fitted to carry only its
+                           share alongside the ARG and is NOT SARGENT-F; this
+                           holds the standalone fit so the arm stays meaningful. */
+    double joint_su2;   /* ARG variance component from --joint; 0 if unused.
+                           Sequential fitting has no equivalent: there Stage 2
+                           estimates it from the RESIDUAL, and that estimate
+                           collapses to ~0 (0.008 vs 0.67 joint). */
 
     /* BayesR-style continuous mixture prior for SNP effects (beta).
      * sigma2_mix[k] is the prior variance for component k; component 0 is

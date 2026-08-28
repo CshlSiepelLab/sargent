@@ -92,6 +92,19 @@ int geno_bed_read_raw_at(geno_reader_t *r, int file_var_idx, double *out);
    covariance matrices and other tree-sequence operations. */
 geno_reader_t *geno_open_trees(tsk_treeseq_t *ts);
 
+/* In-memory reader over a ROW SUBSET of an already-loaded, variant-major matrix
+ * X[j * n_full + i].  Used by Stage-1 cross-fitting, which must refit on K-1
+ * folds of the training individuals and so cannot address whole files.
+ *
+ * Each variant is re-centred and re-scaled WITHIN the subset, so a fold's model
+ * never sees the moments of its held-out individuals; the transform is exposed
+ * through r->stats[j].{mean,scale} so the caller can score the held-out rows on
+ * the same scale.  A variant that is monomorphic within the subset is served as
+ * zeros rather than dropped, which keeps variant indices aligned with beta[].
+ * The matrix is BORROWED and must outlive the reader. */
+geno_reader_t *geno_open_mem_subset(const double *X, int p, int n_full,
+                                    const int *rows, int n_rows);
+
 /* Estimate E[tr(G_s)/n] using a single Rademacher probe over all trees.
  * Used to calibrate the tau2_mix prior grid to phenotype-variance units
  * regardless of branch-length scale (e.g. generations vs coalescent units).

@@ -2,6 +2,7 @@
 
 add_library(sargent_core STATIC
     bed.c
+    geno_mem.c
     trees.c
     variational.c
     conjgrad.c

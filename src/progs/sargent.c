@@ -199,6 +199,7 @@ int main(int argc, char *argv[])
     int ts_geno     = 0;
     int snp_only    = 0;
     int stage1_gibbs = 0, gibbs_iter = 0, gibbs_burn = -1;
+    int stage1_cv = 0, use_stack = 0, use_joint = 0;
     int arg_only    = 0;
     int nprobe      = 0;   /* 0 = use sargent_t default (10) */
     int uniform_arg = 0;
@@ -255,6 +256,9 @@ int main(int argc, char *argv[])
         {"test-pheno",     1, 0, 0x105},
         {"predict-out",    1, 0, 0x106},
         {"stage1-gibbs",   0, 0, 0x107},
+        {"stage1-cv",      1, 0, 0x120},
+        {"stack",          0, 0, 0x121},
+        {"joint",          0, 0, 0x122},
         {"gibbs-iter",     1, 0, 0x108},
         {"gibbs-burn",     1, 0, 0x109},
         {"branch-select",  0, 0, 0x10a},
@@ -272,6 +276,9 @@ int main(int argc, char *argv[])
         case 'G': ts_geno     = 1;                break;
         case 'S': snp_only    = 1;                break;
         case 0x107: stage1_gibbs = 1;             break;
+        case 0x120: stage1_cv = atoi(optarg);    break;
+        case 0x121: use_stack = 1;               break;
+        case 0x122: use_joint = 1;               break;
         case 0x108: gibbs_iter   = atoi(optarg);  break;
         case 0x109: gibbs_burn   = atoi(optarg);  break;
         case 'A': arg_only    = 1;                break;
@@ -324,6 +331,9 @@ int main(int argc, char *argv[])
     }
 
     var_fixed_set_gibbs(stage1_gibbs, gibbs_iter, gibbs_burn);
+    predict_set_stage1_cv(stage1_cv);
+    predict_set_stack(use_stack);
+    predict_set_joint(use_joint);
     if (stage1_gibbs && arg_only) {
         fprintf(stderr, "ERROR: --stage1-gibbs has no effect with --arg-only "
                         "(Stage 1 is skipped).\n");
@@ -601,6 +611,49 @@ int main(int argc, char *argv[])
     } else {
         /* ---- Sequential mode: Stage 1 then Stage 2 (mode: predict) ---- */
         if (!arg_only) {
+            /* --joint replaces the SEQUENTIAL Stage 1 + Stage 2 with a single
+             * chain that fits beta and the ARG variance components together.
+             * Sequential gives the ARG nothing -- sargent_u equalled bayesR to
+             * six decimals at every phi level -- because beta gets first claim
+             * on everything the two terms share.  See var_joint_gibbs. */
+            if (use_joint) {
+                if (!sg->gall) {
+                    fprintf(stderr, "ERROR: --joint needs the .gall eigenbasis; "
+                                    "it is unavailable here (per-tree kernel or "
+                                    "cache miss)\n");
+                    return 1;
+                }
+                /* SARGENT-F is the fixed-effects-only model and has no ARG
+                 * term, so there is nothing in it to estimate jointly: its beta
+                 * must come from fitting y = X.beta + eps on its own.  Do that
+                 * FIRST and stash the result, then let the joint fit overwrite
+                 * sg->beta.  Costs one extra Stage 1, which is the honest price
+                 * of reporting two different models from one invocation. */
+                if (!silent)
+                    fprintf(stderr, "  standalone Stage 1 for SARGENT-F "
+                                    "(fixed effects only)...\n");
+                var_fixed(sg, silent);
+                sg->beta_f = malloc((size_t)sg->p * sizeof(double));
+                if (!sg->beta_f) { fprintf(stderr, "ERROR: out of memory\n"); return 1; }
+                memcpy(sg->beta_f, sg->beta, (size_t)sg->p * sizeof(double));
+
+                if (!silent)
+                    fprintf(stderr, "Stage 1+2 JOINT: beta and ARG variance "
+                                    "components in one chain (%d SNPs, K=%d)...\n",
+                            sg->p, sg->K);
+                double j_su2 = 0.0, j_sig2 = 0.0;
+                if (var_joint_gibbs(sg, sg->gall, silent, gibbs_iter ? gibbs_iter : 3000,
+                                    gibbs_burn >= 0 ? gibbs_burn : 1000,
+                                    0, &j_su2, &j_sig2) != 0) {
+                    fprintf(stderr, "ERROR: joint estimation failed\n");
+                    return 1;
+                }
+                sg->joint_su2 = j_su2;
+                sg->sigma2    = j_sig2;
+                if (!silent)
+                    fprintf(stderr, "Joint done: su2=%.4f sigma2=%.4f\n", j_su2, j_sig2);
+                write_beta_table(sg, outroot, silent);
+            } else {
             if (!silent)
                 fprintf(stderr, "Stage 1: inferring fixed effects (%d SNPs, K=%d)...\n",
                         sg->p, sg->K);
@@ -609,6 +662,7 @@ int main(int argc, char *argv[])
                 fprintf(stderr, "Stage 1 done: h2_snp=%.4f  sigma2=%.4f\n",
                         sg->h2_snp, sg->sigma2);
             write_beta_table(sg, outroot, silent);
+            }
         }
 
         if (!snp_only) {
