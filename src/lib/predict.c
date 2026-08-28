@@ -584,6 +584,176 @@ static void snp_grm(const double *X_train, const double *X_test,
     for (size_t k = 0; k < (size_t)n_te * n_tr; k++) K_g_cross[k] *= invp;
 }
 
+/* Assemble an OUT-OF-FOLD Stage-1 PRS for the training individuals.
+ *
+ * Fold f holds individuals i with (i % K) == f.  Stage 1 is refitted on the
+ * complement and used to score fold f, so no individual is scored by a model
+ * that saw them.  Returns 0 on success; on any failure the caller falls back to
+ * the in-sample PRS rather than silently producing a half-crossfitted vector.
+ *
+ * X_train is variant-major and standardized against the full training sample.
+ * The subset reader re-standardizes within each fold and publishes the fold's
+ * per-variant transform in stats[], which is applied here when scoring the
+ * held-out rows -- so fit and prediction share one scale.
+ */
+static int stage1_oof_prs(sargent_t *sg, const double *X_train,
+                          const double *y_train, int p, int n_tr, int K,
+                          int silent, double *prs_oof)
+{
+    int rc = -1;
+    int *rows = malloc((size_t)n_tr * sizeof(int));
+    double *yfold = malloc((size_t)n_tr * sizeof(double));
+    if (!rows || !yfold) { free(rows); free(yfold); return -1; }
+
+    for (int i = 0; i < n_tr; i++) prs_oof[i] = 0.0;
+
+    for (int f = 0; f < K; f++) {
+        int nf = 0;
+        for (int i = 0; i < n_tr; i++)
+            if (i % K != f) { rows[nf] = i; yfold[nf] = y_train[i]; nf++; }
+        if (nf < 2) goto done;
+
+        geno_reader_t *gr = geno_open_mem_subset(X_train, p, n_tr, rows, nf);
+        if (!gr) goto done;
+        if (geno_precompute_stats(gr) != 0) { geno_close(gr); goto done; }
+
+        /* ts is borrowed and only used for the segment map, which Stage 1 does
+         * not consult; the fold model inherits the global Gibbs setting. */
+        sargent_t *fold = sargent_new(gr, sg->ts, yfold);
+        if (!fold) { geno_close(gr); goto done; }
+
+        var_fixed(fold, 1 /* silent: K fits would otherwise flood the log */);
+
+        if (!fold->beta) { sargent_free(fold); geno_close(gr); goto done; }
+
+        /* Score the held-out rows with THIS fold's model, on this fold's scale. */
+        for (int i = 0; i < n_tr; i++) {
+            if (i % K == f) {
+                double acc = 0.0;
+                for (int j = 0; j < p; j++) {
+                    double sc = gr->stats[j].scale;
+                    if (sc == 0.0) continue;          /* monomorphic in-fold */
+                    double x = (X_train[(size_t)j * n_tr + i] - gr->stats[j].mean) * sc;
+                    acc += fold->beta[j] * x;
+                }
+                prs_oof[i] = acc;
+            }
+        }
+        sargent_free(fold);
+        geno_close(gr);
+        if (!silent)
+            fprintf(stderr, "stage1-cv: fold %d/%d fitted on %d individuals\n",
+                    f + 1, K, nf);
+    }
+    rc = 0;
+done:
+    free(rows); free(yfold);
+    return rc;
+}
+
+/* Out-of-fold ARG-BLUP predictions for the training individuals.
+ *
+ * The stacking counterpart of stage1_oof_prs: fold f is predicted by a BLUP
+ * fitted on the complement, so the weights are learned from predictions no
+ * component made on data it saw.  K_uni is subsetted directly -- the fold's own
+ * kinship block is K[rows,rows] and the cross block is K[fold,rows].
+ */
+static int arg_oof_blup(const double *K_uni, const double *y_train,
+                        int n_tr, int K, double alpha_pow, double *arg_oof)
+{
+    int rc = -1;
+    int *rows = malloc((size_t)n_tr * sizeof(int));
+    int *held = malloc((size_t)n_tr * sizeof(int));
+    double *ysub = malloc((size_t)n_tr * sizeof(double));
+    double *Ksub = malloc((size_t)n_tr * n_tr * sizeof(double));
+    double *Kx   = malloc((size_t)n_tr * n_tr * sizeof(double));
+    double *al   = malloc((size_t)n_tr * sizeof(double));
+    double *pred = malloc((size_t)n_tr * sizeof(double));
+    if (!rows || !held || !ysub || !Ksub || !Kx || !al || !pred) goto done;
+
+    for (int i = 0; i < n_tr; i++) arg_oof[i] = 0.0;
+
+    for (int f = 0; f < K; f++) {
+        int nf = 0, nh = 0;
+        for (int i = 0; i < n_tr; i++) {
+            if (i % K != f) { ysub[nf] = y_train[i]; rows[nf++] = i; }
+            else             held[nh++] = i;
+        }
+        if (nf < 2 || nh < 1) goto done;
+
+        for (int a = 0; a < nf; a++)
+            for (int b = 0; b < nf; b++)
+                Ksub[(size_t)a * nf + b] = K_uni[(size_t)rows[a] * n_tr + rows[b]];
+        for (int c = 0; c < nh; c++)
+            for (int b = 0; b < nf; b++)
+                Kx[(size_t)c * nf + b] = K_uni[(size_t)held[c] * n_tr + rows[b]];
+
+        double s2f, su2f, meanf;
+        if (fit_blup(ysub, Ksub, nf, &s2f, &su2f, al, &meanf) != 0) goto done;
+        predict_blup(Kx, nh, nf, al, meanf, pred);
+        for (int c = 0; c < nh; c++) arg_oof[held[c]] = pred[c];
+    }
+    rc = 0;
+done:
+    free(rows); free(held); free(ysub); free(Ksub); free(Kx); free(al); free(pred);
+    (void)alpha_pow;
+    return rc;
+}
+
+/* Least squares for y ~ 1 + a + b (3x3 normal equations, Gaussian elimination).
+ * Returns 0 and fills w[3]; -1 if the system is singular. */
+static int stack_weights(const double *y, const double *a, const double *b,
+                         int n, double *w)
+{
+    double M[3][4] = {{0}};
+    for (int i = 0; i < n; i++) {
+        double v[3] = { 1.0, a[i], b[i] };
+        for (int r = 0; r < 3; r++) {
+            for (int c = 0; c < 3; c++) M[r][c] += v[r] * v[c];
+            M[r][3] += v[r] * y[i];
+        }
+    }
+    for (int c = 0; c < 3; c++) {
+        int piv = c;
+        for (int r = c + 1; r < 3; r++) if (fabs(M[r][c]) > fabs(M[piv][c])) piv = r;
+        if (fabs(M[piv][c]) < 1e-12) return -1;
+        if (piv != c) for (int k = 0; k < 4; k++) { double t = M[c][k]; M[c][k] = M[piv][k]; M[piv][k] = t; }
+        for (int r = 0; r < 3; r++) {
+            if (r == c) continue;
+            double fct = M[r][c] / M[c][c];
+            for (int k = c; k < 4; k++) M[r][k] -= fct * M[c][k];
+        }
+    }
+    for (int c = 0; c < 3; c++) w[c] = M[c][3] / M[c][c];
+    return 0;
+}
+
+/* ---- Stage-1 cross-fitting -------------------------------------------------
+ *
+ * Stage 2 fits the ARG random effect to rtrain = y_train - prs_train.  When
+ * prs_train comes from a Stage-1 model fitted on those same individuals, the
+ * residual is IN-SAMPLE: a well-fitting Stage 1 absorbs signal and noise alike,
+ * the residual looks like white noise, and REML sets the ARG variance to zero.
+ * Measured on the phi grid, sargent_u minus bayesR was +0.000000 at every
+ * level, while arg_lmm minus sargent_u was +0.030 -- the ARG carried real
+ * signal that the two-stage arm could not use.  Improving Stage 1 made this
+ * WORSE, since a tighter training fit leaves less residual.
+ *
+ * With --stage1-cv K, prs_train is instead assembled out of fold: Stage 1 is
+ * refitted K times, each on K-1 folds, and each individual is scored by a model
+ * that never saw them.  prs_TEST is deliberately left as the full-data fit --
+ * test individuals were never in training, so there is nothing to cross-fit,
+ * and using folds there would only weaken the predictor.  Consequently the
+ * arms that never touch rtrain (bayesR, snp_lmm, arg_lmm, sargent_w) are
+ * bit-identical with and without the flag.
+ * --------------------------------------------------------------------------- */
+static int s1_cv_folds = 0;      /* 0 or 1 = off */
+static int s1_stack    = 0;      /* --stack: emit the stacked arm */
+
+void predict_set_stack(int on) { s1_stack = on ? 1 : 0; }
+
+void predict_set_stage1_cv(int k) { s1_cv_folds = (k > 1) ? k : 0; }
+
 /* prs[i] = Σ_j X[j,i] beta[j]  (X is p×ncol variant-major; beta length p) */
 static void compute_prs(const double *X, const double *beta, int p, int ncol,
                         double *prs)
@@ -778,8 +948,24 @@ int sargent_predict(sargent_t *sg,
     /* ---- PRS (fixed effect) ---- */
     double *prs_train = malloc((size_t)n_tr * sizeof(double));
     double *prs_test  = malloc((size_t)n_te * sizeof(double));
-    compute_prs(X_train, sg->beta, p, n_tr, prs_train);
+    /* prs_TEST always comes from the full-data Stage 1: the test individuals
+     * were never in training, so there is nothing to cross-fit, and folding it
+     * would only weaken the predictor every arm adds back. */
     compute_prs(X_test,  sg->beta, p, n_te, prs_test);
+
+    if (s1_cv_folds > 1) {
+        if (stage1_oof_prs(sg, X_train, y_train, p, n_tr, s1_cv_folds,
+                           silent, prs_train) != 0) {
+            fprintf(stderr, "predict: stage1-cv failed; falling back to the "
+                            "in-sample PRS\n");
+            compute_prs(X_train, sg->beta, p, n_tr, prs_train);
+        } else if (!silent) {
+            fprintf(stderr, "stage1-cv: %d-fold out-of-fold PRS in use for the "
+                            "Stage-2 residual\n", s1_cv_folds);
+        }
+    } else {
+        compute_prs(X_train, sg->beta, p, n_tr, prs_train);
+    }
     double mean_y_train = 0.0;
     for (int i = 0; i < n_tr; i++) mean_y_train += y_train[i];
     mean_y_train /= n_tr;
@@ -795,7 +981,11 @@ int sargent_predict(sargent_t *sg,
     double *rtrain = malloc((size_t)n_tr * sizeof(double));   /* residual y - Xβ */
     for (int i = 0; i < n_tr; i++) rtrain[i] = y_train[i] - prs_train[i];
 
-    metrics_t m_bayes, m_snp, m_arg, m_su, m_sg, m_w, m_wf;
+    metrics_t m_bayes, m_snp, m_arg, m_su, m_sg, m_w, m_wf, m_stack;
+    /* Full-data ARG test prediction, kept for the stacked arm. */
+    double *arg_test = NULL;
+    double stack_w[3] = {0.0, 0.0, 0.0};
+    int    stack_ok = 0;
     double snp_h2 = NAN, arg_h2 = NAN, sargent_sigma2 = NAN, sargent_rand_r = NAN;
     double arg_su2 = NAN, arg_sigma2 = NAN;
     double s2, su2, mean_fit;
@@ -809,6 +999,10 @@ int sargent_predict(sargent_t *sg,
     double *K_sel_train = NULL, *K_sel_cross = NULL;
     int    bsel_ok = 0;
     double w_h2 = NAN, w_h2_uni = NAN, w_share_sel = NAN, wf_h2 = NAN;
+    if (s1_stack) {
+        arg_test = malloc((size_t)n_te * sizeof(double));
+        if (!arg_test) goto cleanup_pred;
+    }
     if (do_bsel) {
         P_uni = malloc((size_t)n_tr * n_tr * sizeof(double));
         if (!P_uni) goto cleanup_pred;
@@ -840,6 +1034,9 @@ int sargent_predict(sargent_t *sg,
         }
         predict_blup(Kc, n_te, n_tr, alpha, mean_fit, yhat);
         m_arg = compute_metrics(yhat, y_test, n_te);
+        /* Keep the full-data ARG test prediction: stacking blends it with the
+         * PRS rather than fitting one to the other's residual. */
+        if (arg_test) memcpy(arg_test, yhat, (size_t)n_te * sizeof(double));
         arg_h2 = su2 / (su2 + s2);
         arg_su2 = su2; arg_sigma2 = s2;
         free(Kt); free(Kc);
@@ -851,6 +1048,40 @@ int sargent_predict(sargent_t *sg,
     predict_blup(K_uni_cross, n_te, n_tr, alpha, mean_fit, yhat);
     for (int c = 0; c < n_te; c++) yhat[c] += prs_test[c];
     m_su = compute_metrics(yhat, y_test, n_te);
+
+    /* (d2) sargent_stack: BLEND the two predictors instead of fitting one to
+     *      the other's residual.
+     *
+     *      Sequential residualisation asks "what does the ARG add beyond the
+     *      PRS?", and the answer is ~0 whenever the two capture the same
+     *      heritable signal -- even when the ARG ALONE predicts better.  On the
+     *      phi grid sargent_u equalled bayesR to six decimals at every level
+     *      while arg_lmm beat bayesR by up to 0.05.  Stacking asks the question
+     *      that actually matters -- what combination predicts best -- by
+     *      regressing y on the two OUT-OF-FOLD training predictions and
+     *      applying those weights to the full-data test predictions.  Being a
+     *      superset of either component, it cannot do worse than the better one
+     *      except through weight-estimation noise. */
+    if (s1_stack) {
+        double *prs_oof = malloc((size_t)n_tr * sizeof(double));
+        double *arg_oof = malloc((size_t)n_tr * sizeof(double));
+        if (!prs_oof || !arg_oof) { free(prs_oof); free(arg_oof); goto cleanup_pred; }
+        int k = (s1_cv_folds > 1) ? s1_cv_folds : 5;
+        if (stage1_oof_prs(sg, X_train, y_train, p, n_tr, k, 1, prs_oof) == 0 &&
+            arg_oof_blup(K_uni_train, y_train, n_tr, k, 0.0, arg_oof) == 0 &&
+            stack_weights(y_train, prs_oof, arg_oof, n_tr, stack_w) == 0) {
+            for (int c = 0; c < n_te; c++)
+                yhat[c] = stack_w[0] + stack_w[1] * prs_test[c] + stack_w[2] * arg_test[c];
+            m_stack = compute_metrics(yhat, y_test, n_te);
+            stack_ok = 1;
+            if (!silent)
+                fprintf(stderr, "stack: w0=%.4f w_prs=%.4f w_arg=%.4f\n",
+                        stack_w[0], stack_w[1], stack_w[2]);
+        } else {
+            fprintf(stderr, "predict: stacking failed; arm omitted\n");
+        }
+        free(prs_oof); free(arg_oof);
+    }
 
     /* (e) sargent: residual r; center K_sg; BLUP; + Xβ.
      *     Skipped entirely without a Stage-2 ws2 fit -- this is the only arm
@@ -997,6 +1228,12 @@ int sargent_predict(sargent_t *sg,
         fprintf(f, "  \"arg_lmm_su2\": "); json_num(f, arg_su2); fprintf(f, ",\n");
         fprintf(f, "  \"arg_lmm_sigma2\": "); json_num(f, arg_sigma2); fprintf(f, ",\n");
         ARM("sargent_u", m_su);
+        if (stack_ok) {
+            ARM("sargent_stack", m_stack);
+            fprintf(f, "  \"sargent_stack_w_prs\": "); json_num(f, stack_w[1]);
+            fprintf(f, ",\n  \"sargent_stack_w_arg\": "); json_num(f, stack_w[2]);
+            fprintf(f, ",\n");
+        }
         /* `sargent` is OMITTED (not zeroed, not aliased to sargent_u) when there
          * is no Stage-2 ws2, so a consumer that expects it fails loudly rather
          * than silently reading a stand-in.  A flag records why. */

@@ -199,6 +199,7 @@ int main(int argc, char *argv[])
     int ts_geno     = 0;
     int snp_only    = 0;
     int stage1_gibbs = 0, gibbs_iter = 0, gibbs_burn = -1;
+    int stage1_cv = 0, use_stack = 0;
     int arg_only    = 0;
     int nprobe      = 0;   /* 0 = use sargent_t default (10) */
     int uniform_arg = 0;
@@ -255,6 +256,8 @@ int main(int argc, char *argv[])
         {"test-pheno",     1, 0, 0x105},
         {"predict-out",    1, 0, 0x106},
         {"stage1-gibbs",   0, 0, 0x107},
+        {"stage1-cv",      1, 0, 0x120},
+        {"stack",          0, 0, 0x121},
         {"gibbs-iter",     1, 0, 0x108},
         {"gibbs-burn",     1, 0, 0x109},
         {"branch-select",  0, 0, 0x10a},
@@ -272,6 +275,8 @@ int main(int argc, char *argv[])
         case 'G': ts_geno     = 1;                break;
         case 'S': snp_only    = 1;                break;
         case 0x107: stage1_gibbs = 1;             break;
+        case 0x120: stage1_cv = atoi(optarg);    break;
+        case 0x121: use_stack = 1;               break;
         case 0x108: gibbs_iter   = atoi(optarg);  break;
         case 0x109: gibbs_burn   = atoi(optarg);  break;
         case 'A': arg_only    = 1;                break;
@@ -324,6 +329,8 @@ int main(int argc, char *argv[])
     }
 
     var_fixed_set_gibbs(stage1_gibbs, gibbs_iter, gibbs_burn);
+    predict_set_stage1_cv(stage1_cv);
+    predict_set_stack(use_stack);
     if (stage1_gibbs && arg_only) {
         fprintf(stderr, "ERROR: --stage1-gibbs has no effect with --arg-only "
                         "(Stage 1 is skipped).\n");

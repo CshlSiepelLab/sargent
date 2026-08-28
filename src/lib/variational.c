@@ -801,6 +801,13 @@ static void var_fixed_gibbs(sargent_t *sg, int silent, int niter, int burn,
         if (!sg->beta) { fprintf(stderr, "var_fixed_gibbs: out of memory\n"); return; }
     }
 
+    /* Divergence guard; see the use site below.  Relaxed cap, overridable by
+     * the same env var as the deterministic path.  0 disables. */
+    double gibbs_vf_cap = VAR_FIXED_VFCAP_MULTISTART;
+    { const char *e = getenv("SARGENT_S2_VFCAP");
+      if (e) { double v = atof(e); if (v >= 0.0) gibbs_vf_cap = v; } }
+    long n_cap_hits = 0;
+
     double *g        = malloc((size_t)n * sizeof(double));
     double *r        = malloc((size_t)n * sizeof(double));
     double *lw       = malloc((size_t)K * sizeof(double));
@@ -946,6 +953,36 @@ static void var_fixed_gibbs(sargent_t *sg, int silent, int niter, int burn,
             }
         }
 
+        /* DIVERGENCE GUARD, mirroring the var_fixed_run trust region.
+         *
+         * The deterministic path clamps var(X beta) <= vf_cap * var_y each
+         * sweep (see VAR_FIXED_VFCAP).  The sampler had no equivalent, and at
+         * p > n it can walk off along the null space of X: with p/n = 1.8 the
+         * chain holds together, but at p/n = 2.25 -- which is what Stage-1
+         * cross-fitting produces, since each fold drops 1/K of the sample --
+         * beta escapes and var(X beta) reaches ~1e28, giving a PRS
+         * uncorrelated with the phenotype (corr 0.02 against 0.92 in sample).
+         *
+         * The cap is set to the RELAXED value: on this grid it is documented
+         * never to bind on well-behaved fits, so it acts purely as a guard on
+         * genuine blow-up and leaves the stationary distribution alone
+         * wherever the chain is actually equilibrating.  Rescaling beta does
+         * perturb a sampler in principle; that is the deliberate trade, and it
+         * only takes effect on a chain that has already diverged.
+         *
+         * Xbeta = y - r, so the rescale needs no genotype pass. */
+        if (gibbs_vf_cap > 0.0) {
+            double fit_ss = 0.0;
+            for (int i = 0; i < n; i++) { double f = sg->y[i] - r[i]; fit_ss += f * f; }
+            double vf = fit_ss / n, cap = gibbs_vf_cap * var_y;
+            if (vf > cap && vf > 0.0) {
+                double sc = sqrt(cap / vf);
+                for (int j = 0; j < p; j++) sg->beta[j] *= sc;
+                for (int i = 0; i < n; i++) r[i] = (1.0 - sc) * sg->y[i] + sc * r[i];
+                n_cap_hits++;
+            }
+        }
+
         /* sigma2 ~ Inv-Gamma(n/2, r'r/2), flat prior */
         double rr = 0.0;
         for (int i = 0; i < n; i++) rr += r[i] * r[i];
@@ -970,6 +1007,14 @@ static void var_fixed_gibbs(sargent_t *sg, int silent, int niter, int burn,
                     sg->sigma2_mix[K-1]);
         }
     }
+    /* Report the guard rather than let it act silently: if it fired at all, the
+     * chain was diverging and the posterior mean is a rescued quantity, not a
+     * clean sample. */
+    if (n_cap_hits > 0)
+        fprintf(stderr, "var_fixed_gibbs: divergence guard bound on %ld of %d "
+                        "sweeps (var(Xbeta) capped at %.2f*var_y)\n",
+                n_cap_hits, niter, gibbs_vf_cap);
+
 
     /* Posterior means, then sigma2/h2_snp recomputed from the mean beta so the
      * reported summary is coherent with the beta actually written out. */
