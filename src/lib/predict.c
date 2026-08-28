@@ -1002,6 +1002,7 @@ int sargent_predict(sargent_t *sg,
     int    stack_ok = 0;
     double snp_h2 = NAN, arg_h2 = NAN, sargent_sigma2 = NAN, sargent_rand_r = NAN;
     double arg_su2 = NAN, arg_sigma2 = NAN;
+    double su_su2 = NAN, su_sigma2 = NAN;
     double s2, su2, mean_fit;
 
     /* Branch selection (--branch-select).  P is the REML projector of the
@@ -1079,6 +1080,13 @@ int sargent_predict(sargent_t *sg,
      * ever saw it -- not from re-fitting per se. */
     if (fit_blup(rtrain, K_uni_train, n_tr, &s2, &su2, alpha, &mean_fit) != 0)
         goto cleanup_pred;
+    /* Record the ARG variance components behind sargent_u.  They were being
+     * computed and discarded: --silent suppresses the stderr line, so nothing
+     * recorded what was actually fitted.  That is a reproducibility gap on its
+     * own -- the Methods describe fitting these jointly -- and they are also
+     * what a downstream branch score needs, since P must be built from the same
+     * V the score is taken against. */
+    su_su2 = su2; su_sigma2 = s2;
     predict_blup(K_uni_cross, n_te, n_tr, alpha, mean_fit, yhat);
     for (int c = 0; c < n_te; c++) yhat[c] += prs_test[c];
     m_su = compute_metrics(yhat, y_test, n_te);
@@ -1297,6 +1305,9 @@ int sargent_predict(sargent_t *sg,
         fprintf(f, "  \"arg_lmm_su2\": "); json_num(f, arg_su2); fprintf(f, ",\n");
         fprintf(f, "  \"arg_lmm_sigma2\": "); json_num(f, arg_sigma2); fprintf(f, ",\n");
         ARM("sargent_u", m_su);
+        fprintf(f, "  \"sargent_u_su2\": ");    json_num(f, su_su2);
+        fprintf(f, ",\n  \"sargent_u_sigma2\": "); json_num(f, su_sigma2);
+        fprintf(f, ",\n");
         if (stack_ok) {
             ARM("sargent_stack", m_stack);
             fprintf(f, "  \"sargent_stack_w_prs\": "); json_num(f, stack_w[1]);
