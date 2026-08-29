@@ -16,6 +16,27 @@
 #include <stdio.h>
 #include <string.h>
 #include <math.h>
+#include <time.h>
+
+/* ---- per-arm wall clock ---------------------------------------------------
+ * Every invocation computes EVERY arm -- --snp-only, --uniform-arg and --joint
+ * all emit snp_lmm, bayesR, arg_lmm and sargent_u -- so the process wall clock
+ * cannot be attributed to any one flavour, and differencing whole runs is both
+ * imprecise and easy to misread (it was: 186 s was quoted as SARGENT-UR's cost
+ * when the ARG-LMM fit is 0.2 s of it).  These counters time each arm's own
+ * fit, so the JSON carries an honest per-flavour cost.  Emit-only: no arm's
+ * numbers change. */
+/* Phase timers filled in by the driver (sargent.c) for work that happens
+ * BEFORE predict_run is called, so the JSON can attribute it. */
+double sg_t_stage1 = 0.0, sg_t_stage1_f = 0.0, sg_t_gall = 0.0,
+       sg_t_joint = 0.0, sg_t_stage2 = 0.0;
+
+double arm_now(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + 1e-9 * (double)ts.tv_nsec;
+}
 
 #include <tskit.h>
 #include "predict.h"

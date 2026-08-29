@@ -71,3 +71,9 @@ int sargent_predict(sargent_t *sg,
                     const char *out_json_path,
                     const branchsel_opts_t *bsel,
                     int silent);
+
+/* Per-phase wall clock (seconds).  Set by the driver for work that happens
+ * before predict_run, so one run can report a per-flavour cost instead of a
+ * single process time covering every arm. */
+extern double sg_t_stage1, sg_t_stage1_f, sg_t_gall, sg_t_joint, sg_t_stage2;
+double arm_now(void);

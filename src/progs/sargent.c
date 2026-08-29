@@ -541,7 +541,7 @@ int main(int argc, char *argv[])
                 fprintf(stderr, "G_all: --precompute: rebuilding %s\n", gall_path);
         } else {
             /* Try loading cached .gall (must hold the kernel this run needs) */
-            gall = gall_load(gall_path, sg->n, trees_sz, /*use_span=*/1);
+            { double _t = arm_now(); gall = gall_load(gall_path, sg->n, trees_sz, /*use_span=*/1); sg_t_gall += arm_now() - _t; }
             if (gall && !silent)
                 fprintf(stderr, "G_all: loaded %s\n", gall_path);
         }
@@ -555,7 +555,7 @@ int main(int argc, char *argv[])
             /* Span-weight G_all only for the uniform arms (their kernel is the
              * span-weighted eGRM). For the learned arms G_all is used solely as the
              * CG preconditioner, which must match the un-span learned operator. */
-            gall = gall_build(&ts, sg->hap_to_indiv, sg->n, /*use_span=*/1);
+            { double _t = arm_now(); gall = gall_build(&ts, sg->hap_to_indiv, sg->n, /*use_span=*/1); sg_t_gall += arm_now() - _t; }
             if (gall) {
                 if (trees_sz >= 0) {
                     if (gall_save(gall, gall_path, trees_sz) == 0 && !silent)
@@ -593,10 +593,10 @@ int main(int argc, char *argv[])
                     sg->uniform_arg ? ", uniform-random" : "");
 
         if (!silent) fprintf(stderr, "  warm-start Stage 1 (BayesR fit to SNPs)...\n");
-        var_fixed(sg, silent);
+        { double _t = arm_now(); var_fixed(sg, silent); sg_t_stage1 += arm_now() - _t; }
         if (!silent)
             fprintf(stderr, "  warm-start Stage 2 (per-tree REML EM)...\n");
-        var_random(sg, silent);
+        { double _t = arm_now(); var_random(sg, silent); sg_t_stage2 += arm_now() - _t; }
 
         if (!silent)
             fprintf(stderr,
@@ -632,7 +632,8 @@ int main(int argc, char *argv[])
                 if (!silent)
                     fprintf(stderr, "  standalone Stage 1 for SARGENT-F "
                                     "(fixed effects only)...\n");
-                var_fixed(sg, silent);
+                { double _t = arm_now(); { double _t = arm_now(); var_fixed(sg, silent); sg_t_stage1 += arm_now() - _t; }
+                  sg_t_stage1_f = arm_now() - _t; }
                 sg->beta_f = malloc((size_t)sg->p * sizeof(double));
                 if (!sg->beta_f) { fprintf(stderr, "ERROR: out of memory\n"); return 1; }
                 memcpy(sg->beta_f, sg->beta, (size_t)sg->p * sizeof(double));
@@ -642,6 +643,7 @@ int main(int argc, char *argv[])
                                     "components in one chain (%d SNPs, K=%d)...\n",
                             sg->p, sg->K);
                 double j_su2 = 0.0, j_sig2 = 0.0;
+                double _tj = arm_now();
                 if (var_joint_gibbs(sg, sg->gall, silent, gibbs_iter ? gibbs_iter : 3000,
                                     gibbs_burn >= 0 ? gibbs_burn : 1000,
                                     0, &j_su2, &j_sig2) != 0) {
@@ -657,7 +659,7 @@ int main(int argc, char *argv[])
             if (!silent)
                 fprintf(stderr, "Stage 1: inferring fixed effects (%d SNPs, K=%d)...\n",
                         sg->p, sg->K);
-            var_fixed(sg, silent);
+            { double _t = arm_now(); var_fixed(sg, silent); sg_t_stage1 += arm_now() - _t; }
             if (!silent)
                 fprintf(stderr, "Stage 1 done: h2_snp=%.4f  sigma2=%.4f\n",
                         sg->h2_snp, sg->sigma2);
@@ -675,7 +677,7 @@ int main(int argc, char *argv[])
                         use_emma ? ", EMMA eigenspace" :
                         emma_warmstart ? ", EMMA warm-start" : "");
             if (use_emma) {
-                var_random_emma(sg, silent);
+                { double _t = arm_now(); var_random_emma(sg, silent); sg_t_stage2 += arm_now() - _t; }
             } else {
                 if (emma_warmstart) {
                     /* Run EMMA in uniform mode to obtain a fast initialiser for
@@ -690,7 +692,7 @@ int main(int argc, char *argv[])
                     var_random_emma(sg, /*silent=*/1);
                     sg->uniform_arg = 0;
                 }
-                var_random(sg, silent);
+                { double _t = arm_now(); var_random(sg, silent); sg_t_stage2 += arm_now() - _t; }
             }
             if (!silent)
                 fprintf(stderr, "Stage 2 done: h2_arg=%.4f  sigma2=%.4f\n",
