@@ -44,6 +44,12 @@ double arm_now(void)
 #include "sargent.h"
 #include "branchsel.h"
 
+/* Which arms this invocation computes.  SG_MODEL_ALL is the default and
+ * reproduces the historical behaviour exactly. */
+static unsigned g_arm_mask = SG_MODEL_ALL;
+void predict_set_models(unsigned mask) { g_arm_mask = mask ? mask : SG_MODEL_ALL; }
+#define ARM_ON(bits) ((g_arm_mask & (unsigned)(bits)) != 0u)
+
 /* ------------------------------------------------------------------------- *
  * Portable LAPACK declarations (Fortran ABI; same as gall.c's dsyev_).
  * dpotrf: Cholesky factor; dpotri: inverse from factor; dposv: SPD solve.
@@ -1052,16 +1058,24 @@ int sargent_predict(sargent_t *sg,
     }
     m_bayes = compute_metrics(yhat, y_test, n_te);
 
-    /* (b) snp_lmm: center K_g, fit on y_train, BLUP */
-    center_kinship(K_g_train, n_tr, K_g_cross, n_te);
-    if (fit_blup(y_train, K_g_train, n_tr, &s2, &su2, alpha, &mean_fit) != 0) goto cleanup_pred;
-    predict_blup(K_g_cross, n_te, n_tr, alpha, mean_fit, yhat);
-    m_snp = compute_metrics(yhat, y_test, n_te);
-    snp_h2 = su2 / (su2 + s2);
+    /* (b) snp_lmm: center K_g, fit on y_train, BLUP.
+     *
+     * ARM_ON gates the FIT, not merely the JSON write.  That distinction is the
+     * whole point of --model: guarding only the emission still pays for the
+     * work.  Getting it wrong is not hypothetical -- --model snp-lmm once burned
+     * 3.4 hours because the .gall build was skipped while the ARG arm still ran,
+     * and without the cached eigenbasis it took the slow uncached path. */
+    if (ARM_ON(SG_ARM_SNP_LMM)) {
+        center_kinship(K_g_train, n_tr, K_g_cross, n_te);
+        if (fit_blup(y_train, K_g_train, n_tr, &s2, &su2, alpha, &mean_fit) != 0) goto cleanup_pred;
+        predict_blup(K_g_cross, n_te, n_tr, alpha, mean_fit, yhat);
+        m_snp = compute_metrics(yhat, y_test, n_te);
+        snp_h2 = su2 / (su2 + s2);
+    }
 
     /* (c) arg_lmm: center K_uni, fit on y_train, BLUP.  Keep the RAW K_uni for
      *     the sargent_u arm, so center a copy. */
-    {
+    if (ARM_ON(SG_ARM_SARGENT_UR | SG_ARM_SARGENT_U | SG_ARM_STACK)) {
         double *Kt = malloc((size_t)n_tr * n_tr * sizeof(double));
         double *Kc = malloc((size_t)n_te * n_tr * sizeof(double));
         memcpy(Kt, K_uni_train, (size_t)n_tr * n_tr * sizeof(double));

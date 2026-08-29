@@ -200,6 +200,13 @@ int main(int argc, char *argv[])
     int snp_only    = 0;
     int stage1_gibbs = 0, gibbs_iter = 0, gibbs_burn = -1;
     int stage1_cv = 0, use_stack = 0, use_joint = 0;
+    /* --model: name the flavour instead of spelling out the flag combination,
+     * and run ONLY that flavour's prerequisites.  NULL = no --model given, in
+     * which case the legacy flags decide and the mask stays SG_MODEL_ALL so
+     * existing scripts are bit-identical. */
+    const char *model_name = NULL;
+    int model_skip_gall = 0;
+    unsigned arm_mask = SG_MODEL_ALL;
     int arg_only    = 0;
     int nprobe      = 0;   /* 0 = use sargent_t default (10) */
     int uniform_arg = 0;
@@ -255,6 +262,7 @@ int main(int argc, char *argv[])
         {"test-geno",      1, 0, 0x104},
         {"test-pheno",     1, 0, 0x105},
         {"predict-out",    1, 0, 0x106},
+        {"model",          1, 0, 0x130},
         {"stage1-gibbs",   0, 0, 0x107},
         {"stage1-cv",      1, 0, 0x120},
         {"stack",          0, 0, 0x121},
@@ -275,6 +283,7 @@ int main(int argc, char *argv[])
         case 'z': silent      = 1;                break;
         case 'G': ts_geno     = 1;                break;
         case 'S': snp_only    = 1;                break;
+        case 0x130: model_name = optarg;          break;
         case 0x107: stage1_gibbs = 1;             break;
         case 0x120: stage1_cv = atoi(optarg);    break;
         case 0x121: use_stack = 1;               break;
@@ -329,6 +338,58 @@ int main(int argc, char *argv[])
                 "(see ROADMAP.md, Phase 7).\n");
         exit(EXIT_FAILURE);
     }
+
+    /* ---- --model: name -> arms -> prerequisites ---------------------------
+     * Each model implies which arms are emitted AND which expensive stages have
+     * to run.  Skipping the rest is the point: on a cold .gall cache the
+     * Stage-1 Gibbs is ~186 s and building G_all ~123 s, so a user who wants
+     * only SARGENT-UR was paying ~186 s of Stage 1 they never used, and one who
+     * wants only SARGENT-F ~123 s of genealogy work they never used. */
+    if (model_name) {
+        struct { const char *name; unsigned arms; } models[] = {
+            { "snp-lmm",    SG_ARM_SNP_LMM    },
+            { "sargent-f",  SG_ARM_SARGENT_F  },
+            { "sargent-ur", SG_ARM_SARGENT_UR },
+            { "sargent-u",  SG_ARM_SARGENT_U  },
+            { "sargent-r",  SG_ARM_SARGENT_R  },
+            { "sargent-w",  SG_ARM_SARGENT_W  },
+            { "sargent-wf", SG_ARM_SARGENT_WF },
+            { "all",        SG_MODEL_ALL      },
+        };
+        size_t nm = sizeof(models) / sizeof(models[0]), mi;
+        for (mi = 0; mi < nm; mi++)
+            if (strcmp(model_name, models[mi].name) == 0) break;
+        if (mi == nm) {
+            fprintf(stderr, "ERROR: unknown --model '%s'.  Choose one of:", model_name);
+            for (size_t k = 0; k < nm; k++) fprintf(stderr, " %s", models[k].name);
+            fprintf(stderr, "\n");
+            return 1;
+        }
+        arm_mask = models[mi].arms;
+
+        /* Derive the PREREQUISITES from the arms, not from the legacy flags.
+         * Overloading --snp-only / --arg-only here was wrong: they are a blunt
+         * pair (one skips Stage 2, the other skips Stage 1) and setting both, or
+         * setting --arg-only alongside --stage1-gibbs, trips the parser's own
+         * consistency checks.  These booleans say exactly what each model needs. */
+        /* SARGENT-R is the ARG-ONLY learned-ws^2 model: the repo harvests it with
+         * `--arg-only --predict` and reads the `sargent` key, so it needs Stage 2
+         * but NOT Stage 1.  Listing it under need_stage1 was wrong. */
+        int need_stage1 = (arm_mask & (SG_ARM_SARGENT_F | SG_ARM_SARGENT_U |
+                                       SG_ARM_SARGENT_WF)) != 0;
+        int need_gall   = (arm_mask & (SG_ARM_SARGENT_UR | SG_ARM_SARGENT_U |
+                                       SG_ARM_SARGENT_R  | SG_ARM_SARGENT_W |
+                                       SG_ARM_SARGENT_WF)) != 0;
+        int need_stage2 = (arm_mask & SG_ARM_SARGENT_R) != 0;
+
+        if (arm_mask & (SG_ARM_SARGENT_U | SG_ARM_SARGENT_WF)) use_joint = 1;
+        if (arm_mask & (SG_ARM_SARGENT_W | SG_ARM_SARGENT_WF)) bsel_on   = 1;
+        if (!need_stage2) uniform_arg = 1;   /* only sargent-r fits the per-tree ws^2 */
+        if (!need_stage1) arg_only    = 1;   /* --arg-only IS "skip Stage 1"          */
+        else              stage1_gibbs = 1;  /* variational Stage 1 is not at parity  */
+        model_skip_gall = !need_gall;        /* checked at the .gall build site       */
+    }
+    predict_set_models(arm_mask);
 
     var_fixed_set_gibbs(stage1_gibbs, gibbs_iter, gibbs_burn);
     predict_set_stage1_cv(stage1_cv);
@@ -509,7 +570,10 @@ int main(int argc, char *argv[])
      * --precompute is passed or on first use with --uniform-arg.
      * -------------------------------------------------------------------- */
     gall_t *gall = NULL;
-    {
+    /* A model with no ARG arm (snp-lmm, sargent-f) must not pay for G_all:
+     * building and eigendecomposing it is ~123 s on a 500-sample cell. */
+    int skip_gall = model_skip_gall;
+    if (!skip_gall) {
         /* Derive the .gall path from the .trees path by stripping the extension.
          *
          * TWO KERNELS, TWO FILES.  gall_build produces the span-weighted eGRM

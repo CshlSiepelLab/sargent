@@ -72,6 +72,27 @@ int sargent_predict(sargent_t *sg,
                     const branchsel_opts_t *bsel,
                     int silent);
 
+
+/* ---- Named model selection (--model) --------------------------------------
+ * Historically every invocation computed every arm, so a user who wanted one
+ * flavour paid for all of them: arg_lmm came out identical under --snp-only,
+ * --uniform-arg and --joint, and on a cold .gall cache 45-65% of the runtime
+ * was work the requested model never used.  These bits let the driver skip the
+ * prerequisites no selected arm needs.  SG_MODEL_ALL reproduces the old
+ * behaviour exactly and stays the default. */
+#define SG_ARM_SNP_LMM     (1u << 0)   /* snp_lmm     typed-SNP GRM BLUP      */
+#define SG_ARM_SARGENT_F   (1u << 1)   /* bayesR      fixed effects only      */
+#define SG_ARM_SARGENT_UR  (1u << 2)   /* arg_lmm     uniform ARG BLUP        */
+#define SG_ARM_SARGENT_U   (1u << 3)   /* sargent_u   fixed + ARG, jointly    */
+#define SG_ARM_SARGENT_R   (1u << 4)   /* sargent     Stage-2 learned ws^2    */
+#define SG_ARM_SARGENT_W   (1u << 5)   /* sargent_w   branch-selected ARG     */
+#define SG_ARM_SARGENT_WF  (1u << 6)   /* sargent_wf  branch-selected + fixed */
+#define SG_ARM_STACK       (1u << 7)   /* sargent_stack                       */
+#define SG_MODEL_ALL       (0xFFu)
+
+/* Which arms to compute and emit.  Default SG_MODEL_ALL. */
+void predict_set_models(unsigned mask);
+
 /* Per-phase wall clock (seconds).  Set by the driver for work that happens
  * before predict_run, so one run can report a per-flavour cost instead of a
  * single process time covering every arm. */
