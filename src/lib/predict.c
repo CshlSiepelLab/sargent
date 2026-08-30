@@ -935,11 +935,25 @@ int sargent_predict(sargent_t *sg,
         }
     }
 
-    if (build_kinship_blocks(&full, n_tr, n_te, h2i_full, S_full, ws2_full,
-                             K_uni_train, K_uni_cross,
-                             K_sg_train, K_sg_cross, silent, sg_span) != 0) {
-        fprintf(stderr, "predict: kinship block build failed\n");
-        goto cleanup_kin;
+    /* THE expensive step: n_tr tree passes over the full ARG (500 x 1741 here).
+     * Skip it outright when no requested arm needs an ARG kinship.  Gating the
+     * arms alone was not enough -- with --model snp-lmm this walk still ran and
+     * took 7226 s, because skipping the .gall cache removes the shortcut but not
+     * the work.  The mask, not the cache, has to decide. */
+    const unsigned ARG_ARMS = SG_ARM_SARGENT_UR | SG_ARM_SARGENT_U |
+                              SG_ARM_SARGENT_R  | SG_ARM_SARGENT_W |
+                              SG_ARM_SARGENT_WF | SG_ARM_STACK;
+    int need_arg_kinship = ARM_ON(ARG_ARMS);
+    if (need_arg_kinship) {
+        if (build_kinship_blocks(&full, n_tr, n_te, h2i_full, S_full, ws2_full,
+                                 K_uni_train, K_uni_cross,
+                                 K_sg_train, K_sg_cross, silent, sg_span) != 0) {
+            fprintf(stderr, "predict: kinship block build failed\n");
+            goto cleanup_kin;
+        }
+    } else if (!silent) {
+        fprintf(stderr, "predict: no ARG arm requested; skipping the kinship "
+                        "tree walk (%d passes over %d trees)\n", n_tr, S_full);
     }
 
     /* ---- genotypes ---- */
@@ -1096,35 +1110,39 @@ int sargent_predict(sargent_t *sg,
         free(Kt); free(Kc);
     }
 
-    /* (d) sargent_u: residual r; center K_uni (in place now); BLUP; + Xβ */
-    center_kinship(K_uni_train, n_tr, K_uni_cross, n_te);
-    /* JOINT fit: nothing special is needed here, and that is the point.
-     *
-     * An earlier version passed the joint su2 straight through to the BLUP.
-     * That is WRONG on scale: var_joint_gibbs works in the eigenbasis of the
-     * .gall G_all, which is neither centred nor normalised, whereas
-     * K_uni_train here is double-centred and mean-diag normalised.  The two
-     * su2 live in different units (the C printed su2 = 0.00000 against the
-     * prototype's 0.955; sigma2 agreed to four decimals, which is what
-     * identified the mismatch as scale rather than failure).
-     *
-     * Re-fitting REML on the residual is both correctly scaled AND sound here,
-     * because the residual is now honest: beta came from a joint fit and so did
-     * not over-claim the shared signal.  The collapse this whole change exists
-     * to fix came from a SEQUENTIAL beta absorbing everything before Stage 2
-     * ever saw it -- not from re-fitting per se. */
-    if (fit_blup(rtrain, K_uni_train, n_tr, &s2, &su2, alpha, &mean_fit) != 0)
-        goto cleanup_pred;
-    /* Record the ARG variance components behind sargent_u.  They were being
-     * computed and discarded: --silent suppresses the stderr line, so nothing
-     * recorded what was actually fitted.  That is a reproducibility gap on its
-     * own -- the Methods describe fitting these jointly -- and they are also
-     * what a downstream branch score needs, since P must be built from the same
-     * V the score is taken against. */
-    su_su2 = su2; su_sigma2 = s2;
-    predict_blup(K_uni_cross, n_te, n_tr, alpha, mean_fit, yhat);
-    for (int c = 0; c < n_te; c++) yhat[c] += prs_test[c];
-    m_su = compute_metrics(yhat, y_test, n_te);
+    /* (d) sargent_u: residual r; center K_uni (in place now); BLUP; + Xβ.
+     * Gated: it consumes K_uni, so leaving it ungated is what forced the kinship
+     * walk to run even for --model snp-lmm. */
+    if (ARM_ON(SG_ARM_SARGENT_U | SG_ARM_SARGENT_WF | SG_ARM_STACK)) {
+        center_kinship(K_uni_train, n_tr, K_uni_cross, n_te);
+        /* JOINT fit: nothing special is needed here, and that is the point.
+         *
+         * An earlier version passed the joint su2 straight through to the BLUP.
+         * That is WRONG on scale: var_joint_gibbs works in the eigenbasis of the
+         * .gall G_all, which is neither centred nor normalised, whereas
+         * K_uni_train here is double-centred and mean-diag normalised.  The two
+         * su2 live in different units (the C printed su2 = 0.00000 against the
+         * prototype's 0.955; sigma2 agreed to four decimals, which is what
+         * identified the mismatch as scale rather than failure).
+         *
+         * Re-fitting REML on the residual is both correctly scaled AND sound here,
+         * because the residual is now honest: beta came from a joint fit and so did
+         * not over-claim the shared signal.  The collapse this whole change exists
+         * to fix came from a SEQUENTIAL beta absorbing everything before Stage 2
+         * ever saw it -- not from re-fitting per se. */
+        if (fit_blup(rtrain, K_uni_train, n_tr, &s2, &su2, alpha, &mean_fit) != 0)
+            goto cleanup_pred;
+        /* Record the ARG variance components behind sargent_u.  They were being
+         * computed and discarded: --silent suppresses the stderr line, so nothing
+         * recorded what was actually fitted.  That is a reproducibility gap on its
+         * own -- the Methods describe fitting these jointly -- and they are also
+         * what a downstream branch score needs, since P must be built from the same
+         * V the score is taken against. */
+        su_su2 = su2; su_sigma2 = s2;
+        predict_blup(K_uni_cross, n_te, n_tr, alpha, mean_fit, yhat);
+        for (int c = 0; c < n_te; c++) yhat[c] += prs_test[c];
+        m_su = compute_metrics(yhat, y_test, n_te);
+    }
 
     /* (d2) sargent_stack: BLEND the two predictors instead of fitting one to
      *      the other's residual.
@@ -1163,7 +1181,7 @@ int sargent_predict(sargent_t *sg,
     /* (e) sargent: residual r; center K_sg; BLUP; + Xβ.
      *     Skipped entirely without a Stage-2 ws2 fit -- this is the only arm
      *     that needs it, and the JSON below omits it rather than substituting. */
-    if (have_ws2) {
+    if (have_ws2 && ARM_ON(SG_ARM_SARGENT_R)) {
     center_kinship(K_sg_train, n_tr, K_sg_cross, n_te);
     if (fit_blup(rtrain, K_sg_train, n_tr, &s2, &su2, alpha, &mean_fit) != 0) goto cleanup_pred;
     predict_blup(K_sg_cross, n_te, n_tr, alpha, mean_fit, yhat);

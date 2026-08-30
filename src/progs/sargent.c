@@ -354,7 +354,17 @@ int main(int argc, char *argv[])
             { "sargent-r",  SG_ARM_SARGENT_R  },
             { "sargent-w",  SG_ARM_SARGENT_W  },
             { "sargent-wf", SG_ARM_SARGENT_WF },
-            { "all",        SG_MODEL_ALL      },
+            /* "all" is the FIGURE set, and deliberately excludes SARGENT-R.
+             * SARGENT-R is a different Stage 2 -- the per-tree learned ws^2 fit
+             * -- and it is ~19x the cost of every other arm combined (3992 s
+             * against 215 s on the benchmark cell).  Bundling it into "all"
+             * made --model all 9x slower than the invocation it was meant to
+             * replace.  Excluding it also makes "all" an exact drop-in for what
+             * every figure driver already runs (--stage1-gibbs --joint
+             * --branch-select --uniform-arg); SARGENT-R stays available as its
+             * own model, which is how the repo already harvests it (into
+             * est_r.predict.json, via a separate --arg-only pass). */
+            { "all",        SG_MODEL_ALL & ~SG_ARM_SARGENT_R },
         };
         size_t nm = sizeof(models) / sizeof(models[0]), mi;
         for (mi = 0; mi < nm; mi++)
