@@ -415,7 +415,16 @@ int main(int argc, char *argv[])
 
         if (arm_mask & (SG_ARM_SARGENT_U | SG_ARM_SARGENT_WF)) use_joint = 1;
         if (arm_mask & (SG_ARM_SARGENT_W | SG_ARM_SARGENT_WF)) bsel_on   = 1;
-        if (!need_stage2) uniform_arg = 1;   /* only sargent-r fits the per-tree ws^2 */
+        /* NOT setting uniform_arg here.  It was set to make Stage 2 cheap for
+         * models that do not want the learned ws^2 -- but Stage 2 is now SKIPPED
+         * for those models, so the assignment is dead, and it still wrote a
+         * misleading "uniform_arg": true into the JSON of models with no ARG
+         * term at all.  It is safe to drop: sg->uniform_arg reaches prediction
+         * only through sg_span, which gates the LEARNED accumulator (K_sg) that
+         * only SARGENT-R reads.  SARGENT-R wants uniform_arg = 0 by definition,
+         * since learned per-tree weights are what it is.  This retires the last
+         * of the --snp-only / --arg-only / --uniform-arg overloading, each layer
+         * of which produced a different wrong answer earlier in this branch. */
         if (!need_stage1) arg_only    = 1;   /* --arg-only IS "skip Stage 1"          */
         else              stage1_gibbs = 1;  /* variational Stage 1 is not at parity  */
         model_skip_gall = !need_gall;        /* checked at the .gall build site       */

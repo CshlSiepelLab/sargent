@@ -1377,7 +1377,15 @@ int sargent_predict(sargent_t *sg,
         /* `sargent` is OMITTED (not zeroed, not aliased to sargent_u) when there
          * is no Stage-2 ws2, so a consumer that expects it fails loudly rather
          * than silently reading a stand-in.  A flag records why. */
-        if (have_ws2) {
+        /* have_ws2 alone is not enough: with --model excluding SARGENT-R the ws2
+         * buffer can exist while Stage 2 never ran, and the arm was emitted as a
+         * FABRICATED ZERO (r2 = 0, r2_calib = 0, sargent_sigma2 = nan).  An
+         * aggregator reading that key sees 0.0 and treats it as a real, terrible
+         * result -- it does not look like missing data.  Emit the arm only when
+         * it was actually computed; otherwise take the existing omission path,
+         * which downstream already understands (aggregate_fig23.py checks for
+         * sargent_omitted). */
+        if (have_ws2 && ARM_ON(SG_ARM_SARGENT_R)) {
             ARM("sargent", m_sg);
             fprintf(f, "  \"sargent_sigma2\": "); json_num(f, sargent_sigma2);
             if (true_random) {
@@ -1386,8 +1394,8 @@ int sargent_predict(sargent_t *sg,
             fprintf(f, "\n");
         } else {
             fprintf(f, "  \"sargent_omitted\": \"no Stage-2 ws2 fit "
-                       "(--snp-only); arms reported: bayesR, snp_lmm, arg_lmm, "
-                       "sargent_u\"\n");
+                       "(--snp-only, or --model without sargent-r); arms "
+                       "reported: bayesR, snp_lmm, arg_lmm, sargent_u\"\n");
         }
         if (bsel_ok) {
             fprintf(f, ",\n");
