@@ -1089,7 +1089,14 @@ int sargent_predict(sargent_t *sg,
 
     /* (c) arg_lmm: center K_uni, fit on y_train, BLUP.  Keep the RAW K_uni for
      *     the sargent_u arm, so center a copy. */
-    if (ARM_ON(SG_ARM_SARGENT_UR | SG_ARM_SARGENT_U | SG_ARM_STACK)) {
+    /* SARGENT-W and -WF must be here too: this block's fit_blup_m call is what
+     * FILLS P_uni, the REML projector the branch scores are taken against.
+     * Gating it out left every score at 0, so selection picked nothing and
+     * sargent_w silently fell back to the uniform kinship -- reporting exactly
+     * arg_lmm's value, which is also the documented signature of k=0 and so
+     * looks like a plausible result rather than a failure. */
+    if (ARM_ON(SG_ARM_SARGENT_UR | SG_ARM_SARGENT_U | SG_ARM_STACK |
+               SG_ARM_SARGENT_W  | SG_ARM_SARGENT_WF)) {
         double *Kt = malloc((size_t)n_tr * n_tr * sizeof(double));
         double *Kc = malloc((size_t)n_te * n_tr * sizeof(double));
         memcpy(Kt, K_uni_train, (size_t)n_tr * n_tr * sizeof(double));

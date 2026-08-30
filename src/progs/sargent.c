@@ -351,6 +351,15 @@ int main(int argc, char *argv[])
             { "sargent-f",  SG_ARM_SARGENT_F  },
             { "sargent-ur", SG_ARM_SARGENT_UR },
             { "sargent-u",  SG_ARM_SARGENT_U  },
+            /* ADVANCED / legacy.  SARGENT-R is the per-tree learned-ws^2 Stage 2:
+             * ~19x the cost of every other arm combined (3992 s against 215 s),
+             * already retired from every figure, and superseded by branch
+             * selection for localisation and by the joint fit for prediction.
+             * Kept addressable so old results can be reproduced, but it is not
+             * listed among the primary models and nothing reaches it by
+             * default.  Adam, 2026-08-30: "I can't see much reason to keep
+             * SARGENT-R at all.  At most it should be gated by seldom used
+             * options." */
             { "sargent-r",  SG_ARM_SARGENT_R  },
             { "sargent-w",  SG_ARM_SARGENT_W  },
             { "sargent-wf", SG_ARM_SARGENT_WF },
@@ -371,8 +380,12 @@ int main(int argc, char *argv[])
             if (strcmp(model_name, models[mi].name) == 0) break;
         if (mi == nm) {
             fprintf(stderr, "ERROR: unknown --model '%s'.  Choose one of:", model_name);
-            for (size_t k = 0; k < nm; k++) fprintf(stderr, " %s", models[k].name);
-            fprintf(stderr, "\n");
+            for (size_t k = 0; k < nm; k++)
+                if (strcmp(models[k].name, "sargent-r") != 0)
+                    fprintf(stderr, " %s", models[k].name);
+            fprintf(stderr, "\n  (sargent-r is also accepted: the legacy per-tree "
+                            "learned-ws^2 fit, ~19x slower and retired from the "
+                            "figures)\n");
             return 1;
         }
         arm_mask = models[mi].arms;
