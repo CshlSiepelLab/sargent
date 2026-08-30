@@ -205,7 +205,7 @@ int main(int argc, char *argv[])
      * which case the legacy flags decide and the mask stays SG_MODEL_ALL so
      * existing scripts are bit-identical. */
     const char *model_name = NULL;
-    int model_skip_gall = 0;
+    int model_skip_gall = 0, model_skip_stage2 = 0;
     unsigned arm_mask = SG_MODEL_ALL;
     int arg_only    = 0;
     int nprobe      = 0;   /* 0 = use sargent_t default (10) */
@@ -419,6 +419,13 @@ int main(int argc, char *argv[])
         if (!need_stage1) arg_only    = 1;   /* --arg-only IS "skip Stage 1"          */
         else              stage1_gibbs = 1;  /* variational Stage 1 is not at parity  */
         model_skip_gall = !need_gall;        /* checked at the .gall build site       */
+        /* Only SARGENT-R consumes Stage 2's ws^2 (the `sargent` arm reads it via
+         * have_ws2).  Setting uniform_arg made Stage 2 CHEAP but still ran it --
+         * a full uniform-kinship REML over ~1500 trees returning h2_arg = 0.0000
+         * for a fixed-effects-only model.  That was the whole of --model
+         * sargent-f's 3x: 704 s against 228 s for the legacy --snp-only, which
+         * skips Stage 2 outright. */
+        model_skip_stage2 = !need_stage2;
     }
     predict_set_models(arm_mask);
 
@@ -691,7 +698,8 @@ int main(int argc, char *argv[])
         { double _t = arm_now(); var_fixed(sg, silent); sg_t_stage1 += arm_now() - _t; }
         if (!silent)
             fprintf(stderr, "  warm-start Stage 2 (per-tree REML EM)...\n");
-        { double _t = arm_now(); var_random(sg, silent); sg_t_stage2 += arm_now() - _t; }
+        if (!model_skip_stage2) { double _t = arm_now(); var_random(sg, silent); sg_t_stage2 += arm_now() - _t; }
+        else if (!silent) fprintf(stderr, "  Stage 2 skipped: no arm needs the per-tree weights\n");
 
         if (!silent)
             fprintf(stderr,
@@ -772,7 +780,8 @@ int main(int argc, char *argv[])
                         use_emma ? ", EMMA eigenspace" :
                         emma_warmstart ? ", EMMA warm-start" : "");
             if (use_emma) {
-                { double _t = arm_now(); var_random_emma(sg, silent); sg_t_stage2 += arm_now() - _t; }
+                if (!model_skip_stage2) { double _t = arm_now(); var_random_emma(sg, silent); sg_t_stage2 += arm_now() - _t; }
+        else if (!silent) fprintf(stderr, "  Stage 2 skipped: no arm needs the per-tree weights\n");
             } else {
                 if (emma_warmstart) {
                     /* Run EMMA in uniform mode to obtain a fast initialiser for
@@ -787,7 +796,8 @@ int main(int argc, char *argv[])
                     var_random_emma(sg, /*silent=*/1);
                     sg->uniform_arg = 0;
                 }
-                { double _t = arm_now(); var_random(sg, silent); sg_t_stage2 += arm_now() - _t; }
+                if (!model_skip_stage2) { double _t = arm_now(); var_random(sg, silent); sg_t_stage2 += arm_now() - _t; }
+        else if (!silent) fprintf(stderr, "  Stage 2 skipped: no arm needs the per-tree weights\n");
             }
             if (!silent)
                 fprintf(stderr, "Stage 2 done: h2_arg=%.4f  sigma2=%.4f\n",
