@@ -151,6 +151,32 @@ fix, audit only.
 
 Adam is the PI; you are doing his bidding. Hold to these:
 
+### NEVER kill processes by command-line pattern
+
+`pkill -f <pat>`, `pgrep -f <pat>` and `awk '/<pat>/ {print $1}'` all match **the
+shell running the command**, because that shell's own command line contains the
+pattern. The result is that the session kills itself (exit 143/144) and, worse,
+can kill unrelated processes that happen to match. This has happened repeatedly
+in this project, including once to a *different session's* jobs.
+
+**The rule:** never put the target's name in the same command that kills.
+
+```bash
+# WRONG -- matches this very shell, kills the session
+pkill -f myjob.sh
+for p in $(pgrep -f myjob.py); do kill $p; done
+
+# RIGHT -- three steps, and every PID verified before it is signalled
+pgrep -u "$USER" -x sargent                 # exact comm, never -f
+cat /proc/<PID>/cmdline | tr '\0' ' '       # confirm it is the intended job
+kill -TERM <PID>                            # explicit numeric PID, separate call
+```
+
+Use `pgrep -x <comm>` (exact process name) rather than `-f`. When a pattern is
+genuinely needed, read `/proc/<pid>/cmdline` for each candidate and skip `$$`.
+Prefer PID files written at launch. Verify identity (uid, `comm`, cmdline)
+immediately before signalling, and never kill anything you did not start.
+
 - **Never push to `main` or open a PR without Adam's explicit "go".** Commits
   are okay if asked; PR + merge requires "PR + merge" or similar.
 - **Long simulation runs (Block 1.1 v1, Block 1.2, etc.) require explicit
