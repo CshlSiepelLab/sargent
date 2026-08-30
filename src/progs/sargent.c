@@ -373,7 +373,15 @@ int main(int argc, char *argv[])
              * --branch-select --uniform-arg); SARGENT-R stays available as its
              * own model, which is how the repo already harvests it (into
              * est_r.predict.json, via a separate --arg-only pass). */
-            { "all",        SG_MODEL_ALL & ~SG_ARM_SARGENT_R },
+            /* "all" = the arms the FIGURES actually read, and nothing else.
+             * Excluded: SARGENT-R (~19x, retired), and SARGENT-W / -WF, which
+             * are retired too -- verified zero rows in every committed figure
+             * CSV and absent from every aggregator's arm list -- yet every
+             * driver still passes --branch-select and computes them.  Adam,
+             * 2026-08-30: sargent-w "should also never be run by default".
+             * Both remain addressable as their own models. */
+            { "all",        SG_MODEL_ALL & ~(SG_ARM_SARGENT_R | SG_ARM_SARGENT_W |
+                                             SG_ARM_SARGENT_WF) },
         };
         size_t nm = sizeof(models) / sizeof(models[0]), mi;
         for (mi = 0; mi < nm; mi++)
