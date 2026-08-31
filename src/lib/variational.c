@@ -1157,6 +1157,7 @@ int var_joint_gibbs(sargent_t *sg, const gall_t *gl, int silent,
 
     const double var_y = vec_var(sg->y, n);
     double su2 = var_y * 0.5, se2 = var_y * 0.5;
+    double pve_sum = 0.0, pve_fix = 0.0, pve_rand = 0.0; long pve_n = 0;
 
     /* Mixture grid, as var_fixed_gibbs uses it. */
     double *s2mix = malloc((size_t)K * sizeof(double));
@@ -1229,12 +1230,62 @@ int var_joint_gibbs(sargent_t *sg, const gall_t *gl, int silent,
          * utilde_i ~ N(0, su2*lambda_i) independent -- what the rotation buys. */
         {
             double su2n = 0.0, se2n = 0.0; long npos = 0;
+            /* BSLMM-STYLE PVE, accumulated here because this loop already has
+             * everything it needs.  m is E[utilde_i | r] and v its posterior
+             * variance, so Var(u) = (1/n) sum (m^2 + v); and since r = yrot -
+             * Xrot.beta, the fixed part is yrot - r.  U is orthonormal, so by
+             * Parseval both variances are the same in the rotated basis as in
+             * the original one.
+             *
+             * WHY BOTHER: h2 = su2/(su2+se2) is a PLUG-IN of the fitted
+             * components, and it inflates when the kernel is misspecified --
+             * su2 grows to compensate.  Measured on the phi grid, the ARG
+             * plug-in is biased +0.028 -> +0.093 (h2=0.8) and up to +0.166
+             * (h2=0.5).  The two estimators that ARE accurate there, GCTB's
+             * BayesR PVE and BSLMM (mean |bias| 0.013 and 0.011), are both
+             * REALIZED-variance posterior quantities of exactly this form.
+             * SARGENT is structurally BSLMM with the ARG kernel in place of the
+             * SNP one, so the same estimator transfers directly. */
+            double vg_fix = 0.0, vg_rand = 0.0, vg_tot = 0.0, vg_mean = 0.0;
             for (int i = 0; i < n; i++) {
                 double d = su2 * lam[i] + se2; if (d < 1e-12) d = 1e-12;
                 double m = (su2 * lam[i] / d) * r[i];
                 double v = (su2 * lam[i]) * se2 / d;
                 if (lam[i] > 1e-12) { su2n += (m * m + v) / lam[i]; npos++; }
                 se2n += (r[i] - m) * (r[i] - m) + v;
+                /* BSLMM eq. 13-15: PVE = V(Xb + u) / [V(Xb + u) + tau^-1], with
+                 * V(x) the CENTRED mean square.  Two things this gets right that
+                 * summing the parts does not:
+                 *   - it is the variance of the SUM, so it keeps 2*Cov(Xb, u).
+                 *     The joint fit deliberately shares signal between the fixed
+                 *     and genealogical terms, so that cross-term is large; adding
+                 *     V(Xb) + V(u) instead understates the total.
+                 *   - the denominator is the MODEL-implied variance, not the
+                 *     empirical Var(y).
+                 * v is E[Var(u_i | .)], added so the total is E[V(Xb+u)] over the
+                 * posterior rather than the variance of a posterior mean. */
+                double fx = yrot[i] - r[i];
+                double g  = fx + m;
+                vg_fix  += fx * fx;
+                vg_rand += m * m + v;
+                vg_tot  += g * g + v;
+                vg_mean += g;
+            }
+            if (it >= burn) {
+                double vg = vg_tot / (double)n - (vg_mean / (double)n) * (vg_mean / (double)n);
+                if (vg < 0.0) vg = 0.0;
+                double denom = vg + se2;                 /* V(Xb+u) + tau^-1 */
+                if (denom > 1e-12) {
+                    double pge = (vg > 1e-12) ? (vg_fix / (double)n) / vg : 0.0;
+                    if (pge > 1.0) pge = 1.0;
+                    pve_sum  += vg / denom;   /* PVE  (eq. 13) */
+                    pve_fix  += pge;          /* PGE  (eq. 14): sparse share of Vg */
+                    pve_rand += 1.0 - pge;    /* genealogical share of Vg -- the
+                                               * model's own read on how much
+                                               * heritability sits off the typed
+                                               * panel, i.e. an estimate of phi */
+                    pve_n++;
+                }
             }
             su2 = npos ? fmax(su2n / (double)npos, 1e-10 * var_y) : su2;
             se2 = fmax(se2n / n, 1e-10 * var_y);
@@ -1252,6 +1303,11 @@ int var_joint_gibbs(sargent_t *sg, const gall_t *gl, int silent,
 
     for (int j = 0; j < p; j++) sg->beta[j] = bsum[j] / (nsamp ? nsamp : 1);
     sg->sigma2 = se2;
+    if (pve_n) {
+        sg->joint_pve      = pve_sum  / (double)pve_n;
+        sg->joint_pve_fix  = pve_fix  / (double)pve_n;
+        sg->joint_pve_rand = pve_rand / (double)pve_n;
+    }
     if (su2_out)    *su2_out    = su2;
     if (sigma2_out) *sigma2_out = se2;
     if (!silent)

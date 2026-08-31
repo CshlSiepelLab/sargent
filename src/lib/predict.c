@@ -16,12 +16,39 @@
 #include <stdio.h>
 #include <string.h>
 #include <math.h>
+#include <time.h>
+
+/* ---- per-arm wall clock ---------------------------------------------------
+ * Every invocation computes EVERY arm -- --snp-only, --uniform-arg and --joint
+ * all emit snp_lmm, bayesR, arg_lmm and sargent_u -- so the process wall clock
+ * cannot be attributed to any one flavour, and differencing whole runs is both
+ * imprecise and easy to misread (it was: 186 s was quoted as SARGENT-UR's cost
+ * when the ARG-LMM fit is 0.2 s of it).  These counters time each arm's own
+ * fit, so the JSON carries an honest per-flavour cost.  Emit-only: no arm's
+ * numbers change. */
+/* Phase timers filled in by the driver (sargent.c) for work that happens
+ * BEFORE predict_run is called, so the JSON can attribute it. */
+double sg_t_stage1 = 0.0, sg_t_stage1_f = 0.0, sg_t_gall = 0.0,
+       sg_t_joint = 0.0, sg_t_stage2 = 0.0;
+
+double arm_now(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + 1e-9 * (double)ts.tv_nsec;
+}
 
 #include <tskit.h>
 #include "predict.h"
 #include "geno.h"
 #include "sargent.h"
 #include "branchsel.h"
+
+/* Which arms this invocation computes.  SG_MODEL_ALL is the default and
+ * reproduces the historical behaviour exactly. */
+static unsigned g_arm_mask = SG_MODEL_ALL;
+void predict_set_models(unsigned mask) { g_arm_mask = mask ? mask : SG_MODEL_ALL; }
+#define ARM_ON(bits) ((g_arm_mask & (unsigned)(bits)) != 0u)
 
 /* ------------------------------------------------------------------------- *
  * Portable LAPACK declarations (Fortran ABI; same as gall.c's dsyev_).
@@ -34,6 +61,69 @@ extern void dpotri_(const char *uplo, const int *n, double *a, const int *lda,
 extern void dposv_(const char *uplo, const int *n, const int *nrhs,
                    double *a, const int *lda, double *b, const int *ldb,
                    int *info);
+extern void dsyev_(const char *jobz, const char *uplo, const int *n, double *a,
+                   const int *lda, double *w, double *work, const int *lwork,
+                   int *info);
+
+
+/* Realized-variance h^2 for a single-kernel BLUP (SARGENT-UR / arg_lmm).
+ *
+ * The joint chain reports h^2 as Var(Xb + u) / [Var(Xb + u) + sigma2_e] (BSLMM
+ * eq. 13) and is nearly unbiased for it; the REML plug-in su2/(su2+se2) used for
+ * this arm climbs with phi (+0.028 -> +0.094 at h2=0.8, +0.051 -> +0.123 at
+ * h2=0.5) because su2 inflates to absorb a misspecified kernel.  Leaving the two
+ * SARGENT arms on different estimators put two lines in one panel that behave
+ * differently for no reason a reader could infer.
+ *
+ * Same estimator, computed analytically since this arm has no sampler: in the
+ * eigenbasis of the centred K, with r = U^T (y - mean),
+ *     m_i = su2*lam_i/(su2*lam_i + se2) * r_i        posterior mean
+ *     v_i = su2*lam_i*se2/(su2*lam_i + se2)          posterior variance
+ * and Var(u) = (1/n) sum (m_i^2 + v_i) -- the mean-plus-variance form, not the
+ * variance of the posterior mean, which would under-count by exactly the
+ * shrinkage.  One dsyev at n = 1000 costs ~1 s against this arm's ~188 s.
+ * Returns -1 if the decomposition fails, leaving the caller's value untouched. */
+static int realized_h2_1k(const double *K, const double *y, int n,
+                          double su2, double se2, double *out_h2)
+{
+    double *A = malloc((size_t)n * n * sizeof(double));
+    double *w = malloc((size_t)n * sizeof(double));
+    double *r = malloc((size_t)n * sizeof(double));
+    if (!A || !w || !r) { free(A); free(w); free(r); return -1; }
+    memcpy(A, K, (size_t)n * n * sizeof(double));
+
+    int info = 0, lwork = -1; double qwork = 0.0;
+    dsyev_("V", "U", &n, A, &n, w, &qwork, &lwork, &info);
+    if (info != 0) { free(A); free(w); free(r); return -1; }
+    lwork = (int)qwork;
+    double *work = malloc((size_t)lwork * sizeof(double));
+    if (!work) { free(A); free(w); free(r); return -1; }
+    dsyev_("V", "U", &n, A, &n, w, work, &lwork, &info);
+    free(work);
+    if (info != 0) { free(A); free(w); free(r); return -1; }
+
+    double mean = 0.0;
+    for (int i = 0; i < n; i++) mean += y[i];
+    mean /= (double)n;
+    for (int k = 0; k < n; k++) {          /* r = U^T (y - mean) */
+        double s = 0.0;
+        for (int i = 0; i < n; i++) s += A[(size_t)k * n + i] * (y[i] - mean);
+        r[k] = s;
+    }
+    double vg = 0.0;
+    for (int k = 0; k < n; k++) {
+        double lam = w[k] > 0.0 ? w[k] : 0.0;
+        double d = su2 * lam + se2; if (d < 1e-12) d = 1e-12;
+        double m = (su2 * lam / d) * r[k];
+        double v = (su2 * lam) * se2 / d;
+        vg += m * m + v;
+    }
+    vg /= (double)n;
+    free(A); free(w); free(r);
+    if (vg + se2 <= 1e-12) return -1;
+    *out_h2 = vg / (vg + se2);
+    return 0;
+}
 
 /* ------------------------------------------------------------------------- *
  * Small helpers.
@@ -908,11 +998,25 @@ int sargent_predict(sargent_t *sg,
         }
     }
 
-    if (build_kinship_blocks(&full, n_tr, n_te, h2i_full, S_full, ws2_full,
-                             K_uni_train, K_uni_cross,
-                             K_sg_train, K_sg_cross, silent, sg_span) != 0) {
-        fprintf(stderr, "predict: kinship block build failed\n");
-        goto cleanup_kin;
+    /* THE expensive step: n_tr tree passes over the full ARG (500 x 1741 here).
+     * Skip it outright when no requested arm needs an ARG kinship.  Gating the
+     * arms alone was not enough -- with --model snp-lmm this walk still ran and
+     * took 7226 s, because skipping the .gall cache removes the shortcut but not
+     * the work.  The mask, not the cache, has to decide. */
+    const unsigned ARG_ARMS = SG_ARM_SARGENT_UR | SG_ARM_SARGENT_U |
+                              SG_ARM_SARGENT_R  | SG_ARM_SARGENT_W |
+                              SG_ARM_SARGENT_WF | SG_ARM_STACK;
+    int need_arg_kinship = ARM_ON(ARG_ARMS);
+    if (need_arg_kinship) {
+        if (build_kinship_blocks(&full, n_tr, n_te, h2i_full, S_full, ws2_full,
+                                 K_uni_train, K_uni_cross,
+                                 K_sg_train, K_sg_cross, silent, sg_span) != 0) {
+            fprintf(stderr, "predict: kinship block build failed\n");
+            goto cleanup_kin;
+        }
+    } else if (!silent) {
+        fprintf(stderr, "predict: no ARG arm requested; skipping the kinship "
+                        "tree walk (%d passes over %d trees)\n", n_tr, S_full);
     }
 
     /* ---- genotypes ---- */
@@ -1001,7 +1105,8 @@ int sargent_predict(sargent_t *sg,
     double stack_w[3] = {0.0, 0.0, 0.0};
     int    stack_ok = 0;
     double snp_h2 = NAN, arg_h2 = NAN, sargent_sigma2 = NAN, sargent_rand_r = NAN;
-    double arg_su2 = NAN, arg_sigma2 = NAN;
+    double arg_su2 = NAN, arg_sigma2 = NAN, arg_h2_pve = NAN;
+    double su_su2 = NAN, su_sigma2 = NAN;
     double s2, su2, mean_fit;
 
     /* Branch selection (--branch-select).  P is the REML projector of the
@@ -1030,16 +1135,31 @@ int sargent_predict(sargent_t *sg,
     }
     m_bayes = compute_metrics(yhat, y_test, n_te);
 
-    /* (b) snp_lmm: center K_g, fit on y_train, BLUP */
-    center_kinship(K_g_train, n_tr, K_g_cross, n_te);
-    if (fit_blup(y_train, K_g_train, n_tr, &s2, &su2, alpha, &mean_fit) != 0) goto cleanup_pred;
-    predict_blup(K_g_cross, n_te, n_tr, alpha, mean_fit, yhat);
-    m_snp = compute_metrics(yhat, y_test, n_te);
-    snp_h2 = su2 / (su2 + s2);
+    /* (b) snp_lmm: center K_g, fit on y_train, BLUP.
+     *
+     * ARM_ON gates the FIT, not merely the JSON write.  That distinction is the
+     * whole point of --model: guarding only the emission still pays for the
+     * work.  Getting it wrong is not hypothetical -- --model snp-lmm once burned
+     * 3.4 hours because the .gall build was skipped while the ARG arm still ran,
+     * and without the cached eigenbasis it took the slow uncached path. */
+    if (ARM_ON(SG_ARM_SNP_LMM)) {
+        center_kinship(K_g_train, n_tr, K_g_cross, n_te);
+        if (fit_blup(y_train, K_g_train, n_tr, &s2, &su2, alpha, &mean_fit) != 0) goto cleanup_pred;
+        predict_blup(K_g_cross, n_te, n_tr, alpha, mean_fit, yhat);
+        m_snp = compute_metrics(yhat, y_test, n_te);
+        snp_h2 = su2 / (su2 + s2);
+    }
 
     /* (c) arg_lmm: center K_uni, fit on y_train, BLUP.  Keep the RAW K_uni for
      *     the sargent_u arm, so center a copy. */
-    {
+    /* SARGENT-W and -WF must be here too: this block's fit_blup_m call is what
+     * FILLS P_uni, the REML projector the branch scores are taken against.
+     * Gating it out left every score at 0, so selection picked nothing and
+     * sargent_w silently fell back to the uniform kinship -- reporting exactly
+     * arg_lmm's value, which is also the documented signature of k=0 and so
+     * looks like a plausible result rather than a failure. */
+    if (ARM_ON(SG_ARM_SARGENT_UR | SG_ARM_SARGENT_U | SG_ARM_STACK |
+               SG_ARM_SARGENT_W  | SG_ARM_SARGENT_WF)) {
         double *Kt = malloc((size_t)n_tr * n_tr * sizeof(double));
         double *Kc = malloc((size_t)n_te * n_tr * sizeof(double));
         memcpy(Kt, K_uni_train, (size_t)n_tr * n_tr * sizeof(double));
@@ -1057,31 +1177,50 @@ int sargent_predict(sargent_t *sg,
         if (arg_test) memcpy(arg_test, yhat, (size_t)n_te * sizeof(double));
         arg_h2 = su2 / (su2 + s2);
         arg_su2 = su2; arg_sigma2 = s2;
+        /* Same realized-variance estimator the joint chain reports, so the two
+         * SARGENT arms in the h^2 panel are on one footing.  Kt is the CENTRED
+         * train kernel this fit used.  On failure arg_h2 keeps the plug-in. */
+        {
+            double h2r;
+            if (realized_h2_1k(Kt, y_train, n_tr, su2, s2, &h2r) == 0)
+                arg_h2_pve = h2r;
+        }
         free(Kt); free(Kc);
     }
 
-    /* (d) sargent_u: residual r; center K_uni (in place now); BLUP; + Xβ */
-    center_kinship(K_uni_train, n_tr, K_uni_cross, n_te);
-    /* JOINT fit: nothing special is needed here, and that is the point.
-     *
-     * An earlier version passed the joint su2 straight through to the BLUP.
-     * That is WRONG on scale: var_joint_gibbs works in the eigenbasis of the
-     * .gall G_all, which is neither centred nor normalised, whereas
-     * K_uni_train here is double-centred and mean-diag normalised.  The two
-     * su2 live in different units (the C printed su2 = 0.00000 against the
-     * prototype's 0.955; sigma2 agreed to four decimals, which is what
-     * identified the mismatch as scale rather than failure).
-     *
-     * Re-fitting REML on the residual is both correctly scaled AND sound here,
-     * because the residual is now honest: beta came from a joint fit and so did
-     * not over-claim the shared signal.  The collapse this whole change exists
-     * to fix came from a SEQUENTIAL beta absorbing everything before Stage 2
-     * ever saw it -- not from re-fitting per se. */
-    if (fit_blup(rtrain, K_uni_train, n_tr, &s2, &su2, alpha, &mean_fit) != 0)
-        goto cleanup_pred;
-    predict_blup(K_uni_cross, n_te, n_tr, alpha, mean_fit, yhat);
-    for (int c = 0; c < n_te; c++) yhat[c] += prs_test[c];
-    m_su = compute_metrics(yhat, y_test, n_te);
+    /* (d) sargent_u: residual r; center K_uni (in place now); BLUP; + Xβ.
+     * Gated: it consumes K_uni, so leaving it ungated is what forced the kinship
+     * walk to run even for --model snp-lmm. */
+    if (ARM_ON(SG_ARM_SARGENT_U | SG_ARM_SARGENT_WF | SG_ARM_STACK)) {
+        center_kinship(K_uni_train, n_tr, K_uni_cross, n_te);
+        /* JOINT fit: nothing special is needed here, and that is the point.
+         *
+         * An earlier version passed the joint su2 straight through to the BLUP.
+         * That is WRONG on scale: var_joint_gibbs works in the eigenbasis of the
+         * .gall G_all, which is neither centred nor normalised, whereas
+         * K_uni_train here is double-centred and mean-diag normalised.  The two
+         * su2 live in different units (the C printed su2 = 0.00000 against the
+         * prototype's 0.955; sigma2 agreed to four decimals, which is what
+         * identified the mismatch as scale rather than failure).
+         *
+         * Re-fitting REML on the residual is both correctly scaled AND sound here,
+         * because the residual is now honest: beta came from a joint fit and so did
+         * not over-claim the shared signal.  The collapse this whole change exists
+         * to fix came from a SEQUENTIAL beta absorbing everything before Stage 2
+         * ever saw it -- not from re-fitting per se. */
+        if (fit_blup(rtrain, K_uni_train, n_tr, &s2, &su2, alpha, &mean_fit) != 0)
+            goto cleanup_pred;
+        /* Record the ARG variance components behind sargent_u.  They were being
+         * computed and discarded: --silent suppresses the stderr line, so nothing
+         * recorded what was actually fitted.  That is a reproducibility gap on its
+         * own -- the Methods describe fitting these jointly -- and they are also
+         * what a downstream branch score needs, since P must be built from the same
+         * V the score is taken against. */
+        su_su2 = su2; su_sigma2 = s2;
+        predict_blup(K_uni_cross, n_te, n_tr, alpha, mean_fit, yhat);
+        for (int c = 0; c < n_te; c++) yhat[c] += prs_test[c];
+        m_su = compute_metrics(yhat, y_test, n_te);
+    }
 
     /* (d2) sargent_stack: BLEND the two predictors instead of fitting one to
      *      the other's residual.
@@ -1120,7 +1259,7 @@ int sargent_predict(sargent_t *sg,
     /* (e) sargent: residual r; center K_sg; BLUP; + Xβ.
      *     Skipped entirely without a Stage-2 ws2 fit -- this is the only arm
      *     that needs it, and the JSON below omits it rather than substituting. */
-    if (have_ws2) {
+    if (have_ws2 && ARM_ON(SG_ARM_SARGENT_R)) {
     center_kinship(K_sg_train, n_tr, K_sg_cross, n_te);
     if (fit_blup(rtrain, K_sg_train, n_tr, &s2, &su2, alpha, &mean_fit) != 0) goto cleanup_pred;
     predict_blup(K_sg_cross, n_te, n_tr, alpha, mean_fit, yhat);
@@ -1278,6 +1417,12 @@ int sargent_predict(sargent_t *sg,
         fprintf(f, "  \"n_test\": %d,\n", n_te);
         fprintf(f, "  \"n_trees_full\": %d,\n", S_full);
         fprintf(f, "  \"n_trees_train\": %d,\n", S_train);
+        /* ARM_IF emits only when the arm was actually computed.  Without it,
+         * unrequested arms were written as FABRICATED ZEROS -- --model snp-lmm
+         * produced arg_lmm = 0 and sargent_u = 0 beside a correct snp_lmm, and
+         * an aggregator reading those keys sees a real, catastrophic result
+         * rather than missing data.  Same failure as the `sargent` arm. */
+        #define ARM_IF(bit, name, mm) do { if (ARM_ON(bit)) { ARM(name, mm); } } while (0)
         #define ARM(name, mm) do { \
             fprintf(f, "  \"" name "\": {\n"); \
             fprintf(f, "    \"r\": ");        json_num(f, (mm).r);        fprintf(f, ",\n"); \
@@ -1286,17 +1431,32 @@ int sargent_predict(sargent_t *sg,
             fprintf(f, "    \"mse\": ");      json_num(f, (mm).mse);      fprintf(f, "\n"); \
             fprintf(f, "  },\n"); \
         } while (0)
-        ARM("bayesR", m_bayes);
-        ARM("snp_lmm", m_snp);
+        ARM_IF(SG_ARM_SARGENT_F, "bayesR", m_bayes);
+        ARM_IF(SG_ARM_SNP_LMM, "snp_lmm", m_snp);
         fprintf(f, "  \"snp_lmm_h2\": "); json_num(f, snp_h2); fprintf(f, ",\n");
-        ARM("arg_lmm", m_arg);
+        ARM_IF(SG_ARM_SARGENT_UR, "arg_lmm", m_arg);
+        if (arg_h2_pve == arg_h2_pve) {
+            fprintf(f, "  \"arg_lmm_pve\": "); json_num(f, arg_h2_pve); fprintf(f, ",\n");
+        }
         fprintf(f, "  \"arg_lmm_h2\": "); json_num(f, arg_h2); fprintf(f, ",\n");
         /* The variance components of this fit define V, hence the REML projector
          * P that branch scores are taken against.  Emitted so an external
          * reference implementation can rebuild exactly the same background. */
         fprintf(f, "  \"arg_lmm_su2\": "); json_num(f, arg_su2); fprintf(f, ",\n");
         fprintf(f, "  \"arg_lmm_sigma2\": "); json_num(f, arg_sigma2); fprintf(f, ",\n");
-        ARM("sargent_u", m_su);
+        ARM_IF(SG_ARM_SARGENT_U, "sargent_u", m_su);
+        /* BSLMM-style PVE from the joint chain -- a realized-variance estimate,
+         * emitted beside the plug-in so the two can be compared directly on the
+         * same run.  Decomposed into its fixed and random parts. */
+        if (sg->joint_pve > 0.0) {
+            fprintf(f, "  \"sargent_u_pve\": ");        json_num(f, sg->joint_pve);
+            fprintf(f, ",\n  \"sargent_u_pve_fixed\": ");  json_num(f, sg->joint_pve_fix);
+            fprintf(f, ",\n  \"sargent_u_pve_random\": "); json_num(f, sg->joint_pve_rand);
+            fprintf(f, ",\n");
+        }
+        fprintf(f, "  \"sargent_u_su2\": ");    json_num(f, su_su2);
+        fprintf(f, ",\n  \"sargent_u_sigma2\": "); json_num(f, su_sigma2);
+        fprintf(f, ",\n");
         if (stack_ok) {
             ARM("sargent_stack", m_stack);
             fprintf(f, "  \"sargent_stack_w_prs\": "); json_num(f, stack_w[1]);
@@ -1306,7 +1466,15 @@ int sargent_predict(sargent_t *sg,
         /* `sargent` is OMITTED (not zeroed, not aliased to sargent_u) when there
          * is no Stage-2 ws2, so a consumer that expects it fails loudly rather
          * than silently reading a stand-in.  A flag records why. */
-        if (have_ws2) {
+        /* have_ws2 alone is not enough: with --model excluding SARGENT-R the ws2
+         * buffer can exist while Stage 2 never ran, and the arm was emitted as a
+         * FABRICATED ZERO (r2 = 0, r2_calib = 0, sargent_sigma2 = nan).  An
+         * aggregator reading that key sees 0.0 and treats it as a real, terrible
+         * result -- it does not look like missing data.  Emit the arm only when
+         * it was actually computed; otherwise take the existing omission path,
+         * which downstream already understands (aggregate_fig23.py checks for
+         * sargent_omitted). */
+        if (have_ws2 && ARM_ON(SG_ARM_SARGENT_R)) {
             ARM("sargent", m_sg);
             fprintf(f, "  \"sargent_sigma2\": "); json_num(f, sargent_sigma2);
             if (true_random) {
@@ -1315,8 +1483,8 @@ int sargent_predict(sargent_t *sg,
             fprintf(f, "\n");
         } else {
             fprintf(f, "  \"sargent_omitted\": \"no Stage-2 ws2 fit "
-                       "(--snp-only); arms reported: bayesR, snp_lmm, arg_lmm, "
-                       "sargent_u\"\n");
+                       "(--snp-only, or --model without sargent-r); arms "
+                       "reported: bayesR, snp_lmm, arg_lmm, sargent_u\"\n");
         }
         if (bsel_ok) {
             fprintf(f, ",\n");

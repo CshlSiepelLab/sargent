@@ -106,6 +106,18 @@ static void write_beta_table(sargent_t *sg, const char *outroot, int silent)
 
 static void write_w2_table(sargent_t *sg, const char *outroot, int silent)
 {
+    /* Stage 2 may have been skipped (--model without an arm that needs the
+     * per-tree weights), in which case sg->ws2 was never allocated.  Guarding
+     * the var_random() CALL was not enough: the lines that consume its output
+     * still ran, and this function walked a NULL ws2 -- a segfault in
+     * --model snp-lmm and --model sargent-f.  Defensive here rather than at the
+     * call sites, so every caller is covered. */
+    if (!sg->ws2) {
+        if (!silent)
+            fprintf(stderr, "  (no per-tree weights fitted; %s.w2.tsv not written)\n",
+                    outroot);
+        return;
+    }
     int S = sg->S;
     int M = sg->M;
 
@@ -200,6 +212,13 @@ int main(int argc, char *argv[])
     int snp_only    = 0;
     int stage1_gibbs = 0, gibbs_iter = 0, gibbs_burn = -1;
     int stage1_cv = 0, use_stack = 0, use_joint = 0;
+    /* --model: name the flavour instead of spelling out the flag combination,
+     * and run ONLY that flavour's prerequisites.  NULL = no --model given, in
+     * which case the legacy flags decide and the mask stays SG_MODEL_ALL so
+     * existing scripts are bit-identical. */
+    const char *model_name = NULL;
+    int model_skip_gall = 0, model_skip_stage2 = 0;
+    unsigned arm_mask = SG_MODEL_ALL;
     int arg_only    = 0;
     int nprobe      = 0;   /* 0 = use sargent_t default (10) */
     int uniform_arg = 0;
@@ -255,6 +274,7 @@ int main(int argc, char *argv[])
         {"test-geno",      1, 0, 0x104},
         {"test-pheno",     1, 0, 0x105},
         {"predict-out",    1, 0, 0x106},
+        {"model",          1, 0, 0x130},
         {"stage1-gibbs",   0, 0, 0x107},
         {"stage1-cv",      1, 0, 0x120},
         {"stack",          0, 0, 0x121},
@@ -275,6 +295,7 @@ int main(int argc, char *argv[])
         case 'z': silent      = 1;                break;
         case 'G': ts_geno     = 1;                break;
         case 'S': snp_only    = 1;                break;
+        case 0x130: model_name = optarg;          break;
         case 0x107: stage1_gibbs = 1;             break;
         case 0x120: stage1_cv = atoi(optarg);    break;
         case 0x121: use_stack = 1;               break;
@@ -329,6 +350,105 @@ int main(int argc, char *argv[])
                 "(see ROADMAP.md, Phase 7).\n");
         exit(EXIT_FAILURE);
     }
+
+    /* ---- --model: name -> arms -> prerequisites ---------------------------
+     * Each model implies which arms are emitted AND which expensive stages have
+     * to run.  Skipping the rest is the point: on a cold .gall cache the
+     * Stage-1 Gibbs is ~186 s and building G_all ~123 s, so a user who wants
+     * only SARGENT-UR was paying ~186 s of Stage 1 they never used, and one who
+     * wants only SARGENT-F ~123 s of genealogy work they never used. */
+    if (model_name) {
+        struct { const char *name; unsigned arms; } models[] = {
+            { "snp-lmm",    SG_ARM_SNP_LMM    },
+            { "sargent-f",  SG_ARM_SARGENT_F  },
+            { "sargent-ur", SG_ARM_SARGENT_UR },
+            { "sargent-u",  SG_ARM_SARGENT_U  },
+            /* ADVANCED / legacy.  SARGENT-R is the per-tree learned-ws^2 Stage 2:
+             * ~19x the cost of every other arm combined (3992 s against 215 s),
+             * already retired from every figure, and superseded by branch
+             * selection for localisation and by the joint fit for prediction.
+             * Kept addressable so old results can be reproduced, but it is not
+             * listed among the primary models and nothing reaches it by
+             * default.  Adam, 2026-08-30: "I can't see much reason to keep
+             * SARGENT-R at all.  At most it should be gated by seldom used
+             * options." */
+            { "sargent-r",  SG_ARM_SARGENT_R  },
+            { "sargent-w",  SG_ARM_SARGENT_W  },
+            { "sargent-wf", SG_ARM_SARGENT_WF },
+            /* "all" is the FIGURE set, and deliberately excludes SARGENT-R.
+             * SARGENT-R is a different Stage 2 -- the per-tree learned ws^2 fit
+             * -- and it is ~19x the cost of every other arm combined (3992 s
+             * against 215 s on the benchmark cell).  Bundling it into "all"
+             * made --model all 9x slower than the invocation it was meant to
+             * replace.  Excluding it also makes "all" an exact drop-in for what
+             * every figure driver already runs (--stage1-gibbs --joint
+             * --branch-select --uniform-arg); SARGENT-R stays available as its
+             * own model, which is how the repo already harvests it (into
+             * est_r.predict.json, via a separate --arg-only pass). */
+            /* "all" = the arms the FIGURES actually read, and nothing else.
+             * Excluded: SARGENT-R (~19x, retired), and SARGENT-W / -WF, which
+             * are retired too -- verified zero rows in every committed figure
+             * CSV and absent from every aggregator's arm list -- yet every
+             * driver still passes --branch-select and computes them.  Adam,
+             * 2026-08-30: sargent-w "should also never be run by default".
+             * Both remain addressable as their own models. */
+            { "all",        SG_MODEL_ALL & ~(SG_ARM_SARGENT_R | SG_ARM_SARGENT_W |
+                                             SG_ARM_SARGENT_WF) },
+        };
+        size_t nm = sizeof(models) / sizeof(models[0]), mi;
+        for (mi = 0; mi < nm; mi++)
+            if (strcmp(model_name, models[mi].name) == 0) break;
+        if (mi == nm) {
+            fprintf(stderr, "ERROR: unknown --model '%s'.  Choose one of:", model_name);
+            for (size_t k = 0; k < nm; k++)
+                if (strcmp(models[k].name, "sargent-r") != 0)
+                    fprintf(stderr, " %s", models[k].name);
+            fprintf(stderr, "\n  (sargent-r is also accepted: the legacy per-tree "
+                            "learned-ws^2 fit, ~19x slower and retired from the "
+                            "figures)\n");
+            return 1;
+        }
+        arm_mask = models[mi].arms;
+
+        /* Derive the PREREQUISITES from the arms, not from the legacy flags.
+         * Overloading --snp-only / --arg-only here was wrong: they are a blunt
+         * pair (one skips Stage 2, the other skips Stage 1) and setting both, or
+         * setting --arg-only alongside --stage1-gibbs, trips the parser's own
+         * consistency checks.  These booleans say exactly what each model needs. */
+        /* SARGENT-R is the ARG-ONLY learned-ws^2 model: the repo harvests it with
+         * `--arg-only --predict` and reads the `sargent` key, so it needs Stage 2
+         * but NOT Stage 1.  Listing it under need_stage1 was wrong. */
+        int need_stage1 = (arm_mask & (SG_ARM_SARGENT_F | SG_ARM_SARGENT_U |
+                                       SG_ARM_SARGENT_WF)) != 0;
+        int need_gall   = (arm_mask & (SG_ARM_SARGENT_UR | SG_ARM_SARGENT_U |
+                                       SG_ARM_SARGENT_R  | SG_ARM_SARGENT_W |
+                                       SG_ARM_SARGENT_WF)) != 0;
+        int need_stage2 = (arm_mask & SG_ARM_SARGENT_R) != 0;
+
+        if (arm_mask & (SG_ARM_SARGENT_U | SG_ARM_SARGENT_WF)) use_joint = 1;
+        if (arm_mask & (SG_ARM_SARGENT_W | SG_ARM_SARGENT_WF)) bsel_on   = 1;
+        /* NOT setting uniform_arg here.  It was set to make Stage 2 cheap for
+         * models that do not want the learned ws^2 -- but Stage 2 is now SKIPPED
+         * for those models, so the assignment is dead, and it still wrote a
+         * misleading "uniform_arg": true into the JSON of models with no ARG
+         * term at all.  It is safe to drop: sg->uniform_arg reaches prediction
+         * only through sg_span, which gates the LEARNED accumulator (K_sg) that
+         * only SARGENT-R reads.  SARGENT-R wants uniform_arg = 0 by definition,
+         * since learned per-tree weights are what it is.  This retires the last
+         * of the --snp-only / --arg-only / --uniform-arg overloading, each layer
+         * of which produced a different wrong answer earlier in this branch. */
+        if (!need_stage1) arg_only    = 1;   /* --arg-only IS "skip Stage 1"          */
+        else              stage1_gibbs = 1;  /* variational Stage 1 is not at parity  */
+        model_skip_gall = !need_gall;        /* checked at the .gall build site       */
+        /* Only SARGENT-R consumes Stage 2's ws^2 (the `sargent` arm reads it via
+         * have_ws2).  Setting uniform_arg made Stage 2 CHEAP but still ran it --
+         * a full uniform-kinship REML over ~1500 trees returning h2_arg = 0.0000
+         * for a fixed-effects-only model.  That was the whole of --model
+         * sargent-f's 3x: 704 s against 228 s for the legacy --snp-only, which
+         * skips Stage 2 outright. */
+        model_skip_stage2 = !need_stage2;
+    }
+    predict_set_models(arm_mask);
 
     var_fixed_set_gibbs(stage1_gibbs, gibbs_iter, gibbs_burn);
     predict_set_stage1_cv(stage1_cv);
@@ -509,7 +629,10 @@ int main(int argc, char *argv[])
      * --precompute is passed or on first use with --uniform-arg.
      * -------------------------------------------------------------------- */
     gall_t *gall = NULL;
-    {
+    /* A model with no ARG arm (snp-lmm, sargent-f) must not pay for G_all:
+     * building and eigendecomposing it is ~123 s on a 500-sample cell. */
+    int skip_gall = model_skip_gall;
+    if (!skip_gall) {
         /* Derive the .gall path from the .trees path by stripping the extension.
          *
          * TWO KERNELS, TWO FILES.  gall_build produces the span-weighted eGRM
@@ -541,7 +664,7 @@ int main(int argc, char *argv[])
                 fprintf(stderr, "G_all: --precompute: rebuilding %s\n", gall_path);
         } else {
             /* Try loading cached .gall (must hold the kernel this run needs) */
-            gall = gall_load(gall_path, sg->n, trees_sz, /*use_span=*/1);
+            { double _t = arm_now(); gall = gall_load(gall_path, sg->n, trees_sz, /*use_span=*/1); sg_t_gall += arm_now() - _t; }
             if (gall && !silent)
                 fprintf(stderr, "G_all: loaded %s\n", gall_path);
         }
@@ -555,7 +678,7 @@ int main(int argc, char *argv[])
             /* Span-weight G_all only for the uniform arms (their kernel is the
              * span-weighted eGRM). For the learned arms G_all is used solely as the
              * CG preconditioner, which must match the un-span learned operator. */
-            gall = gall_build(&ts, sg->hap_to_indiv, sg->n, /*use_span=*/1);
+            { double _t = arm_now(); gall = gall_build(&ts, sg->hap_to_indiv, sg->n, /*use_span=*/1); sg_t_gall += arm_now() - _t; }
             if (gall) {
                 if (trees_sz >= 0) {
                     if (gall_save(gall, gall_path, trees_sz) == 0 && !silent)
@@ -593,10 +716,11 @@ int main(int argc, char *argv[])
                     sg->uniform_arg ? ", uniform-random" : "");
 
         if (!silent) fprintf(stderr, "  warm-start Stage 1 (BayesR fit to SNPs)...\n");
-        var_fixed(sg, silent);
+        { double _t = arm_now(); var_fixed(sg, silent); sg_t_stage1 += arm_now() - _t; }
         if (!silent)
             fprintf(stderr, "  warm-start Stage 2 (per-tree REML EM)...\n");
-        var_random(sg, silent);
+        if (!model_skip_stage2) { double _t = arm_now(); var_random(sg, silent); sg_t_stage2 += arm_now() - _t; }
+        else if (!silent) fprintf(stderr, "  Stage 2 skipped: no arm needs the per-tree weights\n");
 
         if (!silent)
             fprintf(stderr,
@@ -632,7 +756,8 @@ int main(int argc, char *argv[])
                 if (!silent)
                     fprintf(stderr, "  standalone Stage 1 for SARGENT-F "
                                     "(fixed effects only)...\n");
-                var_fixed(sg, silent);
+                { double _t = arm_now(); { double _t = arm_now(); var_fixed(sg, silent); sg_t_stage1 += arm_now() - _t; }
+                  sg_t_stage1_f = arm_now() - _t; }
                 sg->beta_f = malloc((size_t)sg->p * sizeof(double));
                 if (!sg->beta_f) { fprintf(stderr, "ERROR: out of memory\n"); return 1; }
                 memcpy(sg->beta_f, sg->beta, (size_t)sg->p * sizeof(double));
@@ -642,6 +767,7 @@ int main(int argc, char *argv[])
                                     "components in one chain (%d SNPs, K=%d)...\n",
                             sg->p, sg->K);
                 double j_su2 = 0.0, j_sig2 = 0.0;
+                double _tj = arm_now();
                 if (var_joint_gibbs(sg, sg->gall, silent, gibbs_iter ? gibbs_iter : 3000,
                                     gibbs_burn >= 0 ? gibbs_burn : 1000,
                                     0, &j_su2, &j_sig2) != 0) {
@@ -657,7 +783,7 @@ int main(int argc, char *argv[])
             if (!silent)
                 fprintf(stderr, "Stage 1: inferring fixed effects (%d SNPs, K=%d)...\n",
                         sg->p, sg->K);
-            var_fixed(sg, silent);
+            { double _t = arm_now(); var_fixed(sg, silent); sg_t_stage1 += arm_now() - _t; }
             if (!silent)
                 fprintf(stderr, "Stage 1 done: h2_snp=%.4f  sigma2=%.4f\n",
                         sg->h2_snp, sg->sigma2);
@@ -675,7 +801,8 @@ int main(int argc, char *argv[])
                         use_emma ? ", EMMA eigenspace" :
                         emma_warmstart ? ", EMMA warm-start" : "");
             if (use_emma) {
-                var_random_emma(sg, silent);
+                if (!model_skip_stage2) { double _t = arm_now(); var_random_emma(sg, silent); sg_t_stage2 += arm_now() - _t; }
+        else if (!silent) fprintf(stderr, "  Stage 2 skipped: no arm needs the per-tree weights\n");
             } else {
                 if (emma_warmstart) {
                     /* Run EMMA in uniform mode to obtain a fast initialiser for
@@ -690,7 +817,8 @@ int main(int argc, char *argv[])
                     var_random_emma(sg, /*silent=*/1);
                     sg->uniform_arg = 0;
                 }
-                var_random(sg, silent);
+                if (!model_skip_stage2) { double _t = arm_now(); var_random(sg, silent); sg_t_stage2 += arm_now() - _t; }
+        else if (!silent) fprintf(stderr, "  Stage 2 skipped: no arm needs the per-tree weights\n");
             }
             if (!silent)
                 fprintf(stderr, "Stage 2 done: h2_arg=%.4f  sigma2=%.4f\n",
