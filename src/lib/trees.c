@@ -533,6 +533,20 @@ void tree_cov_matvec_pairwise(double *out, const double *in, int n_indiv,
  * O(n_haps * avg_depth) per tree; no n_nodes scan, no tsk_tree_preorder call,
  * no acc[] array.
  * --------------------------------------------------------------------------- */
+/* Sort key for the one-time node ordering built in
+ * tree_cov_matvec_inc_state_init: decreasing node time, id as a stable
+ * tiebreak.  Ties can only occur between nodes with no edge between them
+ * (tskit forbids time[parent] <= time[child]), so any tiebreak is safe. */
+typedef struct { double t; tsk_id_t id; } node_time_key_t;
+
+static int node_time_desc_cmp(const void *a, const void *b)
+{
+    const node_time_key_t *x = a, *y = b;
+    if (x->t > y->t) return -1;
+    if (x->t < y->t) return  1;
+    return (x->id < y->id) ? -1 : (x->id > y->id);
+}
+
 int tree_cov_matvec_inc_state_init(tree_cov_matvec_inc_state_t *st,
                                     const tsk_treeseq_t *ts,
                                     int n_indiv,
@@ -546,9 +560,27 @@ int tree_cov_matvec_inc_state_init(tree_cov_matvec_inc_state_t *st,
     st->S          = malloc((size_t)st->n_nodes * sizeof(double));
     st->our_parent = malloc((size_t)st->n_nodes * sizeof(tsk_id_t));
     st->bl         = malloc((size_t)st->n_nodes * sizeof(double));
-    if (!st->S || !st->our_parent || !st->bl) {
+    st->time_order = malloc((size_t)st->n_nodes * sizeof(tsk_id_t));
+    st->cum        = malloc((size_t)st->n_nodes * sizeof(double));
+    if (!st->S || !st->our_parent || !st->bl || !st->time_order || !st->cum) {
         tree_cov_matvec_inc_state_free(st);
         return -1;
+    }
+
+    /* Build the parent-before-child order once, for the whole tree sequence.
+     * tskit enforces time[parent] > time[child] on every edge, so ordering
+     * nodes by decreasing time is a valid topological order in every tree. */
+    {
+        const double *ntime = ts->tables->nodes.time;
+        node_time_key_t *keys = malloc((size_t)st->n_nodes * sizeof(*keys));
+        if (!keys) { tree_cov_matvec_inc_state_free(st); return -1; }
+        for (tsk_size_t u = 0; u < st->n_nodes; u++) {
+            keys[u].t  = ntime[u];
+            keys[u].id = (tsk_id_t)u;
+        }
+        qsort(keys, (size_t)st->n_nodes, sizeof(*keys), node_time_desc_cmp);
+        for (tsk_size_t k = 0; k < st->n_nodes; k++) st->time_order[k] = keys[k].id;
+        free(keys);
     }
     return 0;
 }
@@ -559,6 +591,8 @@ void tree_cov_matvec_inc_state_free(tree_cov_matvec_inc_state_t *st)
     free(st->S);          st->S          = NULL;
     free(st->our_parent); st->our_parent = NULL;
     free(st->bl);         st->bl         = NULL;
+    free(st->time_order); st->time_order = NULL;
+    free(st->cum);        st->cum        = NULL;
 }
 
 void tree_cov_matvec_inc_state_reset(tree_cov_matvec_inc_state_t *st,
@@ -631,31 +665,65 @@ void tree_cov_matvec_inc_readout(double *out,
                                   const tree_cov_matvec_inc_state_t *st)
 {
     const int n_indiv = st->n_indiv;
-    /* Worksharing zero, NOT a plain serial loop: the implicit exit barrier of
-     * `omp for` guarantees every thread finishes zeroing out[] before any
-     * thread reaches the accumulation loop below.  A plain loop here is run
-     * redundantly by all threads with no barrier, so a straggler still zeroing
-     * out[k] can clobber an `out[k] += a` a faster thread already wrote --
-     * corrupting the readout and making G_all indefinite (issue #26).  When
-     * called outside an active team (serial path / OpenMP-off) the orphaned
-     * `omp for` degrades to a correct serial loop. */
-    #pragma omp for schedule(static)
-    for (int i = 0; i < n_indiv; i++) out[i] = 0.0;
-
+    /* Zeroing must complete before any thread accumulates into out[], or a
+     * straggler still zeroing out[k] clobbers a faster thread's `out[k] +=`
+     * -- that corrupted the readout and made G_all indefinite (issue #26).
+     * The `omp single` below supplies that ordering via its exit barrier.
+     * Orphaned directives degrade correctly when called outside a team. */
     const tsk_id_t *samples = tsk_treeseq_get_samples(st->ts);
     const tsk_size_t n_hap  = tsk_treeseq_get_num_samples(st->ts);
+
+    /* Root-path prefix sum.
+     *
+     * The obvious readout walks every sample independently from its leaf to
+     * the root.  That costs sum-of-sample-depths per tree and makes sibling
+     * samples re-traverse the same shared ancestral path over and over: on a
+     * 3000-sample, 7444-node ARG it is 52,379 steps per tree against 5,998
+     * edges actually present -- the same path arithmetic done ~8.7x.
+     *
+     * Instead sweep the nodes once in parent-before-child order and carry the
+     * running root-path sum down:
+     *
+     *     cum[u] = bl[u]*S[u] + cum[parent(u)],   cum[root] = 0
+     *
+     * so cum[sample] is exactly the quantity the leaf-to-root loop produced.
+     * `time_order` is built once at init (see geno.h) and is valid for every
+     * tree, so this costs a flat n_nodes pass with no per-tree setup.
+     *
+     * NOTE the sum is now right-associated (root-end first) where the old loop
+     * was left-associated (leaf-end first).  The value is mathematically
+     * identical but the floating-point rounding differs, so this is not a
+     * bit-identical change; it is checked against a tolerance instead.
+     *
+     * The sweep is a serial dependence (a node needs its parent), so it runs
+     * in a single thread.  Zeroing rides along inside the same block to keep
+     * the barrier count at two per readout -- the same as the two `omp for`
+     * exit barriers this replaced.  Barriers are not free here: an earlier
+     * stray `omp single` around a profiling timer added ~1.7M of them and
+     * turned a 180 s run into 866 s. */
+    #pragma omp single
+    {
+        for (int i = 0; i < n_indiv; i++) out[i] = 0.0;
+
+        const tsk_id_t *ord    = st->time_order;
+        const tsk_id_t *parent = st->our_parent;
+        const double   *bl     = st->bl;
+        const double   *S      = st->S;
+        double         *cum    = st->cum;
+
+        for (tsk_size_t k = 0; k < st->n_nodes; k++) {
+            tsk_id_t u = ord[k];
+            tsk_id_t p = parent[u];
+            cum[u] = (p == TSK_NULL) ? 0.0 : cum[p] + bl[u] * S[u];
+        }
+    }   /* implicit barrier: out[] zeroed and cum[] complete for all threads */
 
     #pragma omp for schedule(static)
     for (tsk_size_t hi = 0; hi < n_hap; hi++) {
         int indiv = st->hap_to_indiv[(int)hi];
         if (indiv < 0 || indiv >= n_indiv) continue;
-        double a = 0.0;
-        for (tsk_id_t u = samples[hi]; st->our_parent[u] != TSK_NULL;
-             u = st->our_parent[u]) {
-            a += st->bl[u] * st->S[u];
-        }
         #pragma omp atomic
-        out[indiv] += a;
+        out[indiv] += st->cum[samples[hi]];
     }
 }
 

@@ -170,6 +170,13 @@ typedef struct {
     double              *S;              /* length n_nodes; updated incrementally */
     tsk_id_t            *our_parent;     /* length n_nodes; tracks tree structure */
     double              *bl;             /* length n_nodes; bl[u] = time[parent(u)] - time[u] */
+    /* Readout scratch.  `time_order` lists every node once, sorted by
+     * DECREASING node time.  tskit requires time[parent] > time[child] on
+     * every edge, so this single global order is a valid parent-before-child
+     * order for *every* tree in the sequence -- no per-tree preorder needed.
+     * `cum` holds the root-path prefix sum; see tree_cov_matvec_inc_readout. */
+    tsk_id_t            *time_order;     /* length n_nodes; decreasing node time */
+    double              *cum;            /* length n_nodes; scratch */
 } tree_cov_matvec_inc_state_t;
 
 /* Allocate scratch buffers; returns 0 on success, -1 on OOM. */
