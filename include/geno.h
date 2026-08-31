@@ -177,6 +177,26 @@ typedef struct {
      * `cum` holds the root-path prefix sum; see tree_cov_matvec_inc_readout. */
     tsk_id_t            *time_order;     /* length n_nodes; decreasing node time */
     double              *cum;            /* length n_nodes; scratch */
+
+    /* Per-tree compaction, for INFERRED ARGs.
+     *
+     * `time_order` spans the whole node table, which is the right thing for a
+     * simulated ARG: there n_nodes (7,444 on the benchmark cell) barely exceeds
+     * the ~5,998 present in any one tree, so sweeping all of them wastes
+     * nothing.  A Relate ARG is the opposite shape -- 368,878 nodes over 122
+     * trees, still ~5,998 per tree -- so the same sweep did 60x redundant work
+     * and ran ~5x SLOWER than the leaf-to-root loop it replaced.
+     *
+     * When the node table dwarfs a single tree we therefore sweep a compacted,
+     * time-ordered list of the nodes actually present.  Building one costs an
+     * O(n_nodes) filter, so it is cached per tree index and reused across the
+     * n_tr column passes, which all traverse the same sequence. */
+    int                  compact;        /* 1 = use the per-tree lists below */
+    int                  cur_tree;       /* tree index; set by tree_walker_run_inc */
+    tsk_size_t           n_trees;
+    tsk_id_t           **tree_nodes;     /* [n_trees], NULL until first visited */
+    tsk_size_t          *tree_nnodes;    /* [n_trees] */
+    unsigned char       *has_child;      /* n_nodes; scratch for the filter */
 } tree_cov_matvec_inc_state_t;
 
 /* Allocate scratch buffers; returns 0 on success, -1 on OOM. */
