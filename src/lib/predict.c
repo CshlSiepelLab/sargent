@@ -1365,6 +1365,15 @@ int sargent_predict(sargent_t *sg,
         fprintf(f, "  \"arg_lmm_su2\": "); json_num(f, arg_su2); fprintf(f, ",\n");
         fprintf(f, "  \"arg_lmm_sigma2\": "); json_num(f, arg_sigma2); fprintf(f, ",\n");
         ARM("sargent_u", m_su);
+        /* BSLMM-style PVE from the joint chain -- a realized-variance estimate,
+         * emitted beside the plug-in so the two can be compared directly on the
+         * same run.  Decomposed into its fixed and random parts. */
+        if (sg->joint_pve > 0.0) {
+            fprintf(f, "  \"sargent_u_pve\": ");        json_num(f, sg->joint_pve);
+            fprintf(f, ",\n  \"sargent_u_pve_fixed\": ");  json_num(f, sg->joint_pve_fix);
+            fprintf(f, ",\n  \"sargent_u_pve_random\": "); json_num(f, sg->joint_pve_rand);
+            fprintf(f, ",\n");
+        }
         fprintf(f, "  \"sargent_u_su2\": ");    json_num(f, su_su2);
         fprintf(f, ",\n  \"sargent_u_sigma2\": "); json_num(f, su_sigma2);
         fprintf(f, ",\n");

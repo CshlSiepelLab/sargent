@@ -106,6 +106,18 @@ static void write_beta_table(sargent_t *sg, const char *outroot, int silent)
 
 static void write_w2_table(sargent_t *sg, const char *outroot, int silent)
 {
+    /* Stage 2 may have been skipped (--model without an arm that needs the
+     * per-tree weights), in which case sg->ws2 was never allocated.  Guarding
+     * the var_random() CALL was not enough: the lines that consume its output
+     * still ran, and this function walked a NULL ws2 -- a segfault in
+     * --model snp-lmm and --model sargent-f.  Defensive here rather than at the
+     * call sites, so every caller is covered. */
+    if (!sg->ws2) {
+        if (!silent)
+            fprintf(stderr, "  (no per-tree weights fitted; %s.w2.tsv not written)\n",
+                    outroot);
+        return;
+    }
     int S = sg->S;
     int M = sg->M;
 
