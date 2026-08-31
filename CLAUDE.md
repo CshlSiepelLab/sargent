@@ -6,68 +6,61 @@ for any session, including server-side sessions launched via SSH.
 ## What this project is
 
 **SARGENT** (Sparse ARG-based ENcoding of Traits): an ARG-based polygenic
-heritability inference tool. C core (production estimator), Python eval
-pipeline (sim + scoring). PI: Adam Siepel (CSHL).
+heritability and prediction tool. C core (production estimator) plus its tests.
+PI: Adam Siepel (CSHL).
 
-The current methodological focus and remaining open questions live in:
+**This repo is the software only.** Commit `3739ec2` (2026-06-29, "Make sargent
+pure software development") moved every research document out. Earlier versions
+of this file pointed at `ROADMAP.md`, `CLAIMS.md`,
+`test/eval/phase10_oracle.md`, `test/eval/block1_1_design.md` and
+`test/eval/fit_blup_audit.md` — **all five are gone from this repo.** Do not go
+looking for them here.
 
-- **`ROADMAP.md`** — active plan (Blocks 0–5) at the top; preserved
-  historical phases below. **Read this first** to understand current priorities.
-- **`CLAIMS.md`** — manuscript-claim triage: HELD / PLAUSIBLE-UNTESTED /
-  FALSIFIED-WEAK / OUT-OF-SCOPE, with `[MINOR]` markers on the
-  trim-quietly group.
-- **`test/eval/phase10_oracle.md`** — Phase 10 oracle diagnostic
-  (per-segment ws² ceiling). The result that defined the current story
-  (verdict: ws² is a localization tool, not a prediction tool).
-- **`test/eval/block1_1_design.md`** — Block 1.1 (cross-ancestry PRS
-  portability) design + SSH-launch instructions. **This is the active
-  experiment.**
-- **`test/eval/fit_blup_audit.md`** — Block 1.3 audit of the +0.25 h²
-  bias in `predict.py:fit_blup`. Done (commits `53af237`, `ebf757c`);
-  root cause: rank-1 constant offset in ARG kinship; fix: double-center K.
+The live methodological documents are in the sibling repo
+`~/git-src/sargent-paper`:
 
-## Current state (as of 2026-06-03)
+- **`notes/PHI_PROGRAM.md`** — the φ axis (φ_src = h²_untyped/h²_total as the
+  design knob, φ_tag as the measured quantity). The current experimental frame.
+- **`notes/SPEED_PLAN.md`** — kinship-build performance, including what was
+  measured and which two confident diagnoses were wrong.
+- **`analysis/RUNTIME.md`** — per-method runtimes and the Table S1 numbers.
+- **`notes/CLI_REDESIGN.md`** — the `--model` flavour CLI.
 
-Branch context: `main`. All active PRs (#21, #23, #24) merged.
+The manuscript lives in `~/newwriting/arg-mapping` (`main.tex`,
+`supplement.tex`, `figs/`).
 
-Active work blocks:
+## Current state (as of 2026-08-31)
 
-- **Block 1.1** (cross-ancestry PRS portability): v1 + v2 + SARGENT-W
-  rescue test all done. **Verdict: ARG framework (SARGENT-U) beats
-  typed-SNP methods across the F_ST ladder; per-segment ŵ² and β are
-  both cross-ancestry liabilities vs ARG-BLUP-uniform.** The manuscript
-  contribution is "framework vs typed-SNP methods", not "SARGENT vs
-  ARG-BLUP-uniform". See `test/eval/block1_1_design.md` §§ "v1 results",
-  "v2 results", "SARGENT cross-ancestry rescue test".
-- **Block 1.2** (localization robustness sweep): v1 done on laptop
-  (commit `2c19ba3`). **Verdict: estimator above chance in 5/6 cells**;
-  estimator-ceiling gap small (0.04-0.11) across the grid. C1 HELD;
-  C4 [MINOR] → HELD; C5 weakens. See
-  `test/eval/block1_2_design.md` § "v1 results".
-- **Block 1.3** (`fit_blup` h² bias): **audit + patch done** (commits
-  `53af237`, `ebf757c`). `predict.py` double-centers K
-  (`center_kinship`); h² bias +0.26 → +0.05; R² unchanged.
-- **Block 0** (claims triage): Adam signed off 2026-05-29. Bucket
-  moves C1 → HELD; C4 → HELD [MINOR]; C5 → WEAK (Block 1.2) and
-  D2 → FALSIFIED at current estimator (Block 2.5.2) still awaiting
-  Adam's sign-off on `CLAIMS.md` patch.
+Branch `main`, **sargent v0.9.0**, everything pushed.
 
-**Block 2 is now the Applications arc** (replaces the deferred sparse
-fused lasso, demoted to parking lot). Localization confirmed as the
-SARGENT-distinctive strength; the applications direction builds on
-the per-tree variance primitive. Sub-blocks:
+What the estimator does now, and what changed recently:
 
-- **2.1** Allele-age decomposition (highest priority new experiment)
-- **2.2** Partitioned heritability across functional annotations,
-  three-estimator framework: (A) typed-only S-LDSC, (B) ARG-only,
-  (C) hybrid with typed × untyped split per annotation
-- **2.3** ARG-aware fine-mapping (likely separate paper)
-- **2.4** "Linkage without pedigrees" framing for the manuscript
-- **2.5** Polygenicity / effect-size architecture (M_e,ARG,
-  variance-capture curve, per-branch effect-size — the HOW axis)
+- **`--model <flavour>`** selects one arm and runs only its prerequisites:
+  `snp-lmm`, `sargent-f`, `sargent-ur`, `sargent-u`, `sargent-w`,
+  `sargent-wf`, `all`. Before this, every invocation computed every arm, so no
+  per-method cost could be attributed. `all` is the FIGURE set and deliberately
+  excludes `sargent-w`/`sargent-wf`.
+- **h² is a realized-variance quantity**, adapted from BSLMM's PVE (eq. 13–15):
+  the variance of the *sum* Xβ̃+u over a model-implied denominator, not the
+  plug-in σ²_u/(σ²_u+σ²_e). The plug-in inflates under kernel misspecification;
+  mean |bias| went from +0.104/+0.170 to 0.009/0.012.
+- **The ARG kinship build is ~8x faster** (v0.8.0). The readout re-derived each
+  sample's root path once per descendant; a time-ordered prefix sweep plus
+  column-level parallelism took the benchmark cell 185.05 s → 22.75 s at the
+  production 2-thread config. The tsLMM gap went 34x → 4.0x.
+- **SARGENT-R is retired** (v0.9.0). It was the single best arm in 13.2% of
+  6452 cells with a median gain over SARGENT-U of exactly 0.0000. Localization
+  moved to the per-branch score test (Fig 5), which never used it. The ws²
+  TABLE is still written — Blocks 2.1/2.2 read `est.w2.tsv` via the legacy
+  `--arg-only` path.
 
-Block 3 (manuscript, Adam-led, next week), Block 4 (efficiency),
-Block 5 (publication readiness) follow.
+**Figure status.** The within-population and cross-ancestry φ figures are
+current. `main.tex:1153` still carries the caveat that *the density supplement
+and the reconstructed-ARG figures show the plug-in h²*; the reconstructed-ARG
+half is being cleared. **The density figure plots `sargent` and `sargent_r`
+series that the retired arm produced** — re-running those cells at v0.9.0 would
+delete two series from a supplementary figure, so it needs a decision first,
+not a re-run.
 
 ## Build / environment
 
@@ -88,64 +81,35 @@ plain `python`. To force a specific interpreter, export `PYBIN=/path/to/python`.
 
 ## Common tasks
 
-### Launch Block 1.1 v1 sweep
-
-See `test/eval/block1_1_design.md` § "Launching v1 on Linux server /
-workstation". Short form:
+### Build and check a version
 
 ```bash
-# Pilot first (30-45 min on a workstation; sanity-check the setup)
-BASE=$HOME/test-sargent/block1_1_pilot \
-  N_TRAIN=200 N_TEST=80 LENGTH=300000 \
-  MIX_FRAC_B="0.00 0.05 0.20" TYPED_FRACS="0.7" SEEDS="1 2" \
-  bash test/eval/portability.sh
-
-# Then v1 (120 cells, 5-15h wall) in tmux
-BASE=$HOME/test-sargent/block1_1_v1
-mkdir -p $BASE
-tmux new -s b11 -d "BASE=$BASE bash test/eval/portability.sh 2>&1 | tee $BASE/run.log"
+cmake -B build -S . && cmake --build build -j
+build/src/progs/sargent --version
 ```
 
-Driver is resumable: skips any cell whose `est.predict.json` already exists.
+**The version string is read at CMake CONFIGURE time**, so a plain rebuild after
+a version bump keeps reporting the old number. If it looks wrong, delete
+`build/CMakeCache.txt` and reconfigure. This has caused a 420-cell run to be
+launched against a binary reporting 0.6.0.
 
-### Monitor progress
+### Time a method
+
+`~/git-src/sargent-paper/analysis/timing_*.sh`. Measure every row in ONE pass on
+an idle machine — an unrelated job on other cores moved BSLMM by 42% between
+passes, which is how a published table came to have rows that were not
+comparable to one another.
+
+### Fit one cell
 
 ```bash
-tail -f $BASE/run.log
-ls $BASE/mix*_typed*_s*/est.predict.json | wc -l   # completed cells / 120
+sargent --silent --nprobe 10 --threads 2 --predict --model all \
+        --outroot <dir>/est <dir>/case.phen <dir>/case.trees <dir>/case
 ```
 
-### Interpret results (when v1 finishes)
-
-`$BASE/portability_table.md` has three sections:
-
-1. Per-seed table (every cell).
-2. Summary by (mix × typed): mean ± sd over seeds, plus the paired
-   `SARGENT − ARG-BLUP-uni` gap.
-3. Headline curve: SARGENT − ARG-BLUP-uni gap as a function of mix_B.
-
-Verdict rule (per `block1_1_design.md`):
-
-- **Positive verdict**: SARGENT > ARG-BLUP-uniform *and* the gap widens with
-  f_B (target-pop training fraction). Triggers v2 expansion (F_ST ladder,
-  admixed scenario, ρ_β<1, eGRM baseline).
-- **Null verdict**: no SARGENT gap at any ladder level. Prediction story
-  collapses to localization-only; freeing cycles for Block 2 redirect.
-
-When v1 reports, write findings into a new section at the bottom of
-`block1_1_design.md` (mirror `phase10_oracle.md` § "Interpretation") —
-do not start manuscript rewrites yet (that's Adam-led, Block 3, next week).
-
-### Launching Block 1.3 from scratch (if the audit was not done previously)
-
-If `test/eval/fit_blup_audit.md` does not exist, the audit is still pending.
-The brief: locate `test/eval/predict.py:fit_blup`, diagnose the +0.25
-systematic upward bias in the fitted h² (observed in Phase 10 across all
-three BLUP arms; SARGENT's own `--arg-only` h² has bias only +0.06–0.10).
-Candidates: (a) ML vs proper REML projection, (b) rank-1 dominance of ARG
-kinship, (c) kinship normalization, (d) EM convergence. **Do not modify
-production code** without Adam's approval — produce a diagnosis and recommended
-fix, audit only.
+Aggregators prefer `est_pve2` > `est_pve` > `est_joint` (see
+`analysis/branch_select/aggregate_fig2_phi.py`), so a re-fit that should
+supersede an older pass writes `est_pve2`.
 
 ## Guardrails
 
@@ -203,26 +167,35 @@ to a `-f` fallback.
 
 ## Where to write things
 
-- **Findings / analysis from a finished experiment** → append to that
-  experiment's `*.md` (e.g., new section in `block1_1_design.md` or
-  `phase10_oracle.md`).
-- **New claims to triage** → propose an edit to `CLAIMS.md`.
-- **Strategic decisions / new blocks** → propose an edit to `ROADMAP.md`.
-- **Scratch / one-off diagnostics** → `/tmp/` (not in the repo).
-- **Reusable diagnostic infrastructure** → `test/eval/`.
+This repo holds the C estimator and its tests, nothing else. Analysis prose and
+eval infrastructure belong in `~/git-src/sargent-paper`.
+
+- **Findings from a finished experiment** → append a section to the relevant
+  `sargent-paper/notes/*.md` (e.g. `PHI_PROGRAM.md`, `SPEED_PLAN.md`), or
+  `analysis/RUNTIME.md` for timings.
+- **Manuscript text and figures** → `~/newwriting/arg-mapping`.
+- **Reusable analysis or benchmark scripts** → `sargent-paper/analysis/`,
+  committed. A `Reproduce` block naming a path in a session scratchpad is worse
+  than none: `RUNTIME.md` cited `run_ext_cell.sh` for weeks and that script has
+  never existed.
+- **Scratch / one-off diagnostics** → the session scratchpad (not any repo).
+- **Changes to the C core** → here, with a regression against the previous
+  release before merging.
 
 ## Conventions
 
 - Per-cell output convention: `<BASE>/<cell-name>/{case.*, est.*, *.log,
   est.predict.json}` (one directory per parameter cell).
 - Per-cell parameter encoding in directory name, e.g.
-  `mix0.05_typed0.70_s3` — the aggregator regex in `portability.sh`
-  expects this.
+  `mix0.05_typed0.70_s3`, or `phig064_s1` on the φ grid — the aggregator regexes
+  expect these.
 - `simulate.py` outputs follow the prefix convention `<prefix>.{phen,
   trees, full.trees, bed, bim, fam, params.json, true_beta.tsv,
   true_ws2.tsv, train.anc.tsv, test.anc.tsv}`.
-- Eval `*.md` docs use `Reproduce` blocks with exact env-var invocations
-  at the end (see `phase10_oracle.md` for the template).
+- Analysis `*.md` docs end with a `Reproduce` block giving exact invocations,
+  naming COMMITTED scripts only.
+- Aggregators prefer `est_pve2` > `est_pve` > `est_joint`, so a re-fit meant to
+  supersede an earlier pass writes `est_pve2` and leaves the old one intact.
 
 ## If something feels off
 
