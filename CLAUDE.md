@@ -177,6 +177,20 @@ genuinely needed, read `/proc/<pid>/cmdline` for each candidate and skip `$$`.
 Prefer PID files written at launch. Verify identity (uid, `comm`, cmdline)
 immediately before signalling, and never kill anything you did not start.
 
+**`comm` is truncated to 15 characters.** `pgrep -x` matches against `comm`, so
+an executable with a longer name silently matches *nothing* -- and "no output"
+reads exactly like "not running":
+
+```bash
+pgrep -u "$USER" -x check_tree_matvec   # -> nothing; the name is 17 chars
+pgrep -u "$USER" -x check_tree_matv     # -> the actual PIDs
+```
+
+Check `cat /proc/<pid>/comm` for the real (truncated) name before concluding a
+job has finished or died. A wrong "nothing is running" has twice led to
+relaunching work that was already in flight, and would be far worse if it led
+to a `-f` fallback.
+
 - **Never push to `main` or open a PR without Adam's explicit "go".** Commits
   are okay if asked; PR + merge requires "PR + merge" or similar.
 - **Long simulation runs (Block 1.1 v1, Block 1.2, etc.) require explicit
