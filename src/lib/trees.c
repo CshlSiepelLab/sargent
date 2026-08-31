@@ -567,7 +567,9 @@ int tree_cov_matvec_inc_state_init(tree_cov_matvec_inc_state_t *st,
     st->bl         = malloc((size_t)st->n_nodes * sizeof(double));
     st->time_order = malloc((size_t)st->n_nodes * sizeof(tsk_id_t));
     st->cum        = malloc((size_t)st->n_nodes * sizeof(double));
-    if (!st->S || !st->our_parent || !st->bl || !st->time_order || !st->cum) {
+    st->S0         = malloc((size_t)st->n_nodes * sizeof(double));
+    if (!st->S || !st->our_parent || !st->bl || !st->time_order || !st->cum ||
+        !st->S0) {
         tree_cov_matvec_inc_state_free(st);
         return -1;
     }
@@ -605,7 +607,12 @@ int tree_cov_matvec_inc_state_init(tree_cov_matvec_inc_state_t *st,
             st->tree_nodes  = calloc((size_t)st->n_trees, sizeof(*st->tree_nodes));
             st->tree_nnodes = calloc((size_t)st->n_trees, sizeof(*st->tree_nnodes));
             st->has_child   = malloc((size_t)st->n_nodes * sizeof(*st->has_child));
-            if (!st->tree_nodes || !st->tree_nnodes || !st->has_child) {
+            st->tree_parent = calloc((size_t)st->n_trees, sizeof(*st->tree_parent));
+            st->tree_bl     = calloc((size_t)st->n_trees, sizeof(*st->tree_bl));
+            st->tree_span   = calloc((size_t)st->n_trees, sizeof(*st->tree_span));
+            st->struct_cached = 0;
+            if (!st->tree_nodes || !st->tree_nnodes || !st->has_child ||
+                !st->tree_parent || !st->tree_bl || !st->tree_span) {
                 tree_cov_matvec_inc_state_free(st);
                 return -1;
             }
@@ -622,10 +629,20 @@ void tree_cov_matvec_inc_state_free(tree_cov_matvec_inc_state_t *st)
     free(st->bl);         st->bl         = NULL;
     free(st->time_order); st->time_order = NULL;
     free(st->cum);        st->cum        = NULL;
+    free(st->S0);         st->S0         = NULL;
     if (st->tree_nodes) {
         for (tsk_size_t t = 0; t < st->n_trees; t++) free(st->tree_nodes[t]);
         free(st->tree_nodes); st->tree_nodes = NULL;
     }
+    if (st->tree_parent) {
+        for (tsk_size_t t = 0; t < st->n_trees; t++) free(st->tree_parent[t]);
+        free(st->tree_parent); st->tree_parent = NULL;
+    }
+    if (st->tree_bl) {
+        for (tsk_size_t t = 0; t < st->n_trees; t++) free(st->tree_bl[t]);
+        free(st->tree_bl); st->tree_bl = NULL;
+    }
+    free(st->tree_span); st->tree_span = NULL;
     free(st->tree_nnodes); st->tree_nnodes = NULL;
     free(st->has_child);   st->has_child   = NULL;
 }
@@ -657,6 +674,7 @@ void tree_cov_matvec_inc_state_reset(tree_cov_matvec_inc_state_t *st,
         } else {
             st->S[u] = 0.0;
         }
+        st->S0[u] = st->S[u];      /* seed kept for the replay path */
     }
 }
 
@@ -771,6 +789,18 @@ static void build_tree_nodes(tree_cov_matvec_inc_state_t *st, int s)
     }
     st->tree_nodes[s]  = list;
     st->tree_nnodes[s] = m;
+
+    /* Structure replay: keep parent and branch length for exactly these nodes,
+     * so later columns can restore the tree without touching tskit. */
+    if (st->tree_parent && st->tree_bl) {
+        tsk_id_t *pp = malloc((size_t)(m ? m : 1) * sizeof(*pp));
+        double   *bb = malloc((size_t)(m ? m : 1) * sizeof(*bb));
+        if (pp && bb) {
+            for (tsk_size_t k = 0; k < m; k++) { pp[k] = parent[list[k]]; bb[k] = st->bl[list[k]]; }
+            st->tree_parent[s] = pp;
+            st->tree_bl[s]     = bb;
+        } else { free(pp); free(bb); }
+    }
 }
 
 /* Root-path prefix sum: cum[u] = bl[u]*S[u] + cum[parent(u)], cum[root] = 0,
@@ -932,6 +962,46 @@ int tree_walker_run_inc(tree_cov_matvec_inc_state_t *inc,
 
     int err = 0;
 
+    /* ---- structure replay -------------------------------------------------
+     * The tree sequence does not change between columns, but tsk_tree_next
+     * re-derives it every time -- 77% of the kinship build on an inferred ARG.
+     * Once the first traversal has cached every tree, later columns restore the
+     * structure from that cache and never call tskit again.  S has to be
+     * rebuilt from the leaves rather than by edge diffs, which is O(nodes in
+     * tree) and cheaper than the diffs were. */
+    if (inc->compact && inc->struct_cached && !prune_map &&
+        S_orig == (int)inc->n_trees) {
+        const double mspan = mean_span;
+        for (int t = 0; t < S_orig; t++) {
+            const tsk_id_t *ord = inc->tree_nodes[t];
+            const tsk_id_t *par = inc->tree_parent[t];
+            const double   *bl  = inc->tree_bl[t];
+            tsk_size_t      n   = inc->tree_nnodes[t];
+            if (!ord || !par || !bl) { err = 1; break; }
+
+            for (tsk_size_t k = 0; k < n; k++) {
+                tsk_id_t u = ord[k];
+                inc->our_parent[u] = par[k];
+                inc->bl[u]         = bl[k];
+                inc->S[u]          = inc->S0[u];
+            }
+            /* bottom-up: ord is decreasing in time, so backwards visits every
+             * child before its parent */
+            for (tsk_size_t k = n; k-- > 0; ) {
+                tsk_id_t u = ord[k], pu = par[k];
+                if (pu != TSK_NULL) inc->S[pu] += inc->S[u];
+            }
+            inc->cur_tree = t;
+            tree_cov_matvec_inc_readout(gv, inc);
+            st.s_orig = t;
+            st.sp     = t;
+            st.span   = use_span ? inc->tree_span[t] / mspan : 1.0;
+            visit(&st, ctx);
+        }
+        tsk_tree_free(&tree);
+        return err ? -1 : 0;
+    }
+
 #ifdef SARGENT_HAS_OPENMP
     tsk_size_t n_hap = tsk_treeseq_get_num_samples(inc->ts);
 
@@ -1010,13 +1080,27 @@ int tree_walker_run_inc(tree_cov_matvec_inc_state_t *inc,
             if (pre_visit && !pre_visit(s, sp, ctx)) continue;
             tree_cov_matvec_inc_readout(gv, inc);
             st.s_orig = s; st.sp = sp;
-            st.span = use_span ? (tree.interval.right - tree.interval.left) / mean_span : 1.0;
+            double raw_span = tree.interval.right - tree.interval.left;
+            if (inc->compact && inc->tree_span && s < (int)inc->n_trees)
+                inc->tree_span[s] = raw_span;
+            st.span = use_span ? raw_span / mean_span : 1.0;
             visit(&st, ctx);
         }
         if (ret < 0) {
             fprintf(stderr, "tree_walker_run_inc: tskit error: %s\n",
                     tsk_strerror(ret));
             err = 1;
+        }
+        /* Arm the replay path only when this traversal saw the WHOLE sequence
+         * and every tree got cached.  A pruned or truncated walk leaves holes,
+         * and replaying those would silently use another tree's structure. */
+        if (!err && inc->compact && !prune_map && s == (int)inc->n_trees &&
+            S_orig >= (int)inc->n_trees) {
+            int all = 1;
+            for (tsk_size_t t = 0; t < inc->n_trees && all; t++)
+                if (!inc->tree_nodes[t] || !inc->tree_parent[t] || !inc->tree_bl[t])
+                    all = 0;
+            inc->struct_cached = all;
         }
     }
 
@@ -1031,13 +1115,27 @@ int tree_walker_run_inc(tree_cov_matvec_inc_state_t *inc,
             if (pre_visit && !pre_visit(s, sp, ctx)) continue;
             tree_cov_matvec_inc_readout(gv, inc);
             st.s_orig = s; st.sp = sp;
-            st.span = use_span ? (tree.interval.right - tree.interval.left) / mean_span : 1.0;
+            double raw_span = tree.interval.right - tree.interval.left;
+            if (inc->compact && inc->tree_span && s < (int)inc->n_trees)
+                inc->tree_span[s] = raw_span;
+            st.span = use_span ? raw_span / mean_span : 1.0;
             visit(&st, ctx);
         }
         if (ret < 0) {
             fprintf(stderr, "tree_walker_run_inc: tskit error: %s\n",
                     tsk_strerror(ret));
             err = 1;
+        }
+        /* Arm the replay path only when this traversal saw the WHOLE sequence
+         * and every tree got cached.  A pruned or truncated walk leaves holes,
+         * and replaying those would silently use another tree's structure. */
+        if (!err && inc->compact && !prune_map && s == (int)inc->n_trees &&
+            S_orig >= (int)inc->n_trees) {
+            int all = 1;
+            for (tsk_size_t t = 0; t < inc->n_trees && all; t++)
+                if (!inc->tree_nodes[t] || !inc->tree_parent[t] || !inc->tree_bl[t])
+                    all = 0;
+            inc->struct_cached = all;
         }
     }
 #endif
