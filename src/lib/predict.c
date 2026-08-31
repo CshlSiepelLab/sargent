@@ -1346,6 +1346,12 @@ int sargent_predict(sargent_t *sg,
         fprintf(f, "  \"n_test\": %d,\n", n_te);
         fprintf(f, "  \"n_trees_full\": %d,\n", S_full);
         fprintf(f, "  \"n_trees_train\": %d,\n", S_train);
+        /* ARM_IF emits only when the arm was actually computed.  Without it,
+         * unrequested arms were written as FABRICATED ZEROS -- --model snp-lmm
+         * produced arg_lmm = 0 and sargent_u = 0 beside a correct snp_lmm, and
+         * an aggregator reading those keys sees a real, catastrophic result
+         * rather than missing data.  Same failure as the `sargent` arm. */
+        #define ARM_IF(bit, name, mm) do { if (ARM_ON(bit)) { ARM(name, mm); } } while (0)
         #define ARM(name, mm) do { \
             fprintf(f, "  \"" name "\": {\n"); \
             fprintf(f, "    \"r\": ");        json_num(f, (mm).r);        fprintf(f, ",\n"); \
@@ -1354,17 +1360,17 @@ int sargent_predict(sargent_t *sg,
             fprintf(f, "    \"mse\": ");      json_num(f, (mm).mse);      fprintf(f, "\n"); \
             fprintf(f, "  },\n"); \
         } while (0)
-        ARM("bayesR", m_bayes);
-        ARM("snp_lmm", m_snp);
+        ARM_IF(SG_ARM_SARGENT_F, "bayesR", m_bayes);
+        ARM_IF(SG_ARM_SNP_LMM, "snp_lmm", m_snp);
         fprintf(f, "  \"snp_lmm_h2\": "); json_num(f, snp_h2); fprintf(f, ",\n");
-        ARM("arg_lmm", m_arg);
+        ARM_IF(SG_ARM_SARGENT_UR, "arg_lmm", m_arg);
         fprintf(f, "  \"arg_lmm_h2\": "); json_num(f, arg_h2); fprintf(f, ",\n");
         /* The variance components of this fit define V, hence the REML projector
          * P that branch scores are taken against.  Emitted so an external
          * reference implementation can rebuild exactly the same background. */
         fprintf(f, "  \"arg_lmm_su2\": "); json_num(f, arg_su2); fprintf(f, ",\n");
         fprintf(f, "  \"arg_lmm_sigma2\": "); json_num(f, arg_sigma2); fprintf(f, ",\n");
-        ARM("sargent_u", m_su);
+        ARM_IF(SG_ARM_SARGENT_U, "sargent_u", m_su);
         /* BSLMM-style PVE from the joint chain -- a realized-variance estimate,
          * emitted beside the plug-in so the two can be compared directly on the
          * same run.  Decomposed into its fixed and random parts. */
