@@ -61,6 +61,69 @@ extern void dpotri_(const char *uplo, const int *n, double *a, const int *lda,
 extern void dposv_(const char *uplo, const int *n, const int *nrhs,
                    double *a, const int *lda, double *b, const int *ldb,
                    int *info);
+extern void dsyev_(const char *jobz, const char *uplo, const int *n, double *a,
+                   const int *lda, double *w, double *work, const int *lwork,
+                   int *info);
+
+
+/* Realized-variance h^2 for a single-kernel BLUP (SARGENT-UR / arg_lmm).
+ *
+ * The joint chain reports h^2 as Var(Xb + u) / [Var(Xb + u) + sigma2_e] (BSLMM
+ * eq. 13) and is nearly unbiased for it; the REML plug-in su2/(su2+se2) used for
+ * this arm climbs with phi (+0.028 -> +0.094 at h2=0.8, +0.051 -> +0.123 at
+ * h2=0.5) because su2 inflates to absorb a misspecified kernel.  Leaving the two
+ * SARGENT arms on different estimators put two lines in one panel that behave
+ * differently for no reason a reader could infer.
+ *
+ * Same estimator, computed analytically since this arm has no sampler: in the
+ * eigenbasis of the centred K, with r = U^T (y - mean),
+ *     m_i = su2*lam_i/(su2*lam_i + se2) * r_i        posterior mean
+ *     v_i = su2*lam_i*se2/(su2*lam_i + se2)          posterior variance
+ * and Var(u) = (1/n) sum (m_i^2 + v_i) -- the mean-plus-variance form, not the
+ * variance of the posterior mean, which would under-count by exactly the
+ * shrinkage.  One dsyev at n = 1000 costs ~1 s against this arm's ~188 s.
+ * Returns -1 if the decomposition fails, leaving the caller's value untouched. */
+static int realized_h2_1k(const double *K, const double *y, int n,
+                          double su2, double se2, double *out_h2)
+{
+    double *A = malloc((size_t)n * n * sizeof(double));
+    double *w = malloc((size_t)n * sizeof(double));
+    double *r = malloc((size_t)n * sizeof(double));
+    if (!A || !w || !r) { free(A); free(w); free(r); return -1; }
+    memcpy(A, K, (size_t)n * n * sizeof(double));
+
+    int info = 0, lwork = -1; double qwork = 0.0;
+    dsyev_("V", "U", &n, A, &n, w, &qwork, &lwork, &info);
+    if (info != 0) { free(A); free(w); free(r); return -1; }
+    lwork = (int)qwork;
+    double *work = malloc((size_t)lwork * sizeof(double));
+    if (!work) { free(A); free(w); free(r); return -1; }
+    dsyev_("V", "U", &n, A, &n, w, work, &lwork, &info);
+    free(work);
+    if (info != 0) { free(A); free(w); free(r); return -1; }
+
+    double mean = 0.0;
+    for (int i = 0; i < n; i++) mean += y[i];
+    mean /= (double)n;
+    for (int k = 0; k < n; k++) {          /* r = U^T (y - mean) */
+        double s = 0.0;
+        for (int i = 0; i < n; i++) s += A[(size_t)k * n + i] * (y[i] - mean);
+        r[k] = s;
+    }
+    double vg = 0.0;
+    for (int k = 0; k < n; k++) {
+        double lam = w[k] > 0.0 ? w[k] : 0.0;
+        double d = su2 * lam + se2; if (d < 1e-12) d = 1e-12;
+        double m = (su2 * lam / d) * r[k];
+        double v = (su2 * lam) * se2 / d;
+        vg += m * m + v;
+    }
+    vg /= (double)n;
+    free(A); free(w); free(r);
+    if (vg + se2 <= 1e-12) return -1;
+    *out_h2 = vg / (vg + se2);
+    return 0;
+}
 
 /* ------------------------------------------------------------------------- *
  * Small helpers.
@@ -1042,7 +1105,7 @@ int sargent_predict(sargent_t *sg,
     double stack_w[3] = {0.0, 0.0, 0.0};
     int    stack_ok = 0;
     double snp_h2 = NAN, arg_h2 = NAN, sargent_sigma2 = NAN, sargent_rand_r = NAN;
-    double arg_su2 = NAN, arg_sigma2 = NAN;
+    double arg_su2 = NAN, arg_sigma2 = NAN, arg_h2_pve = NAN;
     double su_su2 = NAN, su_sigma2 = NAN;
     double s2, su2, mean_fit;
 
@@ -1114,6 +1177,14 @@ int sargent_predict(sargent_t *sg,
         if (arg_test) memcpy(arg_test, yhat, (size_t)n_te * sizeof(double));
         arg_h2 = su2 / (su2 + s2);
         arg_su2 = su2; arg_sigma2 = s2;
+        /* Same realized-variance estimator the joint chain reports, so the two
+         * SARGENT arms in the h^2 panel are on one footing.  Kt is the CENTRED
+         * train kernel this fit used.  On failure arg_h2 keeps the plug-in. */
+        {
+            double h2r;
+            if (realized_h2_1k(Kt, y_train, n_tr, su2, s2, &h2r) == 0)
+                arg_h2_pve = h2r;
+        }
         free(Kt); free(Kc);
     }
 
@@ -1364,6 +1435,9 @@ int sargent_predict(sargent_t *sg,
         ARM_IF(SG_ARM_SNP_LMM, "snp_lmm", m_snp);
         fprintf(f, "  \"snp_lmm_h2\": "); json_num(f, snp_h2); fprintf(f, ",\n");
         ARM_IF(SG_ARM_SARGENT_UR, "arg_lmm", m_arg);
+        if (arg_h2_pve == arg_h2_pve) {
+            fprintf(f, "  \"arg_lmm_pve\": "); json_num(f, arg_h2_pve); fprintf(f, ",\n");
+        }
         fprintf(f, "  \"arg_lmm_h2\": "); json_num(f, arg_h2); fprintf(f, ",\n");
         /* The variance components of this fit define V, hence the REML projector
          * P that branch scores are taken against.  Emitted so an external

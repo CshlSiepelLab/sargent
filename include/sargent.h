@@ -87,6 +87,12 @@ typedef struct {
      * em_iters: number of outer iterations of joint variational coordinate
      *   descent in var_joint; 0 = no EM (default; sequential SNP then ARG). */
     int uniform_arg;
+
+    /* BSLMM-style PVE from the joint chain: the posterior mean of
+     * Var(X.beta + u) / Var(y) over post-burn-in sweeps.  A realized-variance
+     * estimate rather than a plug-in of the fitted variance components, which
+     * is what makes GCTB-BayesR and BSLMM unbiased where the ARG REML is not. */
+    double joint_pve, joint_pve_fix, joint_pve_rand;
     int em_iters;
 
     /* Block 2.6 — sparse fused-lasso prior on log(ws²_s).
