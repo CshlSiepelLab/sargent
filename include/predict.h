@@ -84,11 +84,18 @@ int sargent_predict(sargent_t *sg,
 #define SG_ARM_SARGENT_F   (1u << 1)   /* bayesR      fixed effects only      */
 #define SG_ARM_SARGENT_UR  (1u << 2)   /* arg_lmm     uniform ARG BLUP        */
 #define SG_ARM_SARGENT_U   (1u << 3)   /* sargent_u   fixed + ARG, jointly    */
-#define SG_ARM_SARGENT_R   (1u << 4)   /* sargent     Stage-2 learned ws^2    */
+/* RETIRED 2026-08-31.  Bit 4 stays reserved so no later arm silently inherits
+ * a mask that older results were written under.  SARGENT-R was the Stage-2
+ * learned-ws^2 predictor; it was the single best arm in 13.2% of 6452 cells,
+ * its median gain over SARGENT-U was exactly 0.0000, and in the cross-ancestry
+ * tail where it did win, SARGENT-UR won by more.  Localization moved to the
+ * per-branch score test (Fig 5), which never used it.  Adam, 2026-08-31:
+ * "the ws^2 values have not been very useful and we can retire sargent-r." */
+#define SG_ARM_SARGENT_R_RETIRED (1u << 4)
 #define SG_ARM_SARGENT_W   (1u << 5)   /* sargent_w   branch-selected ARG     */
 #define SG_ARM_SARGENT_WF  (1u << 6)   /* sargent_wf  branch-selected + fixed */
 #define SG_ARM_STACK       (1u << 7)   /* sargent_stack                       */
-#define SG_MODEL_ALL       (0xFFu)
+#define SG_MODEL_ALL       (0xFFu & ~SG_ARM_SARGENT_R_RETIRED)
 
 /* Which arms to compute and emit.  Default SG_MODEL_ALL. */
 void predict_set_models(unsigned mask);

@@ -1029,8 +1029,8 @@ int sargent_predict(sargent_t *sg,
      * took 7226 s, because skipping the .gall cache removes the shortcut but not
      * the work.  The mask, not the cache, has to decide. */
     const unsigned ARG_ARMS = SG_ARM_SARGENT_UR | SG_ARM_SARGENT_U |
-                              SG_ARM_SARGENT_R  | SG_ARM_SARGENT_W |
-                              SG_ARM_SARGENT_WF | SG_ARM_STACK;
+                              SG_ARM_SARGENT_W  | SG_ARM_SARGENT_WF |
+                              SG_ARM_STACK;
     int need_arg_kinship = ARM_ON(ARG_ARMS);
     if (need_arg_kinship) {
         if (build_kinship_blocks(&full, n_tr, n_te, h2i_full, S_full, ws2_full,
@@ -1124,12 +1124,12 @@ int sargent_predict(sargent_t *sg,
     double *rtrain = malloc((size_t)n_tr * sizeof(double));   /* residual y - Xβ */
     for (int i = 0; i < n_tr; i++) rtrain[i] = y_train[i] - prs_train[i];
 
-    metrics_t m_bayes, m_snp, m_arg, m_su, m_sg, m_w, m_wf, m_stack;
+    metrics_t m_bayes, m_snp, m_arg, m_su, m_w, m_wf, m_stack;
     /* Full-data ARG test prediction, kept for the stacked arm. */
     double *arg_test = NULL;
     double stack_w[3] = {0.0, 0.0, 0.0};
     int    stack_ok = 0;
-    double snp_h2 = NAN, arg_h2 = NAN, sargent_sigma2 = NAN, sargent_rand_r = NAN;
+    double snp_h2 = NAN, arg_h2 = NAN;
     double arg_su2 = NAN, arg_sigma2 = NAN, arg_h2_pve = NAN;
     double su_su2 = NAN, su_sigma2 = NAN;
     double s2, su2, mean_fit;
@@ -1281,32 +1281,11 @@ int sargent_predict(sargent_t *sg,
         free(prs_oof); free(arg_oof);
     }
 
-    /* (e) sargent: residual r; center K_sg; BLUP; + Xβ.
-     *     Skipped entirely without a Stage-2 ws2 fit -- this is the only arm
-     *     that needs it, and the JSON below omits it rather than substituting. */
-    if (have_ws2 && ARM_ON(SG_ARM_SARGENT_R)) {
-    center_kinship(K_sg_train, n_tr, K_sg_cross, n_te);
-    if (fit_blup(rtrain, K_sg_train, n_tr, &s2, &su2, alpha, &mean_fit) != 0) goto cleanup_pred;
-    predict_blup(K_sg_cross, n_te, n_tr, alpha, mean_fit, yhat);
-    for (int c = 0; c < n_te; c++) yhat[c] += prs_test[c];
-    m_sg = compute_metrics(yhat, y_test, n_te);
-    sargent_sigma2 = s2;
-    if (true_random) {
-        /* corr(yhat - Xtestβ, true_random) = corr(K_sg_cross·α + mean_r, ...) */
-        double *uhat = malloc((size_t)n_te * sizeof(double));
-        for (int c = 0; c < n_te; c++) uhat[c] = yhat[c] - prs_test[c];
-        double mu = 0.0, mr = 0.0;
-        for (int c = 0; c < n_te; c++) { mu += uhat[c]; mr += true_random[c]; }
-        mu /= n_te; mr /= n_te;
-        double sxy = 0.0, sxx = 0.0, syy = 0.0;
-        for (int c = 0; c < n_te; c++) {
-            double a = uhat[c] - mu, b = true_random[c] - mr;
-            sxy += a * b; sxx += a * a; syy += b * b;
-        }
-        sargent_rand_r = (sxx > 0 && syy > 0) ? sxy / sqrt(sxx * syy) : NAN;
-        free(uhat);
-    }
-    }   /* end if (have_ws2) -- the `sargent` arm */
+    /* (e) SARGENT-R retired 2026-08-31.  It was the only consumer of the
+     *     Stage-2 learned-ws^2 kinship K_sg, so that accumulator is gone too;
+     *     sargent_w / sargent_wf use branch selection instead.  The ws^2 TABLE
+     *     is still written (est.w2.tsv) for Blocks 2.1/2.2 -- only this
+     *     predictor is retired. */
 
     /* (f) sargent_w / sargent_wf: branch selection in place of the Stage-2 EM.
      *
@@ -1499,18 +1478,8 @@ int sargent_predict(sargent_t *sg,
          * it was actually computed; otherwise take the existing omission path,
          * which downstream already understands (aggregate_fig23.py checks for
          * sargent_omitted). */
-        if (have_ws2 && ARM_ON(SG_ARM_SARGENT_R)) {
-            ARM("sargent", m_sg);
-            fprintf(f, "  \"sargent_sigma2\": "); json_num(f, sargent_sigma2);
-            if (true_random) {
-                fprintf(f, ",\n  \"sargent_rand_r\": "); json_num(f, sargent_rand_r);
-            }
-            fprintf(f, "\n");
-        } else {
-            fprintf(f, "  \"sargent_omitted\": \"no Stage-2 ws2 fit "
-                       "(--snp-only, or --model without sargent-r); arms "
-                       "reported: bayesR, snp_lmm, arg_lmm, sargent_u\"\n");
-        }
+        fprintf(f, "  \"sargent_omitted\": \"SARGENT-R retired 2026-08-31; "
+                   "arms reported: bayesR, snp_lmm, arg_lmm, sargent_u\"\n");
         if (bsel_ok) {
             fprintf(f, ",\n");
             ARM("sargent_w", m_w);
@@ -1541,10 +1510,6 @@ int sargent_predict(sargent_t *sg,
         fprintf(stderr, "  snp_lmm    R2=%+.3f r=%+.3f\n", m_snp.r2, m_snp.r);
         fprintf(stderr, "  arg_lmm    R2=%+.3f r=%+.3f\n", m_arg.r2, m_arg.r);
         fprintf(stderr, "  sargent_u  R2=%+.3f r=%+.3f\n", m_su.r2, m_su.r);
-        if (have_ws2)
-            fprintf(stderr, "  sargent    R2=%+.3f r=%+.3f\n", m_sg.r2, m_sg.r);
-        else
-            fprintf(stderr, "  sargent    (omitted: no Stage-2 ws2)\n");
         if (bsel_ok) {
             fprintf(stderr, "  sargent_w  R2=%+.3f r=%+.3f   "
                     "(k=%d of %d branches; dr2_calib vs arg_lmm = %+.4f)\n",
