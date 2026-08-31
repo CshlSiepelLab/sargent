@@ -197,6 +197,32 @@ typedef struct {
     tsk_id_t           **tree_nodes;     /* [n_trees], NULL until first visited */
     tsk_size_t          *tree_nnodes;    /* [n_trees] */
     unsigned char       *has_child;      /* n_nodes; scratch for the filter */
+
+    /* Structure replay, for INFERRED ARGs.
+     *
+     * build_kinship_blocks walks the whole sequence once PER COLUMN, and on an
+     * inferred ARG tskit's own tsk_tree_next is 77% of the kinship build: Relate
+     * carries 731,756 edges over 122 trees (~12,000 changing per transition)
+     * against 12,674 over 1,741 trees (~7), and every tsk_tree_next re-applies
+     * those diffs to tskit's internal arrays.  One cell therefore performs
+     * ~1.46e9 tskit edge updates across 1,000 traversals of a sequence that
+     * never changes.
+     *
+     * So cache the structure of each tree on the first traversal -- parent and
+     * branch length for the PRESENT nodes only, alongside tree_nodes -- and
+     * replay it for every later column, never touching tskit again.  Storing
+     * only present nodes is what makes this cheap: ~8.8 MB for a Relate cell
+     * against ~540 MB for the full node table.  Gated on `compact`, so
+     * simulated ARGs are untouched (they would cost 125 MB for no gain, tskit
+     * being 6.6% of their build). */
+    tsk_id_t           **tree_parent;    /* [n_trees][tree_nnodes[t]] */
+    double             **tree_bl;        /* [n_trees][tree_nnodes[t]] */
+    double              *tree_span;      /* [n_trees] raw interval width */
+    int                  struct_cached;  /* 1 once the full sequence is cached */
+    double              *S0;             /* n_nodes; per-node seed set by _reset.
+                                          * Replay rebuilds S from the leaves, so
+                                          * it cannot re-derive the seed from the
+                                          * caller's `in`, which is long gone. */
 } tree_cov_matvec_inc_state_t;
 
 /* Allocate scratch buffers; returns 0 on success, -1 on OOM. */
