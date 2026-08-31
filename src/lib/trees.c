@@ -557,6 +557,15 @@ int tree_cov_matvec_inc_state_init(tree_cov_matvec_inc_state_t *st,
                                     int n_indiv,
                                     const int *hap_to_indiv)
 {
+    /* Zero EVERYTHING first.  The optional per-tree caches below are allocated
+     * only when `compact` is set, but tree_cov_matvec_inc_state_free() frees
+     * them unconditionally.  build_kinship_blocks memsets its state before
+     * calling here, so it survived; gall_build declares its state on the stack
+     * and does not, so those pointers held stack garbage and free() segfaulted
+     * on the first cold .gall build.  An init function must fully initialise
+     * its object rather than depend on the caller having zeroed it. */
+    memset(st, 0, sizeof *st);
+
     st->ts            = ts;
     st->n_indiv       = n_indiv;
     st->hap_to_indiv  = hap_to_indiv;
