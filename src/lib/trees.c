@@ -11,6 +11,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
+#include <string.h>
+#include <stdlib.h>
 #include <time.h>
 
 #include <tskit.h>
@@ -548,6 +550,8 @@ static int node_time_desc_cmp(const void *a, const void *b)
     return (x->id < y->id) ? -1 : (x->id > y->id);
 }
 
+static void build_tree_nodes(tree_cov_matvec_inc_state_t *st, int s);
+
 int tree_cov_matvec_inc_state_init(tree_cov_matvec_inc_state_t *st,
                                     const tsk_treeseq_t *ts,
                                     int n_indiv,
@@ -583,6 +587,30 @@ int tree_cov_matvec_inc_state_init(tree_cov_matvec_inc_state_t *st,
         for (tsk_size_t k = 0; k < st->n_nodes; k++) st->time_order[k] = keys[k].id;
         free(keys);
     }
+
+    /* Compact only when it pays.  A tree over n samples holds at most ~2n-1
+     * nodes, so compare the node table against that.  Simulated ARG: 7,444 vs
+     * ~6,000, ratio 1.2 -> sweep the global order, no cache, no extra memory.
+     * Relate ARG: 368,878 vs ~6,000, ratio 61 -> compact, or the sweep does 60x
+     * redundant work.  The threshold is deliberately loose; between 1 and 4 the
+     * two paths cost about the same, so the choice cannot go badly wrong. */
+    {
+        tsk_size_t n_hap = tsk_treeseq_get_num_samples(ts);
+        tsk_size_t per_tree = 2 * n_hap;
+        st->compact = (per_tree > 0 && st->n_nodes > 4 * per_tree);
+        st->cur_tree = 0;
+        st->n_trees = tsk_treeseq_get_num_trees(ts);
+
+        if (st->compact) {
+            st->tree_nodes  = calloc((size_t)st->n_trees, sizeof(*st->tree_nodes));
+            st->tree_nnodes = calloc((size_t)st->n_trees, sizeof(*st->tree_nnodes));
+            st->has_child   = malloc((size_t)st->n_nodes * sizeof(*st->has_child));
+            if (!st->tree_nodes || !st->tree_nnodes || !st->has_child) {
+                tree_cov_matvec_inc_state_free(st);
+                return -1;
+            }
+        }
+    }
     return 0;
 }
 
@@ -594,11 +622,25 @@ void tree_cov_matvec_inc_state_free(tree_cov_matvec_inc_state_t *st)
     free(st->bl);         st->bl         = NULL;
     free(st->time_order); st->time_order = NULL;
     free(st->cum);        st->cum        = NULL;
+    if (st->tree_nodes) {
+        for (tsk_size_t t = 0; t < st->n_trees; t++) free(st->tree_nodes[t]);
+        free(st->tree_nodes); st->tree_nodes = NULL;
+    }
+    free(st->tree_nnodes); st->tree_nnodes = NULL;
+    free(st->has_child);   st->has_child   = NULL;
 }
 
 void tree_cov_matvec_inc_state_reset(tree_cov_matvec_inc_state_t *st,
                                      const double *in)
 {
+    /* Tree index for the per-tree node cache.  The STATE counts its own
+     * advances rather than trusting the caller to pass an index: the first
+     * version required tree_walker_run_inc to set it, and check_tree_matvec --
+     * which drives advance/readout directly -- left it pinned at 0, so every
+     * tree reused tree 0's node list.  That is a silent wrong answer, and it
+     * only surfaced because the validator happened to cover it. */
+    st->cur_tree = -1;
+
     const tsk_id_t *sample_index_map = tsk_treeseq_get_sample_index_map(st->ts);
 
     for (tsk_size_t u = 0; u < st->n_nodes; u++) {
@@ -624,6 +666,13 @@ void tree_cov_matvec_inc_state_reset(tree_cov_matvec_inc_state_t *st,
 void tree_cov_matvec_inc_advance(tree_cov_matvec_inc_state_t *st,
                                   const tsk_tree_t *tree)
 {
+    /* Tree index for the per-tree node cache.  The state counts its own
+     * advances rather than trusting a caller to pass an index: requiring that
+     * left check_tree_matvec -- which drives advance/readout directly -- pinned
+     * at tree 0, so every tree reused tree 0's node list.  A silent wrong
+     * answer, caught only because the validator covers that path. */
+    st->cur_tree++;
+
     const tsk_table_collection_t *tables      = st->ts->tables;
     const tsk_id_t               *edge_parent = tables->edges.parent;
     const tsk_id_t               *edge_child  = tables->edges.child;
@@ -684,15 +733,70 @@ void tree_cov_matvec_inc_advance(tree_cov_matvec_inc_state_t *st,
  * the rounding differs, so this is not a bit-identical change; it is checked
  * against a tolerance instead, and measures MORE accurate than the loop it
  * replaced (each path sum is formed once, not re-derived per descendant). */
-static inline void readout_prefix(const tree_cov_matvec_inc_state_t *st)
+/* Time-ordered list of the nodes present in the current tree, built once per
+ * tree index and reused across the n_tr column passes (they all traverse the
+ * same sequence, so the structure repeats even though S[] does not).
+ *
+ * "Present" = has a parent, or is a root with at least one child, OR IS A
+ * SAMPLE.  All three matter:
+ *   - roots, because the sweep is what zeroes cum[root] and a child reads it;
+ *   - samples unconditionally, because an inferred ARG can leave a sample
+ *     ISOLATED in a given tree (no parent, no children).  The global sweep gave
+ *     such a node cum = 0 for free; a compacted list that skips it leaves
+ *     cum[sample] holding a STALE value from the previous tree, and the gather
+ *     loop reads exactly that.  This was not hypothetical -- it produced
+ *     naive=-2198.47 against inc=1.36 on a Relate cell. */
+static void build_tree_nodes(tree_cov_matvec_inc_state_t *st, int s)
 {
-    const tsk_id_t *ord    = st->time_order;
+    const tsk_id_t *parent  = st->our_parent;
+    unsigned char  *hc      = st->has_child;
+    const tsk_id_t *samples = tsk_treeseq_get_samples(st->ts);
+    const tsk_size_t n_hap  = tsk_treeseq_get_num_samples(st->ts);
+
+    memset(hc, 0, (size_t)st->n_nodes);
+    for (tsk_size_t u = 0; u < st->n_nodes; u++)
+        if (parent[u] != TSK_NULL) hc[parent[u]] = 1;
+    for (tsk_size_t hi = 0; hi < n_hap; hi++) hc[samples[hi]] = 1;
+
+    tsk_size_t cnt = 0;
+    for (tsk_size_t u = 0; u < st->n_nodes; u++)
+        if (parent[u] != TSK_NULL || hc[u]) cnt++;
+
+    tsk_id_t *list = malloc((size_t)(cnt ? cnt : 1) * sizeof(*list));
+    if (!list) return;                    /* caller falls back to the global sweep */
+    tsk_size_t m = 0;
+    for (tsk_size_t k = 0; k < st->n_nodes; k++) {
+        tsk_id_t u = st->time_order[k];
+        if (parent[u] != TSK_NULL || hc[u]) list[m++] = u;
+    }
+    st->tree_nodes[s]  = list;
+    st->tree_nnodes[s] = m;
+}
+
+/* Root-path prefix sum: cum[u] = bl[u]*S[u] + cum[parent(u)], cum[root] = 0,
+ * swept in an order that puts every parent before its children. */
+static inline void readout_prefix(const tree_cov_matvec_inc_state_t *cst)
+{
+    /* The lazily-built per-tree list is a cache, so this mutates through a
+     * const handle.  The readout's observable output is unchanged. */
+    tree_cov_matvec_inc_state_t *st = (tree_cov_matvec_inc_state_t *)cst;
+
+    const tsk_id_t *ord = st->time_order;
+    tsk_size_t      n   = st->n_nodes;
+
+    if (st->compact && st->cur_tree >= 0 &&
+        (tsk_size_t)st->cur_tree < st->n_trees) {
+        int t = st->cur_tree;
+        if (!st->tree_nodes[t]) build_tree_nodes(st, t);
+        if (st->tree_nodes[t]) { ord = st->tree_nodes[t]; n = st->tree_nnodes[t]; }
+    }
+
     const tsk_id_t *parent = st->our_parent;
     const double   *bl     = st->bl;
     const double   *S      = st->S;
     double         *cum    = st->cum;
 
-    for (tsk_size_t k = 0; k < st->n_nodes; k++) {
+    for (tsk_size_t k = 0; k < n; k++) {
         tsk_id_t u = ord[k];
         tsk_id_t p = parent[u];
         cum[u] = (p == TSK_NULL) ? 0.0 : cum[p] + bl[u] * S[u];
