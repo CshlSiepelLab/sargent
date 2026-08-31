@@ -21,6 +21,7 @@ Outputs (all with --out prefix):
 import argparse
 import json
 import math
+import os
 import sys
 
 import msprime
@@ -513,6 +514,100 @@ def main():
     ap.add_argument("--unobs-maf-max", type=float, default=0.5,
                     help="maximum MAF for SV-class carve-out (default 0.5 = no upper filter). "
                          "Set e.g. 0.05 to restrict to rare-variant SV class.")
+    # ---- structure of the unobserved class --------------------------------
+    # WHY THESE EXIST.  Under infinite sites an untyped variant sits on exactly
+    # ONE branch, and a COMMON variant's branch is old and widely carried, so
+    # nearby typed SNPs tag it almost perfectly.  Measured on these cells: at 830
+    # SNPs/Mb, of 1384 untyped variants exactly ONE has MAF > 5% -- and it is well
+    # tagged.  A carve-out selected by FREQUENCY is therefore untyped but not
+    # untagged: the SNP arms lose nothing by not typing it and the ARG has no
+    # advantage to demonstrate.  That is what the first SV experiment measured
+    # (+0.010) and what a 20-cell repeat at h2_arg = 0 reproduced
+    # (+0.0095 +/- 0.0080).  Both knobs below break the one-variant-one-branch
+    # correspondence that makes "untyped" imply "tagged".
+    #
+    # Defaults (1 / 0.0) are OFF and the legacy code path is kept literally, so
+    # existing seeds reproduce bit for bit.
+    # ---- the unobserved class as a SEPARATE MUTATIONAL PROCESS -------------
+    # WHY.  The --h2-unobs machinery above draws the unobserved class from the
+    # SNV pool and then hides those variants from the panel.  But hiding an SNV
+    # does not make it untaggable: OTHER SNVs on the SAME BRANCH are still in the
+    # panel and tag it exactly, which is why the carve-out was only ever worth
+    # ~+0.01 (20 cells, +0.0095 +/- 0.0080).
+    #
+    # A structural variant is not a hidden SNV.  It arises by its own mutational
+    # process, at its own (much lower) rate, and is absent from an SNV callset by
+    # construction.  Whether it is tagged is then EMERGENT: it depends on whether
+    # an SNV happened to land on the same branch -- a Poisson hit with mean
+    # mu_snv * l_b * span_b.  Measured on these cells, ~80% of branch weight
+    # carries no SNV, so most SVs land untagged without anything being imposed.
+    #
+    # --sv-rate turns the class on.  Human de novo SV estimates (~0.16 per genome
+    # per generation over ~3.1 Gb) give ~5e-11 /bp/gen, about 1/250 of the SNV
+    # rate; at 1.25e-8 that is --sv-rate 5e-11.  Default 0 = off, and the legacy
+    # code path is kept literally so existing seeds reproduce bit for bit.
+    # ---- RECURRENCE: one variant, k independent origins ---------------------
+    # WHY.  Validation of --sv-rate showed a single-origin SV is usually WELL
+    # TAGGED (median max r2 0.88-1.00): mutations land in proportion to
+    # branch_length x span, so they concentrate on LONG branches -- exactly the
+    # ones that also caught an SNV.  A carrier set that is a UNION of branches is
+    # the only kind no single mutation can match, because no mutation sits on
+    # more than one branch.
+    #
+    # Biologically this is ordinary: NAHR-recurrent CNVs, VNTR length classes and
+    # STR expansions all arise repeatedly at one locus on different haplotype
+    # backgrounds.  The composite variant is built from k branches drawn in
+    # proportion to branch length at one locus -- i.e. exactly where independent
+    # mutations would have fallen -- and its carriers are the union of their
+    # descendants.  It is never in the BED panel: an SNV callset contains no
+    # VNTR length alleles.
+    #
+    # This is a SIMULATION construct only.  The inference methods are blind to
+    # it; they see a phenotype and a panel, which is what keeps the comparison
+    # fair.  Default 1 = off, legacy path kept literally.
+    ap.add_argument("--unobs-recurrence-zipf", type=float, default=0.0,
+                    help="draw each unobserved variant's number of origins K from "
+                         "a Zipf(a) distribution with MODE 1 instead of fixing it "
+                         "(default 0 = off; try a=2.0). More defensible than a "
+                         "fixed K: most structural variants are single-origin and "
+                         "a minority (VNTRs, NAHR-hotspot CNVs) recur heavily, so "
+                         "phi emerges from the mixture rather than being dialled, "
+                         "and there is no arbitrary K to justify. Capped by "
+                         "--unobs-recurrence-kmax.")
+    ap.add_argument("--unobs-recurrence-kmax", type=int, default=20,
+                    help="cap on K when --unobs-recurrence-zipf is used (default 20). "
+                         "Zipf has an infinite mean for a<=2, so a cap is required.")
+    ap.add_argument("--unobs-recurrence-k", type=int, default=1,
+                    help="build each unobserved causal variant as a RECURRENT "
+                         "variant with K independent origins at one locus, its "
+                         "carriers being the union of K clades (default 1 = off). "
+                         "Models NAHR-recurrent CNVs, VNTRs and STR expansions. "
+                         "K > 1 is the only construct that makes a variant "
+                         "untaggable by ANY single marker.")
+    ap.add_argument("--sv-rate", type=float, default=0.0,
+                    help="per-bp per-generation mutation rate for a SEPARATE "
+                         "structural-variant class, overlaid on the same ARG and "
+                         "never placed in the BED panel (default 0 = off). When "
+                         "> 0 the --h2-unobs class is drawn from these variants "
+                         "rather than from hidden SNVs, so 'untyped' is no longer "
+                         "the same as 'tagged'. Suggested: 5e-11 (~1/250 of the "
+                         "SNV rate, from human de novo SV estimates).")
+    ap.add_argument("--unobs-series-k", type=int, default=1,
+                    help="allelic series: place the unobserved class as groups of K "
+                         "DISTINCT causal variants within one locus, with same-sign effects, "
+                         "instead of independent singletons (default 1 = off).  The aggregate "
+                         "carrier set is then a union of K branches, which no single marker "
+                         "can tag -- the reason gene-based burden tests exist -- while a "
+                         "branch-additive ARG random effect still spans it.")
+    ap.add_argument("--unobs-series-kb", type=float, default=25.0,
+                    help="locus half-width in kb for --unobs-series-k (default 25): the K "
+                         "variants of a series are drawn within this distance of the anchor.")
+    ap.add_argument("--unobs-mask-kb", type=float, default=0.0,
+                    help="locally-sparse markers: exclude typed SNPs within this many kb of an "
+                         "unobserved causal variant (default 0 = off).  Models SVs arising in "
+                         "repetitive regions where arrays and short-read calling under-perform. "
+                         "The panel SIZE is held fixed -- markers are redistributed elsewhere -- "
+                         "so overall density is unchanged and only the LOCAL depletion differs.")
     # BayesR-style mixture for fixed effects (sigma² relative to var_pheno=1)
     ap.add_argument("--sigma2-mix",  type=float, nargs="+",
                     default=[0.0, 1e-4, 1e-3, 1e-2],
@@ -757,6 +852,21 @@ def main():
         )
     ts = msprime.sim_mutations(ts, rate=args.mut_rate, random_seed=args.seed + 1)
 
+    # Second, INDEPENDENT mutational process for the structural-variant class.
+    # Overlaid on the same genealogy, so an SV is a real mutation on a real
+    # branch -- not an effect attached to a branch by fiat. Identified by the
+    # site positions that did not exist before the overlay; a collision with an
+    # existing SNV position makes the site multiallelic and it is dropped by the
+    # biallelic filter below, which is the conservative outcome.
+    sv_positions = set()
+    if args.sv_rate > 0.0:
+        _pre = set(ts.tables.sites.position.tolist())
+        ts = msprime.sim_mutations(ts, rate=args.sv_rate,
+                                   random_seed=args.seed + 7, keep=True)
+        sv_positions = set(ts.tables.sites.position.tolist()) - _pre
+        print(f"  SV class: {len(sv_positions)} sites at rate {args.sv_rate:g} "
+              f"({args.sv_rate/args.mut_rate:.4f} x the SNV rate)", flush=True)
+
     # F_ST between train_pop and test_pop (stdpopsim only, computed on the
     # full tree sequence using tskit's Hudson estimator).
     fst_train_test = None
@@ -805,6 +915,7 @@ def main():
     dosage_list = []   # each entry: dosage vector (n_indiv,)
     pos_list    = []
     age_list    = []   # per-variant age (generations), from mutation time
+    is_sv_list  = []   # True when the variant came from the SV overlay
 
     # Pre-build a tree iterator so we can resolve mutation.node → branch parent
     # time when the mutation's own `time` field is unknown (older tskit).
@@ -829,6 +940,7 @@ def main():
             parent_node = tree.parent(mut.node)
             age = float(tree.time(parent_node)) if parent_node != tskit.NULL else 0.0
         age_list.append(age)
+        is_sv_list.append(var.site.position in sv_positions)
 
     p = len(dosage_list)
     if p == 0:
@@ -838,6 +950,10 @@ def main():
     dosage = np.stack(dosage_list)   # (p, n_indiv)
     positions = pos_list
     ages = np.array(age_list, dtype=float)  # per-variant age in generations
+    is_sv = np.array(is_sv_list, dtype=bool)
+    if is_sv.any():
+        print(f"  {int(is_sv.sum())} of {p} polymorphic variants are SV-class",
+              flush=True)
 
     # ---- Block 2.2: gene-structured annotation partition -------------------
     # Build the exon/promoter/intergenic partition (dedicated rng so the
@@ -892,28 +1008,174 @@ def main():
     # so the carved-out variance is genuinely "missing" from BayesR rather
     # than leaked back through tag-SNP LD.  Default range [0, 0.5] keeps
     # legacy behaviour (no MAF filter).
-    if args.h2_unobs > 0:
+    # ---- recurrent (union-of-branches) unobserved variants -----------------
+    recurrence_built = False
+    if args.h2_unobs > 0 and (args.unobs_recurrence_k > 1 or args.unobs_recurrence_zipf > 0):
+        K = args.unobs_recurrence_k
+        rec_rng = np.random.default_rng(args.seed + 99_991)
+        node_to_indiv = np.full(ts.num_nodes, -1, dtype=np.int64)
+        for _i in range(n_indiv):
+            for _nd in ts.individual(_i).nodes:
+                node_to_indiv[_nd] = _i
+        new_dos, new_pos, new_age, k_used = [], [], [], []
+        tries = 0
+        while len(new_dos) < args.n_unobs_causal and tries < 200 * args.n_unobs_causal:
+            tries += 1
+            if args.unobs_recurrence_zipf > 0:
+                K = int(min(rec_rng.zipf(args.unobs_recurrence_zipf),
+                            args.unobs_recurrence_kmax))
+            locus = float(rec_rng.uniform(0, args.length))
+            tree = ts.at(locus)
+            # Draw a target frequency for the composite, then take K origins of
+            # COMPARABLE size (~target/K each).  Sampling origins by branch
+            # length alone picks long branches, so one large clade dominates the
+            # union and a marker tagging that clade tags the union -- measured
+            # median max r2 0.68-0.90 even at K=8.  Real recurrent CNVs / VNTRs
+            # arise repeatedly on modest, recent backgrounds, so the union is
+            # several comparable rare clades; that is both the realistic model
+            # and the one no single marker can match.
+            f_target = float(rec_rng.uniform(max(args.unobs_maf_min, 0.02),
+                                             min(args.unobs_maf_max, 0.35)))
+            f_each = f_target / K
+            n_hap = 2 * n_indiv
+            cand, wts = [], []
+            for u in tree.nodes():
+                par = tree.parent(u)
+                if par == tskit.NULL:
+                    continue
+                bl = tree.time(par) - tree.time(u)
+                if bl <= 0:
+                    continue
+                fu = tree.num_samples(u) / n_hap
+                if not (0.4 * f_each <= fu <= 1.8 * f_each):
+                    continue
+                cand.append(u); wts.append(bl)
+            if len(cand) < K:
+                continue
+            wts = np.asarray(wts, dtype=float); wts /= wts.sum()
+            pick = rec_rng.choice(len(cand), size=K, replace=False, p=wts)
+            hap = set()
+            for j in pick:
+                hap.update(tree.samples(cand[j]))          # union of the K clades
+            d = np.zeros(n_indiv)
+            for h in hap:
+                ii = node_to_indiv[h]
+                if ii >= 0:
+                    d[ii] += 1.0                            # per-haplotype count
+            f = d.sum() / (2.0 * n_indiv)
+            m = min(f, 1.0 - f)
+            if m < max(args.unobs_maf_min, 1e-9) or m > args.unobs_maf_max:
+                continue
+            if d.min() == d.max():
+                continue
+            new_dos.append(d); new_pos.append(int(locus)); k_used.append(K)
+            new_age.append(float(np.mean([tree.time(tree.parent(cand[j])) for j in pick])))
+        if len(new_dos) < args.n_unobs_causal:
+            sys.exit(f"ERROR: could only build {len(new_dos)} of "
+                     f"{args.n_unobs_causal} recurrent variants at K={K} in MAF "
+                     f"[{args.unobs_maf_min}, {args.unobs_maf_max}]; widen the MAF "
+                     f"range, lower K, or lengthen --length.")
+        dosage    = np.vstack([dosage, np.stack(new_dos)])
+        positions = list(positions) + new_pos
+        ages      = np.concatenate([ages, np.asarray(new_age, dtype=float)])
+        is_sv     = np.concatenate([is_sv, np.ones(len(new_dos), dtype=bool)])
+        unobs_idx = np.arange(p, p + len(new_dos), dtype=int)
+        p         = dosage.shape[0]
+        n_unobs_causal = len(unobs_idx)
+        unobs_series   = np.arange(n_unobs_causal)
+        unobs_set      = set(unobs_idx.tolist())
+        recurrence_built = True
+        # The typed-causal pool excludes the composites, exactly as the
+        # non-recurrent path excludes its unobs_idx.
+        remaining = np.array([j for j in range(p) if j not in unobs_set])
+        _f = dosage[unobs_idx].mean(axis=1) / 2.0
+        _kdesc = (f"K~Zipf({args.unobs_recurrence_zipf}) capped {args.unobs_recurrence_kmax}, "
+                  f"mean {np.mean(k_used):.1f}, max {int(np.max(k_used))}, "
+                  f"{100*np.mean(np.asarray(k_used)==1):.0f}% single-origin"
+                  if args.unobs_recurrence_zipf > 0 else f"K={K}")
+        print(f"  recurrence: {n_unobs_causal} variants, {_kdesc}, "
+              f"MAF {np.min(np.minimum(_f,1-_f)):.3f}-{np.max(np.minimum(_f,1-_f)):.3f}",
+              flush=True)
+
+    if args.h2_unobs > 0 and not recurrence_built:
         n_unobs_causal = min(args.n_unobs_causal, p)
         freq = dosage.mean(axis=1) / 2.0
         maf  = np.minimum(freq, 1.0 - freq)
         eligible = np.where((maf >= args.unobs_maf_min) &
                             (maf <= args.unobs_maf_max))[0]
+        # With a real SV class present, the unobserved variants ARE the SVs.
+        # Their untaggability is then emergent (did an SNV land on the same
+        # branch?) rather than imposed by hiding an SNV that has twins.
+        if is_sv.any():
+            eligible = np.array([j for j in eligible if is_sv[j]], dtype=int)
+            print(f"  unobserved class drawn from the SV pool: "
+                  f"{len(eligible)} eligible SV variants", flush=True)
         if len(eligible) < n_unobs_causal:
             sys.exit(f"ERROR: only {len(eligible)} variants in MAF "
                      f"[{args.unobs_maf_min}, {args.unobs_maf_max}], need "
                      f"{n_unobs_causal}.  Lengthen --length or widen MAF range.")
-        if var_tau is not None:
-            ew = var_tau[eligible].astype(float)
-            unobs_idx = rng.choice(eligible, size=n_unobs_causal, replace=False,
-                                   p=ew / ew.sum())
+        if args.unobs_series_k > 1:
+            # ---- allelic series -------------------------------------------
+            # Draw n_loci anchors, then take K-1 further ELIGIBLE variants within
+            # +/- unobs_series_kb of each.  The K variants are distinct sites (an
+            # allelic series, not one recurrent mutation), so each still sits on
+            # its own branch; what changes is that the class's variance is carried
+            # by a UNION of K branches per locus.  No single marker correlates
+            # with that union, while a branch-additive random effect spans it.
+            # unobs_series[] records group membership so the effect draw can give
+            # one locus a common sign (see the beta_unobs block).
+            K = args.unobs_series_k
+            n_loci = max(1, n_unobs_causal // K)
+            win = args.unobs_series_kb * 1e3
+            posv = np.asarray(positions, dtype=float)
+            picked, groups, used = [], [], set()
+            anchors = rng.permutation(eligible)
+            for a in anchors:
+                if len(picked) >= n_loci * K:
+                    break
+                if a in used:
+                    continue
+                near = eligible[(np.abs(posv[eligible] - posv[a]) <= win)]
+                near = np.array([j for j in near if j not in used])
+                if len(near) < K:
+                    continue          # locus too sparse to host a series
+                sel = rng.choice(near, size=K, replace=False)
+                gid = len(groups)
+                for j in sel:
+                    picked.append(int(j)); groups.append(gid); used.add(int(j))
+                groups_last = gid
+            if len(picked) < K:
+                sys.exit(f"ERROR: --unobs-series-k {K} could not find any locus with "
+                         f"{K} eligible variants within +/-{args.unobs_series_kb} kb.  "
+                         f"Widen --unobs-series-kb, lower --unobs-series-k, or widen "
+                         f"the MAF range.")
+            order = np.argsort(picked)
+            unobs_idx    = np.array(picked, dtype=int)[order]
+            unobs_series = np.array(groups, dtype=int)[order]
+            n_unobs_causal = len(unobs_idx)
+            print(f"  Allelic series: {len(set(groups))} loci x K={K} "
+                  f"= {n_unobs_causal} unobserved causal variants", flush=True)
         else:
-            unobs_idx = rng.choice(eligible, size=n_unobs_causal, replace=False)
-        unobs_idx.sort()
+            # Legacy path, kept literally so existing seeds reproduce bit for bit.
+            if var_tau is not None:
+                ew = var_tau[eligible].astype(float)
+                unobs_idx = rng.choice(eligible, size=n_unobs_causal, replace=False,
+                                       p=ew / ew.sum())
+            else:
+                unobs_idx = rng.choice(eligible, size=n_unobs_causal, replace=False)
+            unobs_idx.sort()
+            unobs_series = np.arange(len(unobs_idx))   # each variant its own group
         unobs_set = set(unobs_idx.tolist())
         remaining = np.array([j for j in range(p) if j not in unobs_set])
-    else:
+    elif not recurrence_built:
+        # Only clear when there is genuinely no unobserved class. Guarding on
+        # `not recurrence_built` matters: the recurrence branch above has already
+        # populated unobs_idx / n_unobs_causal, and falling through to here would
+        # silently wipe them -- the class would be built and then never given
+        # effects, leaving the phenotype with no unassayed component at all.
         n_unobs_causal = 0
         unobs_idx = np.zeros(0, dtype=int)
+        unobs_series = np.zeros(0, dtype=int)
         remaining = np.arange(p)
 
     # --bed-snps-per-mb targets the panel SIZE directly.  --bed-coverage's meaning
@@ -938,6 +1200,43 @@ def main():
             _maf = np.minimum(_af, 1.0 - _af)
             _het = 2.0 * _maf * (1.0 - _maf)
             _elig = np.flatnonzero(_het > 0.0)   # monomorphic sites are ineligible
+            # Locally-sparse markers: drop candidates near an unobserved causal
+            # variant BEFORE the draw, not after.  Doing it before keeps _k -- and
+            # hence the panel size and overall density -- unchanged: the markers
+            # are redistributed to the rest of the region rather than deleted.
+            # That is what makes the contrast attributable to LOCAL depletion
+            # rather than to a thinner panel, which would confound it with the
+            # density axis this experiment is trying to escape.
+            if args.unobs_mask_kb > 0.0 and len(unobs_idx):
+                _posv = np.asarray(positions, dtype=float)
+                _win  = args.unobs_mask_kb * 1e3
+                _near = np.abs(_posv[_elig][:, None] - _posv[unobs_idx][None, :]).min(axis=1)
+                _keep = _near > _win
+                _dropped = int((~_keep).sum())
+                # The panel size that WOULD have been achieved without masking:
+                # the request, clamped by how many eligible sites exist at all.
+                # Comparing against the unclamped request would reject regions
+                # that were already variant-limited, which masking did not cause.
+                _want = _target_k if _target_k is not None else int(round(args.bed_coverage * p))
+                _want = max(1, min(_want, len(_elig)))
+                if _keep.sum() < _want:
+                    # The panel could only be filled by re-using masked sites, so
+                    # the "same density, locally depleted" property this knob is
+                    # for would silently become "thinner panel" -- which is the
+                    # density axis, i.e. exactly the confound the experiment
+                    # exists to avoid.  Refuse rather than quietly conflate them.
+                    sys.exit(
+                        f"ERROR: --unobs-mask-kb {args.unobs_mask_kb} leaves only "
+                        f"{int(_keep.sum())} eligible sites but the panel needs {_want}. "
+                        f"The masked windows ({len(unobs_idx)} variants x +/-"
+                        f"{args.unobs_mask_kb} kb) cover too much of a {args.length/1e3:.0f} kb "
+                        f"region. Lengthen --length, lower --unobs-mask-kb or "
+                        f"--n-unobs-causal, or reduce --bed-snps-per-mb.")
+                _elig = _elig[_keep]
+                print(f"  Locally-sparse markers: {_dropped} candidate sites within "
+                      f"{args.unobs_mask_kb} kb of an unobserved causal variant removed "
+                      f"from the panel pool ({len(_elig)} remain, panel size {_want} "
+                      f"unchanged)", flush=True)
             if args.bed_freq_weight == 0.0:
                 _pw = None
             else:
@@ -955,12 +1254,62 @@ def main():
     if args.h2_unobs > 0:
         bed_mask[unobs_idx] = False
 
+    # An SNV callset contains no structural variants, causal or not. Excluding
+    # only the causal ones would leak the class into the panel and understate
+    # how much of it is unassayed.
+    if is_sv.any():
+        bed_mask &= ~is_sv
+
     # Block 2.2: common-SNP / array-like typed panel.  Drop rare variants from
     # the BED so they are untyped (only the ARG can see them).
     if args.bed_maf_min > 0.0:
         freq_all = dosage.mean(axis=1) / 2.0
         maf_all  = np.minimum(freq_all, 1.0 - freq_all)
         bed_mask &= (maf_all >= args.bed_maf_min)
+
+    # ---- SV-class validation -------------------------------------------------
+    # The mechanism claims an SV is untaggable when no SNV landed on its branch.
+    # Two checks, both reported rather than assumed:
+    #   exact  -- does any PANEL SNV have precisely this carrier set? (a mutation
+    #             on the same branch produces exactly that vector)
+    #   max r2 -- realised best tagging, so PARTIAL tagging is visible too
+    # Independent branch-weight calculation predicts ~80% untagged; a large
+    # departure means the overlay is not behaving as intended.
+    sv_diag = None
+    if is_sv.any():
+        _panel = np.flatnonzero(bed_mask)
+        _svv   = np.flatnonzero(is_sv)
+        _keys  = {dosage[j].astype(np.int8).tobytes() for j in _panel}
+        _exact = np.array([dosage[j].astype(np.int8).tobytes() in _keys for j in _svv])
+        _P = dosage[_panel].T
+        _Pc = _P - _P.mean(0); _Pn = np.sqrt((_Pc * _Pc).sum(0)); _Pn[_Pn < 1e-12] = 1.0
+        _r2 = []
+        for j in _svv:
+            t = dosage[j] - dosage[j].mean()
+            tn = math.sqrt(float(t @ t))
+            if tn < 1e-12:
+                _r2.append(0.0); continue
+            r = (t @ _Pc) / (tn * _Pn)
+            _r2.append(float(np.max(r * r)))
+        _r2 = np.array(_r2)
+        sv_diag = {"n_sv_variants": int(len(_svv)),
+                   "frac_no_exact_snv_match": float(1.0 - _exact.mean()),
+                   "mean_max_r2_to_panel": float(_r2.mean()),
+                   "median_max_r2_to_panel": float(np.median(_r2)),
+                   "frac_max_r2_below_0.2": float((_r2 < 0.2).mean())}
+        print(f"  SV validation: {100*sv_diag['frac_no_exact_snv_match']:.0f}% have no exact "
+              f"panel match (branch-weight prediction ~80%); "
+              f"median max r2 to panel {sv_diag['median_max_r2_to_panel']:.3f}, "
+              f"{100*sv_diag['frac_max_r2_below_0.2']:.0f}% below r2=0.2", flush=True)
+
+    # ---- phi, MEASURED -------------------------------------------------------
+    # phi = sum_j beta_j^2 (1 - rho_j^2) / sum_j beta_j^2, rho_j = max r^2 to the
+    # panel.  It is not binary: a causal variant tagged at r2 = 0.88 still leaves
+    # 12% of its variance unassayed.  Computed over ALL causal variants (assayed
+    # and unassayed) after effects are drawn, so phi is an OUTPUT of a cell, not
+    # a knob -- which is how it should be quoted.  Filled in below once betas
+    # exist; the panel-side machinery is set up here.
+    _phi_panel = np.flatnonzero(bed_mask)
 
     if not bed_mask.any():
         sys.exit("ERROR: bed mask produced an empty BED panel; raise --bed-coverage")
@@ -1194,6 +1543,16 @@ def main():
         else:  # laplace
             # Laplace(0, b) has var = 2b² ⇒ b = scale/sqrt(2) to match Gaussian variance.
             eff = rng.laplace(0.0, scale / math.sqrt(2), size=n_unobs_causal)
+        if args.unobs_series_k > 1:
+            # SAME SIGN WITHIN A LOCUS -- this is the point of an allelic series.
+            # Distinct alleles of one gene converge on the same functional
+            # consequence, so their effects point the same way; that is why the
+            # BURDEN carries signal a single marker does not.  With random signs
+            # the K effects would partly cancel and the series would look like
+            # noise to every method, ARG included.  Magnitudes keep their draw;
+            # only the sign is imposed, one Rademacher draw per locus.
+            _sgn = rng.choice([-1.0, 1.0], size=int(unobs_series.max()) + 1)
+            eff = np.abs(eff) * _sgn[unobs_series]
         beta_unobs[unobs_idx] = eff
         y_unobs = dosage_std.T @ beta_unobs
 
@@ -1202,6 +1561,32 @@ def main():
             scale_u = math.sqrt(args.h2_unobs / var_unobs)
             beta_unobs *= scale_u
             y_unobs    *= scale_u
+
+    # ---- 4c. Joint rescale: make the TOTAL genetic variance hit its target --
+    #
+    # Each component above is scaled to its OWN target variance on norm_idx, but
+    # the components are correlated -- typed and untyped causal variants sit in
+    # the same window and are therefore in LD -- so their covariance is genetic
+    # variance that nothing budgeted for.  var(y) then lands above 1 and realised
+    # h2 above target.  Measured on the phi grid before this fix: var(y) ran
+    # 1.031 to 1.154 and true h2 (= 1 - sigma2/var(y)) ran 0.806 to 0.827
+    # against a 0.800 target, with the excess largest where the typed and
+    # untyped components were closest in size -- the signature of a cross term.
+    #
+    # Rescaling the SUM by one common factor makes the total exact while leaving
+    # every RATIO between components untouched, so phi_src (a ratio of component
+    # variances) is unchanged and only the overall trait scale moves.  ws2_vec is
+    # a variance, hence scale_g**2.
+    h2_total_target = args.h2_snp + args.h2_arg + args.h2_unobs
+    var_g_total = float(np.var((y_fixed + y_random + y_unobs)[norm_idx]))
+    if var_g_total > 0 and h2_total_target > 0:
+        scale_g = math.sqrt(h2_total_target / var_g_total)
+        beta       *= scale_g
+        beta_unobs *= scale_g
+        y_fixed    *= scale_g
+        y_random   *= scale_g
+        y_unobs    *= scale_g
+        ws2_vec    *= scale_g ** 2
 
     # ---- 5. Residual noise and final phenotype ----------------------------
     sigma2 = max(0.0, 1.0 - args.h2_snp - args.h2_arg - args.h2_unobs)
@@ -1462,6 +1847,46 @@ def main():
     if _maf_params.size == 0:                     # h2_snp == 0: no causal SNPs
         _maf_params = np.zeros(1)
 
+    # ---- measured phi --------------------------------------------------------
+    phi_measured = None
+    # beta and beta_unobs are both in PER-SD units (y is built from dosage_std),
+    # so the variance a causal variant explains is beta^2 -- not beta^2 * Var(x).
+    # beta_all is defined only inside a conditional upstream, so combine the two
+    # arrays directly rather than relying on it existing.
+    _b = np.asarray(beta) + np.asarray(beta_unobs)
+    _cidx = np.flatnonzero(_b != 0.0)
+    if os.environ.get("SIM_PHI_DEBUG"):
+        _u = np.flatnonzero(np.asarray(beta_unobs) != 0.0)
+        print(f"  [phi-dbg] p={p} len(beta)={len(beta)} len(beta_unobs)={len(beta_unobs)} "
+              f"n_causal_nonzero={_cidx.size} n_unobs_nonzero={_u.size}", flush=True)
+        print(f"  [phi-dbg] unobs_idx[:5]={list(unobs_idx[:5]) if args.h2_unobs>0 else []} "
+              f"beta_unobs nonzero idx[:5]={list(_u[:5])}", flush=True)
+        print(f"  [phi-dbg] sum b^2 total={float((_b**2).sum()):.4f} "
+              f"unobs={float((np.asarray(beta_unobs)**2).sum()):.4f} "
+              f"typed={float((np.asarray(beta)**2).sum()):.4f}", flush=True)
+    if _cidx.size and _phi_panel.size:
+        _P = dosage[_phi_panel].T
+        _Pc = _P - _P.mean(0); _Pn = np.sqrt((_Pc * _Pc).sum(0)); _Pn[_Pn < 1e-12] = 1.0
+        _num = _den = 0.0
+        _rows = []
+        for j in _cidx:
+            t = dosage[j] - dosage[j].mean()
+            tn = math.sqrt(float(t @ t))
+            rho2 = 0.0
+            if tn >= 1e-12:
+                r = (t @ _Pc) / (tn * _Pn)
+                rho2 = float(np.max(r * r))
+            v = float(_b[j]) ** 2
+            _num += v * (1.0 - rho2); _den += v
+            _rows.append((int(j), rho2, v))
+        phi_measured = float(_num / _den) if _den > 0 else None
+        _unob = set(unobs_idx.tolist()) if args.h2_unobs > 0 else set()
+        _nu = sum(v * (1.0 - r2) for j, r2, v in _rows if j in _unob)
+        _na = sum(v * (1.0 - r2) for j, r2, v in _rows if j not in _unob)
+        print(f"  phi (measured) = {phi_measured:.4f}   "
+              f"[unassayed-class share {_nu/max(_num,1e-12):.2f}, "
+              f"typed-class share {_na/max(_num,1e-12):.2f}]", flush=True)
+
     params = {
         "n_indiv":         n_train,
         "n_test":          n_test,
@@ -1481,6 +1906,12 @@ def main():
         # and record how rare the causal set actually was when it did not.
         "causal_maf_min":  args.causal_maf_min,
         "alpha":           args.alpha,
+        "sv_rate":         args.sv_rate,
+        "unobs_recurrence_k": args.unobs_recurrence_k,
+        "unobs_recurrence_zipf": args.unobs_recurrence_zipf,
+        "phi_measured":    phi_measured,
+        "n_sv_variants":   int(is_sv.sum()) if is_sv.size else 0,
+        "sv_validation":   sv_diag,
         "causal_maf_realised": {
             "min":    float(np.min(_maf_params)),
             "q25":    float(np.percentile(_maf_params, 25)),
@@ -1530,6 +1961,12 @@ def main():
         "n_unobs_causal":    n_unobs_causal,
         "unobs_effect_dist":  args.unobs_effect_dist if args.h2_unobs > 0 else None,
         "unobs_effect_scale": args.unobs_effect_scale if args.h2_unobs > 0 else None,
+        "unobs_series_k":  args.unobs_series_k  if args.h2_unobs > 0 else None,
+        "unobs_series_kb": args.unobs_series_kb if args.h2_unobs > 0
+                                                  and args.unobs_series_k > 1 else None,
+        "unobs_mask_kb":   args.unobs_mask_kb   if args.h2_unobs > 0 else None,
+        "n_unobs_loci":    (int(len(set(unobs_series.tolist()))) if args.h2_unobs > 0
+                            and len(unobs_series) else None),
         "unobs_maf_min":      args.unobs_maf_min      if args.h2_unobs > 0 else None,
         "unobs_maf_max":      args.unobs_maf_max      if args.h2_unobs > 0 else None,
         "sigma2":          sigma2,
