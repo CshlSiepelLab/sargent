@@ -473,84 +473,34 @@ static int *map_ws2_train_to_full(const double *train_breaks, int S_train,
  *
  * One set of n_train tree passes over the FULL ARG.  Column j = unit vector at
  * train individual j; each pass yields G_s·e_j over all n_total individuals.
- * The visitor accumulates two weightings simultaneously (span-weighted eGRM and
- * learned ŵ²·span).  Train rows fill the *_train blocks; test rows the *_cross
- * blocks.  Blocks are row-major.
+ * The visitor accumulates the span-weighted eGRM.  Train rows fill the *_train
+ * blocks; test rows the *_cross blocks.  Blocks are row-major.  (It used to
+ * accumulate a second, ŵ²-weighted kernel alongside; that fed SARGENT-R alone,
+ * retired 2026-08-31.)
  * ------------------------------------------------------------------------- */
 typedef struct {
     double *uni;        /* length n_total accumulator for K_uni column */
-    double *sg;         /* length n_total accumulator for K_sg column; NULL when
-                         * ws2 is absent (--snp-only): the learned arm is skipped */
-    const double *ws2_full;   /* NULL iff sg is NULL */
     int n_total;
-    int sg_span;        /* apply span to the LEARNED accumulator?  See below. */
 } kin_ctx_t;
 
-/* WHY sg_span EXISTS (it is now ALWAYS 1; kept as a switch for the legacy path).
- *
- * UPDATE 2026-08-26: span weighting is now unconditional.  The conditional below
- * existed only to serve the per-segment weights, which are being retired in
- * favour of branch selection: an un-spanned learned FIT returned ws2 with the
- * span already absorbed, so applying span again at predict time double-counted
- * it.  With the fit span-weighted in every mode (variational.c: use_span = 1),
- * fit and prediction agree and one kernel serves every arm.  This also collapses
- * the .gall / .span.gall cache split, which was a live footgun: the same cell
- * fitted in two modes silently used two different eGRMs.
- * SARGENT_PREDICT_SPAN_LEGACY is retained to reproduce pre-fix grids.
- *
- * Historical rationale follows.
- *
- * The prediction kernel must be the kernel the fit was performed under, or the
- * BLUP is solving a different model than the one whose weights it was handed.
- * Since 52e04f5 the span weight in Stage 2 is conditional on --uniform-arg
- * (variational.c: v_matvec / compute_quad_all take use_span = sg->uniform_arg,
- * and trees.c sets st.span = 1.0 when it is 0).  So:
- *
- *   uniform arms  (uniform_arg=1): fit V = Σ_s ws2·span_s·G_s  -> predict WITH span
- *   learned arms  (uniform_arg=0): fit V = Σ_s ŵ²_s·G_s        -> predict WITHOUT span
- *
- * The generative model span-weights (simulate.py: branch increment variance
- * scales with the tree's span), so an un-spanned learned fit is *supposed* to
- * return ŵ²_s ≈ ws2_true_s·span_s — span already absorbed into the estimate.
- * Multiplying by span again here weighted every tree by span twice, which is
- * a systematic reweighting toward long trees and not the fitted model.
- *
- * The uniform accumulator always keeps span: it IS the span-weighted eGRM
- * (GALL_VERSION 3+), which is what arg_lmm / sargent_u are defined against.
- *
- * SARGENT_PREDICT_SPAN_LEGACY=1 restores the pre-fix behaviour for
- * bit-comparison against grids fitted before this change. */
 static void kin_visit(const tree_walk_state_t *st, void *vctx)
 {
     kin_ctx_t *c = vctx;
     double span = st->span;
     const double *gv = st->gv;
-    /* The uniform accumulator is independent of ws2, which is why the four arms
-     * that use it (bayesR, snp_lmm, arg_lmm, sargent_u) need no Stage-2 fit. */
-    if (!c->sg) {
-        for (int i = 0; i < c->n_total; i++) c->uni[i] += span * gv[i];
-        return;
-    }
-    double w = c->ws2_full[st->s_orig] * (c->sg_span ? span : 1.0);
-    for (int i = 0; i < c->n_total; i++) {
-        double g = gv[i];
-        c->uni[i] += span * g;
-        c->sg[i]  += w * g;
-    }
+    /* Only the uniform accumulator remains.  The ŵ²-weighted one (K_sg) fed
+     * SARGENT-R alone, retired 2026-08-31; sargent_w / sargent_wf use branch
+     * selection instead.  The uniform kernel is independent of ŵ², which is why
+     * every surviving arm needs no Stage-2 fit. */
+    for (int i = 0; i < c->n_total; i++) c->uni[i] += span * gv[i];
 }
 
 static int build_kinship_blocks(const tsk_treeseq_t *full, int n_tr, int n_te,
                                 const int *h2i_full, int S_full,
-                                const double *ws2_full,
                                 double *K_uni_train, double *K_uni_cross,
-                                double *K_sg_train,  double *K_sg_cross,
-                                int silent, int sg_span)
+                                int silent)
 {
     int n_total = n_tr + n_te;
-
-    /* K_sg_train/K_sg_cross are NULL when there is no Stage-2 ws2 fit; then the
-     * learned accumulator is not allocated and the walker skips it entirely. */
-    int have_sg = (ws2_full != NULL && K_sg_train != NULL && K_sg_cross != NULL);
 
     if (!silent)
         fprintf(stderr, "predict: building kinship blocks "
@@ -578,7 +528,7 @@ static int build_kinship_blocks(const tsk_treeseq_t *full, int n_tr, int n_te,
     {
         tree_cov_matvec_inc_state_t inc;
         memset(&inc, 0, sizeof inc);
-        double *in = NULL, *gv = NULL, *uni = NULL, *sgc = NULL;
+        double *in = NULL, *gv = NULL, *uni = NULL;
         int bad = 0;
 
         if (tree_cov_matvec_inc_state_init(&inc, full, n_total, h2i_full) != 0) {
@@ -587,14 +537,10 @@ static int build_kinship_blocks(const tsk_treeseq_t *full, int n_tr, int n_te,
             in  = calloc((size_t)n_total, sizeof(double));
             gv  = calloc((size_t)n_total, sizeof(double));
             uni = calloc((size_t)n_total, sizeof(double));
-            sgc = have_sg ? calloc((size_t)n_total, sizeof(double)) : NULL;
-            if (!in || !gv || !uni || (have_sg && !sgc)) bad = 1;
+            if (!in || !gv || !uni) bad = 1;
         }
 
-        kin_ctx_t ctx = { .uni = uni, .sg = sgc,
-                          .ws2_full = have_sg ? ws2_full : NULL,
-                          .n_total = n_total,
-                          .sg_span = sg_span };
+        kin_ctx_t ctx = { .uni = uni, .n_total = n_total };
 
         #pragma omp for schedule(static)
         for (int j = 0; j < n_tr; j++) {
@@ -602,7 +548,6 @@ static int build_kinship_blocks(const tsk_treeseq_t *full, int n_tr, int n_te,
 
             in[j] = 1.0;
             memset(uni, 0, (size_t)n_total * sizeof(double));
-            if (have_sg) memset(sgc, 0, (size_t)n_total * sizeof(double));
 
             int ret = tree_walker_run_inc(&inc, S_full, /*prune_map=*/NULL,
                                           in, gv, /*pre_visit=*/NULL,
@@ -612,15 +557,13 @@ static int build_kinship_blocks(const tsk_treeseq_t *full, int n_tr, int n_te,
 
             for (int i = 0; i < n_tr; i++) {
                 K_uni_train[(size_t)i * n_tr + j] = uni[i];
-                if (have_sg) K_sg_train[(size_t)i * n_tr + j] = sgc[i];
             }
             for (int c = 0; c < n_te; c++) {
                 K_uni_cross[(size_t)c * n_tr + j] = uni[n_tr + c];
-                if (have_sg) K_sg_cross[(size_t)c * n_tr + j] = sgc[n_tr + c];
             }
         }
 
-        free(in); free(gv); free(uni); free(sgc);
+        free(in); free(gv); free(uni);
         tree_cov_matvec_inc_state_free(&inc);
         failed |= bad;
     }
@@ -1004,24 +947,8 @@ int sargent_predict(sargent_t *sg,
     /* ---- kinship blocks ---- */
     double *K_uni_train = malloc((size_t)n_tr * n_tr * sizeof(double));
     double *K_uni_cross = malloc((size_t)n_te * n_tr * sizeof(double));
-    double *K_sg_train  = have_ws2 ? malloc((size_t)n_tr * n_tr * sizeof(double)) : NULL;
-    double *K_sg_cross  = have_ws2 ? malloc((size_t)n_te * n_tr * sizeof(double)) : NULL;
-    if (!K_uni_train || !K_uni_cross || (have_ws2 && (!K_sg_train || !K_sg_cross)))
+    if (!K_uni_train || !K_uni_cross)
         goto cleanup_kin;
-
-    /* The learned kernel is span-weighted only if the Stage-2 fit was, i.e. only
-     * under --uniform-arg (see kin_visit).  Legacy override for reproducing
-     * pre-fix grids. */
-    int sg_span = 1;
-    {
-        const char *e = getenv("SARGENT_PREDICT_SPAN_LEGACY");
-        if (e && atoi(e) != 0) {
-            sg_span = 1;
-            if (!silent)
-                fprintf(stderr, "predict: SARGENT_PREDICT_SPAN_LEGACY=1 — "
-                        "span-weighting the learned kernel regardless of the fit\n");
-        }
-    }
 
     /* THE expensive step: n_tr tree passes over the full ARG (500 x 1741 here).
      * Skip it outright when no requested arm needs an ARG kinship.  Gating the
@@ -1029,13 +956,12 @@ int sargent_predict(sargent_t *sg,
      * took 7226 s, because skipping the .gall cache removes the shortcut but not
      * the work.  The mask, not the cache, has to decide. */
     const unsigned ARG_ARMS = SG_ARM_SARGENT_UR | SG_ARM_SARGENT_U |
-                              SG_ARM_SARGENT_R  | SG_ARM_SARGENT_W |
-                              SG_ARM_SARGENT_WF | SG_ARM_STACK;
+                              SG_ARM_SARGENT_W  | SG_ARM_SARGENT_WF |
+                              SG_ARM_STACK;
     int need_arg_kinship = ARM_ON(ARG_ARMS);
     if (need_arg_kinship) {
-        if (build_kinship_blocks(&full, n_tr, n_te, h2i_full, S_full, ws2_full,
-                                 K_uni_train, K_uni_cross,
-                                 K_sg_train, K_sg_cross, silent, sg_span) != 0) {
+        if (build_kinship_blocks(&full, n_tr, n_te, h2i_full, S_full,
+                                 K_uni_train, K_uni_cross, silent) != 0) {
             fprintf(stderr, "predict: kinship block build failed\n");
             goto cleanup_kin;
         }
@@ -1124,12 +1050,12 @@ int sargent_predict(sargent_t *sg,
     double *rtrain = malloc((size_t)n_tr * sizeof(double));   /* residual y - Xβ */
     for (int i = 0; i < n_tr; i++) rtrain[i] = y_train[i] - prs_train[i];
 
-    metrics_t m_bayes, m_snp, m_arg, m_su, m_sg, m_w, m_wf, m_stack;
+    metrics_t m_bayes, m_snp, m_arg, m_su, m_w, m_wf, m_stack;
     /* Full-data ARG test prediction, kept for the stacked arm. */
     double *arg_test = NULL;
     double stack_w[3] = {0.0, 0.0, 0.0};
     int    stack_ok = 0;
-    double snp_h2 = NAN, arg_h2 = NAN, sargent_sigma2 = NAN, sargent_rand_r = NAN;
+    double snp_h2 = NAN, arg_h2 = NAN;
     double arg_su2 = NAN, arg_sigma2 = NAN, arg_h2_pve = NAN;
     double su_su2 = NAN, su_sigma2 = NAN;
     double s2, su2, mean_fit;
@@ -1281,32 +1207,11 @@ int sargent_predict(sargent_t *sg,
         free(prs_oof); free(arg_oof);
     }
 
-    /* (e) sargent: residual r; center K_sg; BLUP; + Xβ.
-     *     Skipped entirely without a Stage-2 ws2 fit -- this is the only arm
-     *     that needs it, and the JSON below omits it rather than substituting. */
-    if (have_ws2 && ARM_ON(SG_ARM_SARGENT_R)) {
-    center_kinship(K_sg_train, n_tr, K_sg_cross, n_te);
-    if (fit_blup(rtrain, K_sg_train, n_tr, &s2, &su2, alpha, &mean_fit) != 0) goto cleanup_pred;
-    predict_blup(K_sg_cross, n_te, n_tr, alpha, mean_fit, yhat);
-    for (int c = 0; c < n_te; c++) yhat[c] += prs_test[c];
-    m_sg = compute_metrics(yhat, y_test, n_te);
-    sargent_sigma2 = s2;
-    if (true_random) {
-        /* corr(yhat - Xtestβ, true_random) = corr(K_sg_cross·α + mean_r, ...) */
-        double *uhat = malloc((size_t)n_te * sizeof(double));
-        for (int c = 0; c < n_te; c++) uhat[c] = yhat[c] - prs_test[c];
-        double mu = 0.0, mr = 0.0;
-        for (int c = 0; c < n_te; c++) { mu += uhat[c]; mr += true_random[c]; }
-        mu /= n_te; mr /= n_te;
-        double sxy = 0.0, sxx = 0.0, syy = 0.0;
-        for (int c = 0; c < n_te; c++) {
-            double a = uhat[c] - mu, b = true_random[c] - mr;
-            sxy += a * b; sxx += a * a; syy += b * b;
-        }
-        sargent_rand_r = (sxx > 0 && syy > 0) ? sxy / sqrt(sxx * syy) : NAN;
-        free(uhat);
-    }
-    }   /* end if (have_ws2) -- the `sargent` arm */
+    /* (e) SARGENT-R retired 2026-08-31.  It was the only consumer of the
+     *     Stage-2 learned-ws^2 kinship K_sg, so that accumulator is gone too;
+     *     sargent_w / sargent_wf use branch selection instead.  The ws^2 TABLE
+     *     is still written (est.w2.tsv) for Blocks 2.1/2.2 -- only this
+     *     predictor is retired. */
 
     /* (f) sargent_w / sargent_wf: branch selection in place of the Stage-2 EM.
      *
@@ -1499,18 +1404,8 @@ int sargent_predict(sargent_t *sg,
          * it was actually computed; otherwise take the existing omission path,
          * which downstream already understands (aggregate_fig23.py checks for
          * sargent_omitted). */
-        if (have_ws2 && ARM_ON(SG_ARM_SARGENT_R)) {
-            ARM("sargent", m_sg);
-            fprintf(f, "  \"sargent_sigma2\": "); json_num(f, sargent_sigma2);
-            if (true_random) {
-                fprintf(f, ",\n  \"sargent_rand_r\": "); json_num(f, sargent_rand_r);
-            }
-            fprintf(f, "\n");
-        } else {
-            fprintf(f, "  \"sargent_omitted\": \"no Stage-2 ws2 fit "
-                       "(--snp-only, or --model without sargent-r); arms "
-                       "reported: bayesR, snp_lmm, arg_lmm, sargent_u\"\n");
-        }
+        fprintf(f, "  \"sargent_omitted\": \"SARGENT-R retired 2026-08-31; "
+                   "arms reported: bayesR, snp_lmm, arg_lmm, sargent_u\"\n");
         if (bsel_ok) {
             fprintf(f, ",\n");
             ARM("sargent_w", m_w);
@@ -1541,10 +1436,6 @@ int sargent_predict(sargent_t *sg,
         fprintf(stderr, "  snp_lmm    R2=%+.3f r=%+.3f\n", m_snp.r2, m_snp.r);
         fprintf(stderr, "  arg_lmm    R2=%+.3f r=%+.3f\n", m_arg.r2, m_arg.r);
         fprintf(stderr, "  sargent_u  R2=%+.3f r=%+.3f\n", m_su.r2, m_su.r);
-        if (have_ws2)
-            fprintf(stderr, "  sargent    R2=%+.3f r=%+.3f\n", m_sg.r2, m_sg.r);
-        else
-            fprintf(stderr, "  sargent    (omitted: no Stage-2 ws2)\n");
         if (bsel_ok) {
             fprintf(stderr, "  sargent_w  R2=%+.3f r=%+.3f   "
                     "(k=%d of %d branches; dr2_calib vs arg_lmm = %+.4f)\n",
@@ -1565,7 +1456,6 @@ cleanup_pred:
     free(y_test); free(true_random);
 cleanup_kin:
     free(K_uni_train); free(K_uni_cross);
-    free(K_sg_train); free(K_sg_cross);
 cleanup_ts:
     free(ws2_map); free(ws2_full);
     free(h2i_full);

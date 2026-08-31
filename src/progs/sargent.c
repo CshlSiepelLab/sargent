@@ -372,7 +372,6 @@ int main(int argc, char *argv[])
              * default.  Adam, 2026-08-30: "I can't see much reason to keep
              * SARGENT-R at all.  At most it should be gated by seldom used
              * options." */
-            { "sargent-r",  SG_ARM_SARGENT_R  },
             { "sargent-w",  SG_ARM_SARGENT_W  },
             { "sargent-wf", SG_ARM_SARGENT_WF },
             /* "all" is the FIGURE set, and deliberately excludes SARGENT-R.
@@ -392,7 +391,7 @@ int main(int argc, char *argv[])
              * driver still passes --branch-select and computes them.  Adam,
              * 2026-08-30: sargent-w "should also never be run by default".
              * Both remain addressable as their own models. */
-            { "all",        SG_MODEL_ALL & ~(SG_ARM_SARGENT_R | SG_ARM_SARGENT_W |
+            { "all",        SG_MODEL_ALL & ~(SG_ARM_SARGENT_W |
                                              SG_ARM_SARGENT_WF) },
         };
         size_t nm = sizeof(models) / sizeof(models[0]), mi;
@@ -401,11 +400,10 @@ int main(int argc, char *argv[])
         if (mi == nm) {
             fprintf(stderr, "ERROR: unknown --model '%s'.  Choose one of:", model_name);
             for (size_t k = 0; k < nm; k++)
-                if (strcmp(models[k].name, "sargent-r") != 0)
-                    fprintf(stderr, " %s", models[k].name);
-            fprintf(stderr, "\n  (sargent-r is also accepted: the legacy per-tree "
-                            "learned-ws^2 fit, ~19x slower and retired from the "
-                            "figures)\n");
+                fprintf(stderr, " %s", models[k].name);
+            fprintf(stderr, "\n  (sargent-r was retired 2026-08-31; the ws^2 "
+                            "table itself is still produced by the legacy "
+                            "--arg-only path, which Blocks 2.1/2.2 use)\n");
             return 1;
         }
         arm_mask = models[mi].arms;
@@ -421,9 +419,15 @@ int main(int argc, char *argv[])
         int need_stage1 = (arm_mask & (SG_ARM_SARGENT_F | SG_ARM_SARGENT_U |
                                        SG_ARM_SARGENT_WF)) != 0;
         int need_gall   = (arm_mask & (SG_ARM_SARGENT_UR | SG_ARM_SARGENT_U |
-                                       SG_ARM_SARGENT_R  | SG_ARM_SARGENT_W |
-                                       SG_ARM_SARGENT_WF)) != 0;
-        int need_stage2 = (arm_mask & SG_ARM_SARGENT_R) != 0;
+                                       SG_ARM_SARGENT_W  | SG_ARM_SARGENT_WF)) != 0;
+        /* No surviving arm consumes the Stage-2 ws^2 fit.  SARGENT-R was the
+         * only one (predict.c built K_sg for it alone); sargent_w / sargent_wf
+         * use branch selection IN PLACE of the Stage-2 EM.  Analyses that want
+         * the ws^2 table itself -- partition_lib.py, age_decomp_nscan.sh,
+         * arch_metrics.py, edge_h2.py, oracle_ws2.py -- run the legacy
+         * --arg-only path, which does not go through this mask and is
+         * unchanged. */
+        int need_stage2 = 0;
 
         if (arm_mask & (SG_ARM_SARGENT_U | SG_ARM_SARGENT_WF)) use_joint = 1;
         if (arm_mask & (SG_ARM_SARGENT_W | SG_ARM_SARGENT_WF)) bsel_on   = 1;
