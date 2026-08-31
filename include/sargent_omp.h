@@ -29,7 +29,9 @@
   #include <omp.h>
   #define SARGENT_OMP_GET_MAX_THREADS()  omp_get_max_threads()
   #define SARGENT_OMP_GET_THREAD_NUM()   omp_get_thread_num()
+  #define SARGENT_OMP_IN_PARALLEL()      omp_in_parallel()
 #else
   #define SARGENT_OMP_GET_MAX_THREADS()  1
   #define SARGENT_OMP_GET_THREAD_NUM()   0
+  #define SARGENT_OMP_IN_PARALLEL()      0
 #endif

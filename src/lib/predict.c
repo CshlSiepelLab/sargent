@@ -547,28 +547,10 @@ static int build_kinship_blocks(const tsk_treeseq_t *full, int n_tr, int n_te,
                                 int silent, int sg_span)
 {
     int n_total = n_tr + n_te;
-    tree_cov_matvec_inc_state_t inc;
-    if (tree_cov_matvec_inc_state_init(&inc, full, n_total, h2i_full) != 0)
-        return -1;
 
     /* K_sg_train/K_sg_cross are NULL when there is no Stage-2 ws2 fit; then the
      * learned accumulator is not allocated and the walker skips it entirely. */
     int have_sg = (ws2_full != NULL && K_sg_train != NULL && K_sg_cross != NULL);
-
-    double *in  = calloc((size_t)n_total, sizeof(double));
-    double *gv  = calloc((size_t)n_total, sizeof(double));
-    double *uni = calloc((size_t)n_total, sizeof(double));
-    double *sgc = have_sg ? calloc((size_t)n_total, sizeof(double)) : NULL;
-    if (!in || !gv || !uni || (have_sg && !sgc)) {
-        free(in); free(gv); free(uni); free(sgc);
-        tree_cov_matvec_inc_state_free(&inc);
-        return -1;
-    }
-
-    kin_ctx_t ctx = { .uni = uni, .sg = sgc,
-                      .ws2_full = have_sg ? ws2_full : NULL,
-                      .n_total = n_total,
-                      .sg_span = sg_span };
 
     extern double sg_walk_t_advance, sg_walk_t_readout, sg_walk_t_visit;
     extern long   sg_walk_n_trees;
@@ -582,32 +564,80 @@ static int build_kinship_blocks(const tsk_treeseq_t *full, int n_tr, int n_te,
         fprintf(stderr, "predict: building kinship blocks "
                 "(%d tree passes over %d full-ARG trees) ...\n", n_tr, S_full);
 
-    for (int j = 0; j < n_tr; j++) {
-        if (j > 0) in[j - 1] = 0.0;
-        in[j] = 1.0;
-        memset(uni, 0, (size_t)n_total * sizeof(double));
-        if (have_sg) memset(sgc, 0, (size_t)n_total * sizeof(double));
+    /* Parallelise over COLUMNS, not over samples inside the walker.
+     *
+     * Each column j is fully independent: it needs only its own probe vector,
+     * accumulators and incremental walker state, and it writes a disjoint
+     * column of K.  Threading here rather than inside the walker matters
+     * because the readout is now a prefix sweep with a serial dependence (a
+     * node needs its parent), so it cannot workshare; given a whole column
+     * each, threads scale on top of the ~7x work reduction instead of
+     * competing with it.  tree_walker_run_inc detects the enclosing team via
+     * SARGENT_OMP_IN_PARALLEL() and takes its serial path, so no nesting.
+     *
+     * Per-thread footprint is small: the inc state is 5 arrays x n_nodes
+     * (~240 KB on the production ARG) plus four n_total vectors.
+     *
+     * OOM or a walker error sets a per-thread flag; `omp for` cannot be
+     * broken out of, so remaining iterations fall through cheaply and the
+     * failure is reduced across the team. */
+    int failed = 0;
+    #pragma omp parallel reduction(|:failed)
+    {
+        tree_cov_matvec_inc_state_t inc;
+        memset(&inc, 0, sizeof inc);
+        double *in = NULL, *gv = NULL, *uni = NULL, *sgc = NULL;
+        int bad = 0;
 
-        int ret = tree_walker_run_inc(&inc, S_full, /*prune_map=*/NULL,
-                                      in, gv, /*pre_visit=*/NULL,
-                                      kin_visit, &ctx, /*use_span=*/1);
-        if (ret != 0) {
-            free(in); free(gv); free(uni); free(sgc);
-            tree_cov_matvec_inc_state_free(&inc);
-            return -1;
+        if (tree_cov_matvec_inc_state_init(&inc, full, n_total, h2i_full) != 0) {
+            bad = 1;
+        } else {
+            in  = calloc((size_t)n_total, sizeof(double));
+            gv  = calloc((size_t)n_total, sizeof(double));
+            uni = calloc((size_t)n_total, sizeof(double));
+            sgc = have_sg ? calloc((size_t)n_total, sizeof(double)) : NULL;
+            if (!in || !gv || !uni || (have_sg && !sgc)) bad = 1;
         }
 
-        for (int i = 0; i < n_tr; i++) {
-            K_uni_train[(size_t)i * n_tr + j] = uni[i];
-            if (have_sg) K_sg_train[(size_t)i * n_tr + j] = sgc[i];
+        kin_ctx_t ctx = { .uni = uni, .sg = sgc,
+                          .ws2_full = have_sg ? ws2_full : NULL,
+                          .n_total = n_total,
+                          .sg_span = sg_span };
+
+        #pragma omp for schedule(static)
+        for (int j = 0; j < n_tr; j++) {
+            if (bad) continue;
+
+            in[j] = 1.0;
+            memset(uni, 0, (size_t)n_total * sizeof(double));
+            if (have_sg) memset(sgc, 0, (size_t)n_total * sizeof(double));
+
+            int ret = tree_walker_run_inc(&inc, S_full, /*prune_map=*/NULL,
+                                          in, gv, /*pre_visit=*/NULL,
+                                          kin_visit, &ctx, /*use_span=*/1);
+            in[j] = 0.0;
+            if (ret != 0) { bad = 1; continue; }
+
+            for (int i = 0; i < n_tr; i++) {
+                K_uni_train[(size_t)i * n_tr + j] = uni[i];
+                if (have_sg) K_sg_train[(size_t)i * n_tr + j] = sgc[i];
+            }
+            for (int c = 0; c < n_te; c++) {
+                K_uni_cross[(size_t)c * n_tr + j] = uni[n_tr + c];
+                if (have_sg) K_sg_cross[(size_t)c * n_tr + j] = sgc[n_tr + c];
+            }
         }
-        for (int c = 0; c < n_te; c++) {
-            K_uni_cross[(size_t)c * n_tr + j] = uni[n_tr + c];
-            if (have_sg) K_sg_cross[(size_t)c * n_tr + j] = sgc[n_tr + c];
-        }
+
+        free(in); free(gv); free(uni); free(sgc);
+        tree_cov_matvec_inc_state_free(&inc);
+        failed |= bad;
     }
+    if (failed) return -1;
     if (getenv("SARGENT_WALK_PROFILE")) {
         double tot = arm_now() - _kb0;
+        /* Phase timers live on the walker's own parallel path, which the
+         * column-parallel loop no longer takes; they read 0 here.  Total is
+         * still wall-clock and still meaningful. */
         fprintf(stderr,
             "WALK PROFILE  total %.1fs | advance %.1fs (%.0f%%) | readout %.1fs (%.0f%%) "
             "| visit %.1fs (%.0f%%) | tree-advances %ld\n",
@@ -616,8 +646,6 @@ static int build_kinship_blocks(const tsk_treeseq_t *full, int n_tr, int n_te,
             sg_walk_t_visit, 100*sg_walk_t_visit/tot, sg_walk_n_trees);
     }
 
-    free(in); free(gv); free(uni); free(sgc);
-    tree_cov_matvec_inc_state_free(&inc);
     return 0;
 }
 
