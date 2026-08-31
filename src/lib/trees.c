@@ -797,18 +797,6 @@ static double tree_seq_mean_span(const tsk_treeseq_t *ts)
  *   - omp for (worksharing within the existing team) handles readout.
  *
  * The serial fallback (no OpenMP, or n_hap ≤ 1000) is unchanged. */
-/* TEMPORARY phase instrumentation (branch adam/kinship-speed).  Step 1 failed
- * because the bottleneck was inferred from scaling curves rather than measured.
- * These accumulate wall time in the three per-tree phases so the split is a
- * fact.  Printed by build_kinship_blocks when SARGENT_WALK_PROFILE is set. */
-double sg_walk_t_advance = 0.0, sg_walk_t_readout = 0.0, sg_walk_t_visit = 0.0;
-long   sg_walk_n_trees = 0, sg_walk_n_calls = 0;
-static double sg_wclk(void)
-{
-    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (double)ts.tv_sec + 1e-9 * (double)ts.tv_nsec;
-}
-
 int tree_walker_run_inc(tree_cov_matvec_inc_state_t *inc,
                         int                  S_orig,
                         const int           *prune_map,
@@ -871,9 +859,7 @@ int tree_walker_run_inc(tree_cov_matvec_inc_state_t *inc,
                         do_visit = -1;   /* signal loop exit to all threads */
                     } else {
                         int sp = prune_map ? prune_map[s_shared] : s_shared;
-                        { double _a = sg_wclk();
-                          tree_cov_matvec_inc_advance(inc, &tree);
-                          sg_walk_t_advance += sg_wclk() - _a; sg_walk_n_trees++; }
+                        tree_cov_matvec_inc_advance(inc, &tree);
                         st.s_orig = s_shared;
                         st.sp     = sp;
                         st.span   = use_span ? (tree.interval.right - tree.interval.left) / mean_span : 1.0;
@@ -889,20 +875,12 @@ int tree_walker_run_inc(tree_cov_matvec_inc_state_t *inc,
                 if (do_visit < 0) break;   /* all threads exit */
 
                 if (do_visit > 0) {
-                    /* Parallel readout: omp for workshares within this team. */
-                    { double _r = sg_wclk();
-                      readout_team(gv, inc);
-                      /* `omp master` has NO implicit barrier.  Using `omp single`
-                       * here added one barrier per tree per column -- ~1.7M of
-                       * them -- which drove a 180 s run to 866 s at a CPU/wall
-                       * ratio of 1.00: the profiler serialised what it was
-                       * measuring. */
-                      #pragma omp master
-                      { sg_walk_t_readout += sg_wclk() - _r; } }
+                    /* Worksharing readout: every thread of this team is on
+                     * the same tree, so readout_team's `omp for` is safe here. */
+                    readout_team(gv, inc);
                     /* Sequential callback (may modify ctx). */
                     #pragma omp single
-                    { double _v = sg_wclk(); visit(&st, ctx);
-                      sg_walk_t_visit += sg_wclk() - _v; }   /* already single; no added barrier */
+                    { visit(&st, ctx); }
                 }
             }
 

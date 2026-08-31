@@ -552,14 +552,6 @@ static int build_kinship_blocks(const tsk_treeseq_t *full, int n_tr, int n_te,
      * learned accumulator is not allocated and the walker skips it entirely. */
     int have_sg = (ws2_full != NULL && K_sg_train != NULL && K_sg_cross != NULL);
 
-    extern double sg_walk_t_advance, sg_walk_t_readout, sg_walk_t_visit;
-    extern long   sg_walk_n_trees;
-    double _kb0 = 0.0;
-    if (getenv("SARGENT_WALK_PROFILE")) {
-        sg_walk_t_advance = sg_walk_t_readout = sg_walk_t_visit = 0.0;
-        sg_walk_n_trees = 0;
-        _kb0 = arm_now();
-    }
     if (!silent)
         fprintf(stderr, "predict: building kinship blocks "
                 "(%d tree passes over %d full-ARG trees) ...\n", n_tr, S_full);
@@ -633,18 +625,6 @@ static int build_kinship_blocks(const tsk_treeseq_t *full, int n_tr, int n_te,
         failed |= bad;
     }
     if (failed) return -1;
-    if (getenv("SARGENT_WALK_PROFILE")) {
-        double tot = arm_now() - _kb0;
-        /* Phase timers live on the walker's own parallel path, which the
-         * column-parallel loop no longer takes; they read 0 here.  Total is
-         * still wall-clock and still meaningful. */
-        fprintf(stderr,
-            "WALK PROFILE  total %.1fs | advance %.1fs (%.0f%%) | readout %.1fs (%.0f%%) "
-            "| visit %.1fs (%.0f%%) | tree-advances %ld\n",
-            tot, sg_walk_t_advance, 100*sg_walk_t_advance/tot,
-            sg_walk_t_readout, 100*sg_walk_t_readout/tot,
-            sg_walk_t_visit, 100*sg_walk_t_visit/tot, sg_walk_n_trees);
-    }
 
     return 0;
 }
