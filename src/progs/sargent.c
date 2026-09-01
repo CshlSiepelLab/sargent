@@ -360,9 +360,9 @@ int main(int argc, char *argv[])
     if (model_name) {
         struct { const char *name; unsigned arms; } models[] = {
             { "snp-lmm",    SG_ARM_SNP_LMM    },
-            { "sargent-f",  SG_ARM_SARGENT_F  },
-            { "sargent-ur", SG_ARM_SARGENT_UR },
-            { "sargent-u",  SG_ARM_SARGENT_U  },
+            { "sargent-s",  SG_ARM_SARGENT_S  },
+            { "sargent-a", SG_ARM_SARGENT_A },
+            { "sargent",  SG_ARM_SARGENT  },
             /* ADVANCED / legacy.  SARGENT-R is the per-tree learned-ws^2 Stage 2:
              * ~19x the cost of every other arm combined (3992 s against 215 s),
              * already retired from every figure, and superseded by branch
@@ -416,9 +416,9 @@ int main(int argc, char *argv[])
         /* SARGENT-R is the ARG-ONLY learned-ws^2 model: the repo harvests it with
          * `--arg-only --predict` and reads the `sargent` key, so it needs Stage 2
          * but NOT Stage 1.  Listing it under need_stage1 was wrong. */
-        int need_stage1 = (arm_mask & (SG_ARM_SARGENT_F | SG_ARM_SARGENT_U |
+        int need_stage1 = (arm_mask & (SG_ARM_SARGENT_S | SG_ARM_SARGENT |
                                        SG_ARM_SARGENT_WF)) != 0;
-        int need_gall   = (arm_mask & (SG_ARM_SARGENT_UR | SG_ARM_SARGENT_U |
+        int need_gall   = (arm_mask & (SG_ARM_SARGENT_A | SG_ARM_SARGENT |
                                        SG_ARM_SARGENT_W  | SG_ARM_SARGENT_WF)) != 0;
         /* No surviving arm consumes the Stage-2 ws^2 fit.  SARGENT-R was the
          * only one (predict.c built K_sg for it alone); sargent_w / sargent_wf
@@ -429,7 +429,7 @@ int main(int argc, char *argv[])
          * unchanged. */
         int need_stage2 = 0;
 
-        if (arm_mask & (SG_ARM_SARGENT_U | SG_ARM_SARGENT_WF)) use_joint = 1;
+        if (arm_mask & (SG_ARM_SARGENT | SG_ARM_SARGENT_WF)) use_joint = 1;
         if (arm_mask & (SG_ARM_SARGENT_W | SG_ARM_SARGENT_WF)) bsel_on   = 1;
         /* NOT setting uniform_arg here.  It was set to make Stage 2 cheap for
          * models that do not want the learned ws^2 -- but Stage 2 is now SKIPPED
@@ -515,15 +515,15 @@ int main(int argc, char *argv[])
                     "(not --ts-geno); test genotypes come from a test BED.\n");
             exit(EXIT_FAILURE);
         }
-        /* --snp-only is ALLOWED.  Four of the five arms (bayesR, snp_lmm,
-         * arg_lmm, sargent_u) never touch the learned per-tree ws2 -- the
+        /* --snp-only is ALLOWED.  Four of the five arms (sargent_s, snp_lmm,
+         * sargent_a, sargent) never touch the learned per-tree ws2 -- the
          * uniform kinship accumulator in predict.c is independent of it.  Only
          * the full `sargent` arm needs Stage 2, and predict_oos() omits that arm
          * from the JSON when ws2 is absent.  Stage 2 is ~88% of a cell, so this
          * is the cheap path for sweeps that do not need the learned-weight arm. */
         if (snp_only) {
             fprintf(stderr, "note: --predict with --snp-only reports four arms "
-                    "(bayesR, snp_lmm, arg_lmm, sargent_u); `sargent` needs the "
+                    "(sargent_s, snp_lmm, sargent_a, sargent); `sargent` needs the "
                     "Stage-2 ws2 fit and is omitted.\n");
         }
     }
@@ -741,7 +741,7 @@ int main(int argc, char *argv[])
         if (!arg_only) {
             /* --joint replaces the SEQUENTIAL Stage 1 + Stage 2 with a single
              * chain that fits beta and the ARG variance components together.
-             * Sequential gives the ARG nothing -- sargent_u equalled bayesR to
+             * Sequential gives the ARG nothing -- sargent equalled sargent_s to
              * six decimals at every phi level -- because beta gets first claim
              * on everything the two terms share.  See var_joint_gibbs. */
             if (use_joint) {
