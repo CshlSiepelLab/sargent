@@ -81,7 +81,7 @@ MAIN OPTIONS:
     --predict
         After the train fit, run native out-of-sample prediction on a
         held-out test set and write <outroot>.predict.json (the full
-        five-arm ladder: bayesR, snp_lmm, arg_lmm, sargent_u, sargent).
+        four-arm ladder: sargent_s, snp_lmm, sargent_a, sargent).
         Requires BED genotypes (not --ts-geno) and the Stage-2 ARG fit
         (incompatible with --snp-only).  The full ARG must have the train
         individuals first and the test individuals last (simulate.py's
@@ -102,8 +102,8 @@ MAIN OPTIONS:
 
         keep the top k, and fit a two-component REML (K_uniform + K_selected).
         Two arms are written to the predict JSON: `sargent_w` (pure ARG, the
-        direct counterpart of arg_lmm) and `sargent_wf` (with the Stage-1 PRS,
-        the counterpart of sargent_u).  This is the Stage-2 replacement: it
+        direct counterpart of sargent_a) and `sargent_wf` (with the Stage-1 PRS,
+        the counterpart of sargent).  This is the Stage-2 replacement: it
         costs seconds rather than the tens of minutes the per-tree EM takes,
         and it needs no Stage-2 ws2 fit at all, so it composes with
         --uniform-arg or --snp-only.  Reported h2: `sargent_w_h2_uniform` is
@@ -213,8 +213,8 @@ ALGORITHMIC VARIANTS (for systematic comparison):
           Without it the residual y - Xb is in-sample: a well-fitting Stage 1
           absorbs signal and noise alike, the residual looks like noise, and
           REML drives the ARG variance component to zero.  Affects only the
-          arms built on that residual (sargent_u, sargent_wf); test-set
-          prediction still uses the full-data fit, so bayesR, snp_lmm, arg_lmm
+          arms built on that residual (sargent, sargent_wf); test-set
+          prediction still uses the full-data fit, so sargent_s, snp_lmm, sargent_a
           and sargent_w are unchanged.  Costs K extra Stage-1 fits.
           Default: off.
 
