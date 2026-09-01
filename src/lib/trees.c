@@ -1045,7 +1045,15 @@ int tree_walker_run_inc(tree_cov_matvec_inc_state_t *inc,
                         tree_cov_matvec_inc_advance(inc, &tree);
                         st.s_orig = s_shared;
                         st.sp     = sp;
-                        st.span   = use_span ? (tree.interval.right - tree.interval.left) / mean_span : 1.0;
+                        /* Record the span for the replay path, as the serial
+                         * branch does.  The replay reads inc->tree_span[t]
+                         * directly, so arming the cache without filling this
+                         * would replay calloc'd zeros as spans. */
+                        double raw_span = tree.interval.right - tree.interval.left;
+                        if (inc->compact && inc->tree_span &&
+                            s_shared < (int)inc->n_trees)
+                            inc->tree_span[s_shared] = raw_span;
+                        st.span   = use_span ? raw_span / mean_span : 1.0;
                         do_visit  = (!pre_visit || pre_visit(s_shared, sp, ctx))
                                     ? 1 : 0;
                         s_shared++;
@@ -1078,6 +1086,29 @@ int tree_walker_run_inc(tree_cov_matvec_inc_state_t *inc,
             }
         }
         /* end parallel region */
+
+        /* Arm the replay path, exactly as the serial branch below does.
+         *
+         * This was missing, and because gall_build is itself serial every
+         * production cell (n_hap = 2000 > 1000) took THIS branch -- so
+         * struct_cached was never set and all n column passes re-derived the
+         * sequence through tskit.  The replay path was dead in gall_build from
+         * the day it was written.  Measured on a 500 kb cell: 77% of self time
+         * in libtskit on a Relate ARG (499,750 edges) against 0.7% on the true
+         * one (10,280), i.e. 887 s vs 66 s for the same 1000 passes.
+         *
+         * It reproduced nowhere because the other caller, predict.c's
+         * build_kinship_blocks, parallelises over COLUMNS: there
+         * SARGENT_OMP_IN_PARALLEL() is true, each thread takes the serial
+         * branch, and the cache armed as intended. */
+        if (!err && inc->compact && !prune_map &&
+            s_shared == (int)inc->n_trees && S_orig >= (int)inc->n_trees) {
+            int all = 1;
+            for (tsk_size_t t = 0; t < inc->n_trees && all; t++)
+                if (!inc->tree_nodes[t] || !inc->tree_parent[t] || !inc->tree_bl[t])
+                    all = 0;
+            inc->struct_cached = all;
+        }
 
     } else {
         /* Serial path for small n_hap (fork overhead > benefit). */
