@@ -155,6 +155,40 @@ job has finished or died. A wrong "nothing is running" has twice led to
 relaunching work that was already in flight, and would be far worse if it led
 to a `-f` fallback.
 
+### NEVER hand-roll a concurrency gate
+
+Server overload has happened repeatedly in this project. The cause every time is
+the same pattern, copied from driver to driver:
+
+```bash
+# WRONG -- this is what keeps overloading the box
+busy(){ { pgrep -x sargent; pgrep -x gemma; } | sort -u | wc -l; }
+gate(){ while [ "$(busy)" -ge 24 ]; do sleep 20; done; }
+```
+
+It fails two ways, and both have bitten:
+
+1. It counts a **hand-written list of process names**, so any tool nobody
+   thought to list is invisible. `inject_tslmm.py` was in no gate; 34 of them
+   landed on top of 20 two-thread fits and took the box to load 89 on 56 cores.
+2. Each driver enforces its cap **independently**, so N concurrent drivers admit
+   N x cap. Two drivers at 22 is 44 jobs, not 22.
+
+**Use the shared pool instead.** A job cannot start without taking one of a fixed
+number of slots, whoever launched it and whatever it runs:
+
+```bash
+source $HOME/git-src/sargent-paper/analysis/sgjob.sh
+sg_pool 24                  # shared by EVERY driver, not per-driver
+sg_bg my_command args...    # blocks until a slot frees
+sg_wait
+sg_pool_status              # slots in use, current load
+```
+
+Slots are held by an open file descriptor, so they release even on `kill -TERM`
+and a killed driver cannot wedge the pool. There is also a load valve derived
+from `nproc`, which catches load this pool did not create.
+
 - **Never push to `main` or open a PR without Adam's explicit "go".** Commits
   are okay if asked; PR + merge requires "PR + merge" or similar.
 - **Long simulation runs (Block 1.1 v1, Block 1.2, etc.) require explicit
