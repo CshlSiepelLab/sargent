@@ -16,8 +16,8 @@
 /*
  * Native out-of-sample prediction (scope 3b of native_prediction_proposal.md).
  *
- * Reproduces analysis/predict.py's full five-arm ladder (bayesR, snp_lmm,
- * arg_lmm, sargent_u, sargent) inside the sargent binary and writes
+ * Reproduces analysis/predict.py's full five-arm ladder (sargent_s, snp_lmm,
+ * sargent_a, sargent, sargent) inside the sargent binary and writes
  * <out_json_path>.  Called after a normal train fit (Stage 1 β̂ + Stage 2 ŵ²).
  *
  * Preconditions:
@@ -57,7 +57,7 @@ void predict_set_stage1_cv(int k);
  * signal. */
 void predict_set_stack(int on);
 
-/* Tell predict() that beta came from a JOINT fit, so the sargent_u BLUP uses the
+/* Tell predict() that beta came from a JOINT fit, so the sargent BLUP uses the
  * jointly estimated variance components instead of re-fitting REML on the
  * residual (which would discard the joint fit and reproduce the collapse). */
 void predict_set_joint(int on);
@@ -75,15 +75,15 @@ int sargent_predict(sargent_t *sg,
 
 /* ---- Named model selection (--model) --------------------------------------
  * Historically every invocation computed every arm, so a user who wanted one
- * flavour paid for all of them: arg_lmm came out identical under --snp-only,
+ * flavour paid for all of them: sargent_a came out identical under --snp-only,
  * --uniform-arg and --joint, and on a cold .gall cache 45-65% of the runtime
  * was work the requested model never used.  These bits let the driver skip the
  * prerequisites no selected arm needs.  SG_MODEL_ALL reproduces the old
  * behaviour exactly and stays the default. */
 #define SG_ARM_SNP_LMM     (1u << 0)   /* snp_lmm     typed-SNP GRM BLUP      */
-#define SG_ARM_SARGENT_F   (1u << 1)   /* bayesR      fixed effects only      */
-#define SG_ARM_SARGENT_UR  (1u << 2)   /* arg_lmm     uniform ARG BLUP        */
-#define SG_ARM_SARGENT_U   (1u << 3)   /* sargent_u   fixed + ARG, jointly    */
+#define SG_ARM_SARGENT_S   (1u << 1)   /* sargent_s      fixed effects only      */
+#define SG_ARM_SARGENT_A  (1u << 2)   /* sargent_a     uniform ARG BLUP        */
+#define SG_ARM_SARGENT   (1u << 3)   /* sargent   fixed + ARG, jointly    */
 /* RETIRED 2026-08-31.  Bit 4 stays reserved so no later arm silently inherits
  * a mask that older results were written under.  SARGENT-R was the Stage-2
  * learned-ws^2 predictor; it was the single best arm in 13.2% of 6452 cells,
