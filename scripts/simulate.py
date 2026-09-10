@@ -1735,6 +1735,25 @@ def main():
                     f"{bed_idx_of[j] if in_bed else -1}\t{ages[j]:.6g}\t"
                     f"{_maf_out[j]:.6g}\n")
 
+    # UNOBSERVED causal variants (2026-09-09).  These are the --h2-unobs class:
+    # real causal variants deliberately kept OUT of the typed panel, so a
+    # tag-based predictor has to reach them through LD.  Until now they existed
+    # only as aggregates in params.json (h2_unobs_realised, n_unobs_causal,
+    # phi_measured) and their identities were never written, which made every
+    # variant-level analysis at phi > 0 impossible -- the analysis could see only
+    # the easy, fully typed half of the causal set.
+    #
+    # This writer is purely ADDITIVE: it emits a file and consumes no RNG, so the
+    # same seed reproduces byte-identical phenotypes and existing fits stay valid.
+    if len(unobs_idx):
+        with open(args.out + ".true_unobs.tsv", "w") as f:
+            f.write("snp_idx\tbp_pos\tbeta\tage\tmaf\n")
+            for j in unobs_idx:
+                # beta_unobs, NOT beta: the two arrays have disjoint supports
+                # (see beta_all = beta + beta_unobs above), so beta[j] is 0 here.
+                f.write(f"{j}\t{positions[j]}\t{beta_unobs[j]:.8g}\t"
+                        f"{ages[j]:.6g}\t{_maf_out[j]:.6g}\n")
+
     # ws2 ground truth.  For per-tree architectures (ws2_vec is a numpy array),
     # writes .true_ws2.tsv as before.  For per-edge architectures (ws2_vec is a
     # dict {(tree_idx, child_node) → ws²_e}, Block 2.7.1), writes
