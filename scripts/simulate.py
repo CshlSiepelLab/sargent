@@ -1754,6 +1754,36 @@ def main():
                 f.write(f"{j}\t{positions[j]}\t{beta_unobs[j]:.8g}\t"
                         f"{ages[j]:.6g}\t{_maf_out[j]:.6g}\n")
 
+    # PER-INDIVIDUAL TRUE GENETIC VALUE, every individual (2026-10-02).
+    #
+    # WHY.  Variant-level analyses score a predictor against g, the true genetic
+    # value, and rebuilt it from .true_beta.tsv + .true_unobs.tsv by looking each
+    # causal variant up in the tree sequence BY POSITION.  That works only when
+    # every causal variant is a site.  Under --unobs-recurrence-zipf the
+    # --h2-unobs class is a set of COMPOSITES: K independent origins summed into
+    # one pseudo-variant and APPENDED to the variant matrix after the real sites
+    # (unobs_idx = arange(p, p + len(new_dos)) above).  A composite therefore has
+    # no site of its own, and the bp_pos written for it maps to nothing --
+    # measured on a Fig 3 cell, 1 of 40 untyped causal variants mapped, by
+    # coincidence.  Reconstruction silently returned a g missing the entire
+    # untyped class on exactly the cells where that class is the whole point, and
+    # a guard keyed on "did any map" passed because of that one coincidence.
+    #
+    # .test.true_components.tsv did not cover this: its y_fixed is the TYPED class
+    # alone, y_unobs was never broken out, and nothing at all was written for the
+    # training individuals.
+    #
+    # Written in .full.phen order (train then test) and AFTER scale_g, so g_total
+    # is on the phenotype's scale.  Purely ADDITIVE: it emits arrays that already
+    # exist and consumes no RNG, so the same seed reproduces byte-identical
+    # phenotypes, panels and trees, and existing fits stay valid.
+    with open(args.out + ".true_g.tsv", "w") as f:
+        f.write("idx\tg_typed\tg_arg\tg_unobs\tg_total\n")
+        for i in range(n_indiv):
+            _gt = float(y_fixed[i]) + float(y_random[i]) + float(y_unobs[i])
+            f.write(f"{i}\t{float(y_fixed[i]):.8g}\t{float(y_random[i]):.8g}\t"
+                    f"{float(y_unobs[i]):.8g}\t{_gt:.8g}\n")
+
     # ws2 ground truth.  For per-tree architectures (ws2_vec is a numpy array),
     # writes .true_ws2.tsv as before.  For per-edge architectures (ws2_vec is a
     # dict {(tree_idx, child_node) → ws²_e}, Block 2.7.1), writes
