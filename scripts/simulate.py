@@ -313,6 +313,12 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--n-indiv",     type=int,   default=200,  help="diploid individuals (training set)")
     ap.add_argument("--n-test",      type=int,   default=0,    help="additional held-out test individuals (0 = no test split)")
+    ap.add_argument("--n-test-source", type=int, default=0,
+                    help="additional HELD-OUT individuals from --train-pop, "
+                         "appended AFTER the --n-test target individuals. 0 (the "
+                         "default) is a no-op. Lets ONE fitted predictor be scored "
+                         "in a held-out sample of its own population and in the "
+                         "target population, instead of pairing two simulations.")
     ap.add_argument("--length",      type=float, default=5e6,  help="sequence length (bp)")
     ap.add_argument("--recomb-rate", type=float, default=1e-8, help="recombination rate per bp per gen")
     ap.add_argument("--mut-rate",    type=float, default=1e-8, help="mutation rate per bp per gen")
@@ -710,7 +716,10 @@ def main():
     rng = np.random.default_rng(args.seed)
 
     # ---- 1. Simulate ARG and mutations -------------------------------------
-    n_total = args.n_indiv + args.n_test
+    n_total = args.n_indiv + args.n_test + args.n_test_source
+    if args.n_test_source > 0 and args.demography != "stdpopsim":
+        raise SystemExit("--n-test-source is implemented for "
+                         "--demography stdpopsim only")
     # Transfer demography: split n_train between A and B; n_test is all B.
     # Layout in the sampled ts: [n_train_A A indivs, n_train_B B indivs, n_test B indivs],
     # which preserves the existing convention that train = ts[:n_train], test = ts[n_train:].
@@ -823,6 +832,14 @@ def main():
             _sample_sets.append(msprime.SampleSet(
                 _n_test_pop, population=args.test_pop,
                 time=args.test_pop_time))
+        # HELD-OUT SOURCE individuals, APPENDED LAST so that every pre-existing
+        # index keeps its meaning: [0, n_indiv) training, [n_indiv, +n_test)
+        # target, [n_indiv+n_test, +n_test_source) held-out source.  Appending
+        # rather than inserting is what makes --n-test-source a no-op at 0.
+        if args.n_test_source > 0:
+            _sample_sets.append(msprime.SampleSet(
+                args.n_test_source, population=args.train_pop,
+                time=args.train_pop_time))
         ts = msprime.sim_ancestry(
             samples=_sample_sets,
             demography=_sps_model.model,
@@ -1472,7 +1489,12 @@ def main():
     # test-pop h² drift with sample composition, biasing r2_calib's ceiling
     # (see SIMULATION_SPECS.md §4.3 in the sargent-paper repo). With no test set
     # (n_test == 0) fall back to the full sample (legacy behaviour).
-    norm_idx = slice(args.n_indiv, n_indiv) if args.n_test > 0 else slice(None)
+    # Pinned to the TARGET block only.  Written as an explicit upper bound
+    # because --n-test-source appends more individuals after it; `slice(n_indiv,
+    # n_indiv_total)` would silently fold the held-out SOURCE individuals into the
+    # normalisation reference and change every realised h2.
+    norm_idx = (slice(args.n_indiv, args.n_indiv + args.n_test)
+                if args.n_test > 0 else slice(None))
 
     var_fixed = float(np.var(y_fixed[norm_idx]))
     if var_fixed > 0 and args.h2_snp > 0:
@@ -1605,11 +1627,24 @@ def main():
                 float(np.var(y_unobs[idx]))  / vy)
 
     h2_snp_realised, h2_arg_realised, h2_unobs_realised = _realised_h2(slice(None))
+    h2_snp_realised_src = h2_arg_realised_src = h2_unobs_realised_src = None
     if args.n_test > 0:
+        # Explicit upper bound, for the same reason as norm_idx: --n-test-source
+        # appends individuals AFTER the target block, and `slice(n_indiv,
+        # n_indiv_total)` would pool them into the "test" reference, so var(y)
+        # would be taken over a mixed-ancestry sample and every reported
+        # component h2 would be wrong (measured: 0.4195 + 0.5563 = 0.976 against
+        # a 0.80 target, where the correct values are 0.3180 + 0.4770 = 0.795).
         (h2_snp_realised_test, h2_arg_realised_test,
-         h2_unobs_realised_test)  = _realised_h2(slice(args.n_indiv, n_indiv))
+         h2_unobs_realised_test)  = _realised_h2(
+             slice(args.n_indiv, args.n_indiv + args.n_test))
         (h2_snp_realised_train, h2_arg_realised_train,
          h2_unobs_realised_train) = _realised_h2(slice(0, args.n_indiv))
+        if args.n_test_source > 0:
+            (h2_snp_realised_src, h2_arg_realised_src,
+             h2_unobs_realised_src) = _realised_h2(
+                 slice(args.n_indiv + args.n_test,
+                       args.n_indiv + args.n_test + args.n_test_source))
     else:
         h2_snp_realised_test = h2_arg_realised_test = h2_unobs_realised_test = None
         h2_snp_realised_train = h2_arg_realised_train = h2_unobs_realised_train = None
@@ -1676,9 +1711,23 @@ def main():
         write_plink(args.out, bed_dosage[:, :n_train], bed_positions, n_train, n_bed)
 
         # Test: phenotypes + BED-panel genotypes for last n_test individuals
-        np.savetxt(args.out + ".test.phen", y[n_train:], fmt="%.8g")
-        write_plink(args.out + ".test", bed_dosage[:, n_train:], bed_positions,
+        _te = slice(n_train, n_train + n_test)
+        np.savetxt(args.out + ".test.phen", y[_te], fmt="%.8g")
+        write_plink(args.out + ".test", bed_dosage[:, _te], bed_positions,
                     n_test, n_bed)
+
+        # Held-out SOURCE sample: same layout as .test.*, its own files.
+        if args.n_test_source > 0:
+            _so = slice(n_train + n_test, n_train + n_test + args.n_test_source)
+            np.savetxt(args.out + ".source.phen", y[_so], fmt="%.8g")
+            write_plink(args.out + ".source", bed_dosage[:, _so], bed_positions,
+                        args.n_test_source, n_bed)
+            with open(args.out + ".source.true_components.tsv", "w") as f:
+                f.write("idx\ty_fixed\ty_random\ty_total\n")
+                for i in range(args.n_test_source):
+                    gi = n_train + n_test + i
+                    f.write(f"{i}\t{y_fixed[gi]:.8g}\t{y_random[gi]:.8g}\t"
+                            f"{y[gi]:.8g}\n")
 
         # Also save full phen for completeness
         np.savetxt(args.out + ".full.phen", y, fmt="%.8g")
@@ -1939,7 +1988,11 @@ def main():
     params = {
         "n_indiv":         n_train,
         "n_test":          n_test,
-        "n_total":         n_train + n_test,
+        "n_total":         n_train + n_test + args.n_test_source,
+        "n_test_source":   args.n_test_source,
+        "h2_snp_realised_source":   h2_snp_realised_src,
+        "h2_arg_realised_source":   h2_arg_realised_src,
+        "h2_unobs_realised_source": h2_unobs_realised_src,
         "n_trees":         (ts_train.num_trees if (has_test and ts_train is not None)
                             else n_trees),
         "n_trees_full":    n_trees,
