@@ -1706,6 +1706,21 @@ def main():
         ts_train = ts.simplify(samples=train_sample_nodes)
         ts_train.dump(args.out + ".trees")
 
+        # WITH --n-test-source, case.full.trees must still hold EXACTLY
+        # training + target.  sargent's predict stage derives the test-set size
+        # from it -- src/lib/predict.c:916, `n_te = num_individuals(full) -
+        # n_tr` -- so a third block makes it demand a test BED of n_test +
+        # n_test_source samples and the fit dies with "test BED has 500 samples,
+        # expected n_test=1000".  The complete genealogy, all three blocks in ONE
+        # consistent ARG, goes to case.all.trees instead, which is what the
+        # slicing scripts read; sargent never sees it.  At n_test_source = 0
+        # nothing is simplified and nothing is written, so the no-op holds.
+        if args.n_test_source > 0:
+            ts.dump(args.out + ".all.trees")
+            _keep = [nd for i in range(n_train + n_test)
+                     for nd in ts.individual(i).nodes]
+            ts.simplify(samples=_keep).dump(args.out + ".full.trees")
+
         # Train: phenotypes + BED-panel genotypes for first n_train individuals
         np.savetxt(args.out + ".phen", y[:n_train], fmt="%.8g")
         write_plink(args.out, bed_dosage[:, :n_train], bed_positions, n_train, n_bed)
@@ -1729,7 +1744,10 @@ def main():
                     f.write(f"{i}\t{y_fixed[gi]:.8g}\t{y_random[gi]:.8g}\t"
                             f"{y[gi]:.8g}\n")
 
-        # Also save full phen for completeness
+        # Also save full phen for completeness.  NB this covers every
+        # individual including the held-out source block, so it is longer than
+        # case.full.trees when --n-test-source > 0; case.all.trees is the ARG
+        # that matches it row for row.
         np.savetxt(args.out + ".full.phen", y, fmt="%.8g")
         # Per-individual true components (for evaluation of prediction quality)
         with open(args.out + ".test.true_components.tsv", "w") as f:
