@@ -614,6 +614,38 @@ def main():
                          "repetitive regions where arrays and short-read calling under-perform. "
                          "The panel SIZE is held fixed -- markers are redistributed elsewhere -- "
                          "so overall density is unchanged and only the LOCAL depletion differs.")
+    # ---- HOTSPOT-ISOLATED unobserved loci (pilot, sargent-paper
+    # notes/PILOT_UNREACH_PROMPT.md).  WHY.  A single-origin SV is tagged because
+    # typed SNPs on the same branch sit nearby on the same haplotype background.
+    # Recombination hotspots flanking the SV break that background on both sides,
+    # so markers outside them see a DIFFERENT local genealogy, while the true tree
+    # at the SV still carries the SV's branch exactly.  The SV positions must
+    # therefore be fixed BEFORE sim_ancestry so a RateMap can be built around them.
+    #
+    # Defaults (0 loci) are OFF: no RNG is consumed and the scalar recombination
+    # rate is passed to msprime unchanged, so existing seeds reproduce bit for bit.
+    ap.add_argument("--unobs-hotspot-loci", type=int, default=0,
+                    help="place the --h2-unobs class as N single-origin variants at "
+                         "positions fixed before sim_ancestry, each in a typed-SNP-free "
+                         "core flanked by recombination hotspots (default 0 = off). "
+                         "Overrides --n-unobs-causal.")
+    ap.add_argument("--unobs-hotspot-rho", type=float, default=0.0,
+                    help="population-scaled recombination 4*Ne*c ADDED by each flanking "
+                         "hotspot (Ne = --Ne); 0 = cores are defined but the map is flat")
+    ap.add_argument("--unobs-hotspot-kb", type=float, default=2.0,
+                    help="width of each flanking hotspot in kb (default 2)")
+    ap.add_argument("--unobs-core-kb", type=float, default=5.0,
+                    help="width of the typed-SNP-free core around each locus in kb "
+                         "(default 5); the hotspots abut the core on both sides")
+    ap.add_argument("--unobs-mask-drop", action="store_true",
+                    help="with --unobs-mask-kb (or hotspot cores): DROP masked sites "
+                         "from the panel instead of refusing when the panel cannot be "
+                         "refilled elsewhere.  At 3800 SNPs/Mb the panel is ~all sites, "
+                         "so this is the only way to mask there; the panel shrinks by "
+                         "the masked sites and the log says by how many.")
+    ap.add_argument("--write-unobs-dosage", action="store_true",
+                    help="write <out>.unobs_dosage.npy (n_unobs x all individuals, in "
+                         ".true_unobs.tsv row order).  Purely additive.")
     # BayesR-style mixture for fixed effects (sigma² relative to var_pheno=1)
     ap.add_argument("--sigma2-mix",  type=float, nargs="+",
                     default=[0.0, 1e-4, 1e-3, 1e-2],
@@ -715,6 +747,40 @@ def main():
 
     rng = np.random.default_rng(args.seed)
 
+    # Hotspot-isolated loci: positions and RateMap fixed BEFORE sim_ancestry.
+    # One locus per equal segment of the region, uniform inside the segment with
+    # a margin, so cores and hotspots never overlap.  Dedicated RNG stream.
+    _recomb = args.recomb_rate
+    hotspot_loci = None
+    if args.unobs_hotspot_loci > 0:
+        if args.h2_unobs <= 0:
+            sys.exit("ERROR: --unobs-hotspot-loci needs --h2-unobs > 0")
+        _N = args.unobs_hotspot_loci
+        _half = args.unobs_core_kb * 1e3 / 2.0
+        _hw = args.unobs_hotspot_kb * 1e3
+        _seg = args.length / _N
+        _margin = _half + _hw + 1000.0
+        if _seg < 2 * _margin:
+            sys.exit("ERROR: --unobs-hotspot-loci too many for --length")
+        _hrng = np.random.default_rng(args.seed + 31_337)
+        hotspot_loci = np.array([float(np.floor(i * _seg + _hrng.uniform(_margin, _seg - _margin)))
+                                 for i in range(_N)])
+        if args.unobs_hotspot_rho > 0:
+            _c = args.unobs_hotspot_rho / (4.0 * args.Ne)     # per hotspot, Morgans
+            _hot = args.recomb_rate + _c / _hw
+            _br, _rt = [0.0], []
+            for x in hotspot_loci:
+                for a, b in ((x - _half - _hw, x - _half), (x + _half, x + _half + _hw)):
+                    if a > _br[-1]:
+                        _br.append(a); _rt.append(args.recomb_rate)
+                    _br.append(b); _rt.append(_hot)
+            _br.append(args.length); _rt.append(args.recomb_rate)
+            _recomb = msprime.RateMap(position=_br, rate=_rt)
+            print(f"  hotspots: {_N} loci x 2 hotspots of {_hw/1e3:g} kb, "
+                  f"rho=4Ne*c={args.unobs_hotspot_rho:g} each (c={_c:.3g} M, Ne={args.Ne:g}); "
+                  f"map length {_recomb.total_mass*100:.2f} cM vs "
+                  f"{args.recomb_rate*args.length*100:.2f} cM flat", flush=True)
+
     # ---- 1. Simulate ARG and mutations -------------------------------------
     n_total = args.n_indiv + args.n_test + args.n_test_source
     if args.n_test_source > 0 and args.demography != "stdpopsim":
@@ -754,7 +820,7 @@ def main():
         ts = msprime.sim_ancestry(
             samples={"ADM": n_total},
             sequence_length=args.length,
-            recombination_rate=args.recomb_rate,
+            recombination_rate=_recomb,
             demography=dem,
             random_seed=args.seed,
         )
@@ -773,7 +839,7 @@ def main():
         ts = msprime.sim_ancestry(
             samples=sample_spec,
             sequence_length=args.length,
-            recombination_rate=args.recomb_rate,
+            recombination_rate=_recomb,
             demography=dem,
             random_seed=args.seed,
         )
@@ -844,7 +910,7 @@ def main():
             samples=_sample_sets,
             demography=_sps_model.model,
             sequence_length=args.length,
-            recombination_rate=args.recomb_rate,
+            recombination_rate=_recomb,
             random_seed=args.seed,
         )
         _train_time_str = (f"@t={args.train_pop_time:.0f}gen"
@@ -863,7 +929,7 @@ def main():
         ts = msprime.sim_ancestry(
             samples=n_total,
             sequence_length=args.length,
-            recombination_rate=args.recomb_rate,
+            recombination_rate=_recomb,
             population_size=args.Ne,
             random_seed=args.seed,
         )
@@ -1027,7 +1093,63 @@ def main():
     # legacy behaviour (no MAF filter).
     # ---- recurrent (union-of-branches) unobserved variants -----------------
     recurrence_built = False
-    if args.h2_unobs > 0 and (args.unobs_recurrence_k > 1 or args.unobs_recurrence_zipf > 0):
+    hotspot_core_excl = None
+    if hotspot_loci is not None:
+        # One single-origin variant per locus: a branch of the tree covering the
+        # locus, drawn in proportion to branch length among branches whose
+        # frequency gives MAF in [--unobs-maf-min, --unobs-maf-max] -- i.e. one
+        # mutation at that position, conditioned on its frequency.  Appended past
+        # the last site, like the recurrent composites.
+        hs_rng = np.random.default_rng(args.seed + 77_777)
+        node_to_indiv = np.full(ts.num_nodes, -1, dtype=np.int64)
+        for _i in range(n_indiv):
+            for _nd in ts.individual(_i).nodes:
+                node_to_indiv[_nd] = _i
+        n_hap = 2 * n_indiv
+        new_dos, new_pos, new_age = [], [], []
+        for locus in hotspot_loci:
+            tree = ts.at(locus)
+            cand, wts = [], []
+            for u in tree.nodes():
+                par = tree.parent(u)
+                if par == tskit.NULL:
+                    continue
+                bl = tree.time(par) - tree.time(u)
+                fu = tree.num_samples(u) / n_hap
+                if bl <= 0 or not (args.unobs_maf_min <= min(fu, 1 - fu) <= args.unobs_maf_max):
+                    continue
+                cand.append(u); wts.append(bl)
+            if not cand:
+                sys.exit(f"ERROR: no branch at {locus:.0f} with MAF in range")
+            wts = np.asarray(wts, dtype=float)
+            u = cand[int(hs_rng.choice(len(cand), p=wts / wts.sum()))]
+            d = np.zeros(n_indiv)
+            for h in tree.samples(u):
+                ii = node_to_indiv[h]
+                if ii >= 0:
+                    d[ii] += 1.0
+            new_dos.append(d); new_pos.append(int(locus))
+            new_age.append(float(tree.time(tree.parent(u))))
+        dosage    = np.vstack([dosage, np.stack(new_dos)])
+        positions = list(positions) + new_pos
+        ages      = np.concatenate([ages, np.asarray(new_age, dtype=float)])
+        is_sv     = np.concatenate([is_sv, np.ones(len(new_dos), dtype=bool)])
+        unobs_idx = np.arange(p, p + len(new_dos), dtype=int)
+        p         = dosage.shape[0]
+        n_unobs_causal = len(unobs_idx)
+        unobs_series   = np.arange(n_unobs_causal)
+        unobs_set      = set(unobs_idx.tolist())
+        recurrence_built = True          # "class already built": skip the other paths
+        # Typed causal SNPs are kept out of the cores, so the cores hold only the SVs.
+        _pv = np.asarray(positions, dtype=float)
+        _incore = np.abs(_pv[:, None] - hotspot_loci[None, :]).min(axis=1) <= args.unobs_core_kb * 1e3 / 2.0
+        remaining = np.array([j for j in range(p) if j not in unobs_set and not _incore[j]])
+        _f = dosage[unobs_idx].mean(axis=1) / 2.0
+        print(f"  hotspot loci: {n_unobs_causal} single-origin variants, MAF "
+              f"{np.min(np.minimum(_f,1-_f)):.3f}-{np.max(np.minimum(_f,1-_f)):.3f}; "
+              f"{int(_incore[:len(_incore)-n_unobs_causal].sum())} sites in cores",
+              flush=True)
+    if args.h2_unobs > 0 and hotspot_loci is None and (args.unobs_recurrence_k > 1 or args.unobs_recurrence_zipf > 0):
         K = args.unobs_recurrence_k
         rec_rng = np.random.default_rng(args.seed + 99_991)
         node_to_indiv = np.full(ts.num_nodes, -1, dtype=np.int64)
@@ -1224,9 +1346,11 @@ def main():
             # That is what makes the contrast attributable to LOCAL depletion
             # rather than to a thinner panel, which would confound it with the
             # density axis this experiment is trying to escape.
-            if args.unobs_mask_kb > 0.0 and len(unobs_idx):
+            _mask_kb = (args.unobs_core_kb / 2.0 if hotspot_loci is not None
+                        else args.unobs_mask_kb)
+            if _mask_kb > 0.0 and len(unobs_idx):
                 _posv = np.asarray(positions, dtype=float)
-                _win  = args.unobs_mask_kb * 1e3
+                _win  = _mask_kb * 1e3
                 _near = np.abs(_posv[_elig][:, None] - _posv[unobs_idx][None, :]).min(axis=1)
                 _keep = _near > _win
                 _dropped = int((~_keep).sum())
@@ -1236,7 +1360,11 @@ def main():
                 # that were already variant-limited, which masking did not cause.
                 _want = _target_k if _target_k is not None else int(round(args.bed_coverage * p))
                 _want = max(1, min(_want, len(_elig)))
-                if _keep.sum() < _want:
+                if _keep.sum() < _want and args.unobs_mask_drop:
+                    print(f"  --unobs-mask-drop: panel shrinks from {_want} to "
+                          f"{int(_keep.sum())} ({_want - int(_keep.sum())} masked sites dropped)",
+                          flush=True)
+                elif _keep.sum() < _want:
                     # The panel could only be filled by re-using masked sites, so
                     # the "same density, locally depleted" property this knob is
                     # for would silently become "thinner panel" -- which is the
@@ -1251,9 +1379,9 @@ def main():
                         f"--n-unobs-causal, or reduce --bed-snps-per-mb.")
                 _elig = _elig[_keep]
                 print(f"  Locally-sparse markers: {_dropped} candidate sites within "
-                      f"{args.unobs_mask_kb} kb of an unobserved causal variant removed "
-                      f"from the panel pool ({len(_elig)} remain, panel size {_want} "
-                      f"unchanged)", flush=True)
+                      f"{_mask_kb} kb of an unobserved causal variant removed "
+                      f"from the panel pool ({len(_elig)} remain, panel size "
+                      f"{min(_want, len(_elig))} of a requested {_want})", flush=True)
             if args.bed_freq_weight == 0.0:
                 _pw = None
             else:
@@ -1820,6 +1948,19 @@ def main():
                 # (see beta_all = beta + beta_unobs above), so beta[j] is 0 here.
                 f.write(f"{j}\t{positions[j]}\t{beta_unobs[j]:.8g}\t"
                         f"{ages[j]:.6g}\t{_maf_out[j]:.6g}\n")
+
+    if hotspot_loci is not None:
+        with open(args.out + ".hotspots.json", "w") as f:
+            json.dump({"loci": [int(x) for x in hotspot_loci],
+                       "rho_per_hotspot": args.unobs_hotspot_rho,
+                       "hotspot_kb": args.unobs_hotspot_kb,
+                       "core_kb": args.unobs_core_kb, "Ne_scale": args.Ne,
+                       "map_length_cM": (float(_recomb.total_mass) * 100
+                                         if hasattr(_recomb, "total_mass")
+                                         else args.recomb_rate * args.length * 100)},
+                      f, indent=2)
+    if args.write_unobs_dosage and len(unobs_idx):
+        np.save(args.out + ".unobs_dosage.npy", dosage[unobs_idx].astype(np.int8))
 
     # PER-INDIVIDUAL TRUE GENETIC VALUE, every individual (2026-10-02).
     #
