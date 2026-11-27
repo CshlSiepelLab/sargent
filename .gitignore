@@ -1,7 +1,6 @@
 *.o
 build/
 compile_commands.json
-example.trees
 __pycache__/
 *.pyc
 .DS_Store

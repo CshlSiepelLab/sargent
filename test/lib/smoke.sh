@@ -19,12 +19,9 @@ set -euo pipefail
 REPO=$(cd "$(dirname "$0")/../.." && pwd)
 BIN=${BIN:-$REPO/build/test/lib/check_tree_matvec}
 
-# Smoke case: a *.trees file passed as $1, or $SARGENT_SMOKE_CASE.
-CASE=${1:-${SARGENT_SMOKE_CASE:-}}
-if [[ -z $CASE ]]; then
-    echo "usage: $0 case.trees   (or set SARGENT_SMOKE_CASE)"
-    exit 2
-fi
+# Smoke case: a *.trees file passed as $1, or $SARGENT_SMOKE_CASE, or the
+# bundled example.
+CASE=${1:-${SARGENT_SMOKE_CASE:-$REPO/examples/toy.trees}}
 
 if [[ ! -x $BIN ]]; then
     echo "ERROR: $BIN not built.  Run:"
