@@ -8,8 +8,8 @@
  * See the LICENSE file in the project root for details.
  *
  * predict.c — native out-of-sample prediction (full five-arm ladder).
- * Reproduces analysis/predict.py; see test/eval/native_predict_design.md for
- * the exact math and the < 1e-6 merge gate.
+ * Reproduces the Python reference implementation (analysis/predict.py in the
+ * paper repository) to < 1e-6 on every metric.
  */
 
 #include <stdlib.h>
@@ -43,6 +43,7 @@ double arm_now(void)
 #include "geno.h"
 #include "sargent.h"
 #include "branchsel.h"
+#include "variational.h"
 
 /* Which arms this invocation computes.  SG_MODEL_ALL is the default and
  * reproduces the historical behaviour exactly. */

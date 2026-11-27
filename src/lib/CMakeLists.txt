@@ -35,6 +35,12 @@ if(APPLE)
   find_library(ACCELERATE_FRAMEWORK Accelerate REQUIRED)
   target_link_libraries(sargent_core PUBLIC ${ACCELERATE_FRAMEWORK})
   target_compile_definitions(sargent_core PUBLIC SARGENT_HAS_LAPACK)
+  # threads.c declares the BLAS thread setters weak; Apple's linker still
+  # requires them unless told they may be undefined.
+  target_link_options(sargent_core PUBLIC
+    "LINKER:-U,_openblas_set_num_threads"
+    "LINKER:-U,_goto_set_num_threads"
+    "LINKER:-U,_mkl_set_num_threads")
 else()
   find_package(LAPACK)
   if(LAPACK_FOUND)
