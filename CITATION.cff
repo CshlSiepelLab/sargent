@@ -1,0 +1,27 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+type: software
+title: "SARGENT: Sparse ARG-based ENcoding of Traits"
+abstract: >-
+  SARGENT fits Bayesian sparse linear mixed models for complex traits that
+  combine effects of typed SNPs with a random effect derived from an
+  ancestral recombination graph (ARG), capturing heritability from variants
+  that are untyped or poorly tagged by the typed SNPs.
+authors:
+  - family-names: Kuru
+    given-names: Nurdan
+    affiliation: Cold Spring Harbor Laboratory
+  - family-names: Siepel
+    given-names: Adam
+    affiliation: Cold Spring Harbor Laboratory
+    orcid: "https://orcid.org/0000-0002-3557-7219"
+version: 0.10.0
+date-released: "2026-11-27"
+license: BSD-3-Clause
+repository-code: "https://github.com/CshlSiepelLab/sargent"
+keywords:
+  - ancestral recombination graph
+  - genomic prediction
+  - heritability
+  - linear mixed model
+  - tree sequence
