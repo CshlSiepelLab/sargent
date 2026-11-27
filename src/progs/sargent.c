@@ -771,7 +771,6 @@ int main(int argc, char *argv[])
                                     "components in one chain (%d SNPs, K=%d)...\n",
                             sg->p, sg->K);
                 double j_su2 = 0.0, j_sig2 = 0.0;
-                double _tj = arm_now();
                 if (var_joint_gibbs(sg, sg->gall, silent, gibbs_iter ? gibbs_iter : 3000,
                                     gibbs_burn >= 0 ? gibbs_burn : 1000,
                                     0, &j_su2, &j_sig2) != 0) {
@@ -780,6 +779,13 @@ int main(int argc, char *argv[])
                 }
                 sg->joint_su2 = j_su2;
                 sg->sigma2    = j_sig2;
+                /* Report the joint chain's heritability: PVE averaged over
+                 * post-burn-in sweeps, split into its sparse (typed-SNP) and
+                 * genealogical (ARG) shares.  These replace the values the
+                 * standalone Stage 1 above left in sg->h2*. */
+                sg->h2     = sg->joint_pve;
+                sg->h2_snp = sg->joint_pve * sg->joint_pve_fix;
+                sg->h2_arg = sg->joint_pve * sg->joint_pve_rand;
                 if (!silent)
                     fprintf(stderr, "Joint done: su2=%.4f sigma2=%.4f\n", j_su2, j_sig2);
                 write_beta_table(sg, outroot, silent);
@@ -795,7 +801,10 @@ int main(int argc, char *argv[])
             }
         }
 
-        if (!snp_only) {
+        /* After --joint the ARG term has already been fitted together with the
+         * SNP effects; a sequential Stage 2 on the joint residual would refit
+         * it and overwrite the joint variance components and heritability. */
+        if (!snp_only && !use_joint) {
             int use_emma       = (sg->uniform_arg && sg->gall != NULL);
             int emma_warmstart = (!sg->uniform_arg && sg->gall != NULL);
             if (!silent)
@@ -833,7 +842,7 @@ int main(int argc, char *argv[])
 
     /* Write coherent summary of the final fit. */
     {
-        const char *m = em_iters > 0 ? "joint_em" : "sequential";
+        const char *m = use_joint ? "joint" : em_iters > 0 ? "joint_em" : "sequential";
         write_summary_json(sg, outroot, m, em_iters, silent);
     }
 
