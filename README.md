@@ -1,5 +1,7 @@
 # SARGENT: Sparse ARG-based ENcoding of Traits
 
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.24606224.svg)](https://doi.org/10.5281/zenodo.24606224)
+
 SARGENT fits Bayesian sparse linear mixed models for complex traits that
 combine effects of typed SNPs with a random effect derived from an ancestral
 recombination graph (ARG), capturing heritability not tagged by the typed SNPs.
@@ -68,3 +70,12 @@ submodule; see `AUTHORS`.
 
 Please report bugs or questions via
 [GitHub issues](https://github.com/CshlSiepelLab/sargent/issues).
+
+## Citation
+
+If you use SARGENT, please cite the software as
+
+> Kuru N, Siepel A. SARGENT: Sparse ARG-based ENcoding of Traits.
+> Zenodo. https://doi.org/10.5281/zenodo.24606224
+
+(see also `CITATION.cff`).
