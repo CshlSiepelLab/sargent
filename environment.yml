@@ -13,10 +13,8 @@ channels:
   - conda-forge
 dependencies:
   - python=3.11
-  # C build toolchain for the bundled tskit submodule and the sargent C core
+  # C build toolchain
   - cmake>=3.16
-  - meson
-  - ninja
   # Python deps for scripts/ and test/eval/
   - msprime
   - tskit

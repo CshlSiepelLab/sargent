@@ -10,7 +10,6 @@ recombination graph (ARG), capturing heritability not tagged by the typed SNPs.
 
 - C compiler (clang or gcc)
 - CMake >= 3.16
-- [Meson](https://mesonbuild.com/) and [Ninja](https://ninja-build.org/) (to build the bundled tskit library)
 
 ### Optional
 
@@ -19,10 +18,6 @@ recombination graph (ARG), capturing heritability not tagged by the typed SNPs.
   brew install libomp
   ```
 
-On macOS with conda (for cmake/meson/ninja):
-```bash
-conda install -c conda-forge cmake meson ninja
-```
 
 ## Building
 
@@ -34,7 +29,7 @@ cmake ..
 make
 ```
 
-The build system automatically compiles [tskit](https://tskit.dev/) C_1.3.1 from the bundled submodule — no separate tskit installation is needed. OpenMP is detected and used automatically if available.
+The [tskit](https://tskit.dev/) C library (C_1.3.1) is obtained as a git submodule from the tskit repository and compiled into `sargent`; no separate tskit installation is needed.  (Note that GitHub's automatically generated source archives do not include submodules, so clone the repository as shown.) OpenMP is detected and used automatically if available.
 
 The `sargent` binary will be at `build/src/progs/sargent`.
 

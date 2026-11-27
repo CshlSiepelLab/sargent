@@ -17,7 +17,7 @@
 set -euo pipefail
 
 REPO=$(cd "$(dirname "$0")/../.." && pwd)
-BIN=$REPO/build/test/lib/check_tree_matvec
+BIN=${BIN:-$REPO/build/test/lib/check_tree_matvec}
 
 # Smoke case: a *.trees file passed as $1, or $SARGENT_SMOKE_CASE.
 CASE=${1:-${SARGENT_SMOKE_CASE:-}}

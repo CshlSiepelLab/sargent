@@ -12,58 +12,38 @@ set(CMAKE_C_STANDARD 99)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-# ---- tskit dependency (built from submodule via meson) -----------------
-include(ExternalProject)
+# ---- tskit C library (compiled in statically) ---------------------------
+# TSKIT_SOURCE_DIR is the tskit C source tree: the c/ directory of the git
+# submodule by default, or an unpacked tskit C release tarball
+# (tskit-X.Y.Z.tar.xz from github.com/tskit-dev/tskit/releases), which has
+# the same layout.
+set(TSKIT_SOURCE_DIR "${CMAKE_SOURCE_DIR}/third_party/tskit/c"
+    CACHE PATH "tskit C source tree (submodule c/ or unpacked C release)")
+if(NOT EXISTS "${TSKIT_SOURCE_DIR}/tskit.h")
+  message(FATAL_ERROR
+    "tskit sources not found in ${TSKIT_SOURCE_DIR}.  Clone with "
+    "--recurse-submodules (or run `git submodule update --init`), or set "
+    "-DTSKIT_SOURCE_DIR to an unpacked tskit C release.")
+endif()
 
-set(TSKIT_SOURCE_DIR  "${CMAKE_SOURCE_DIR}/third_party/tskit/c")
-set(TSKIT_BINARY_DIR  "${CMAKE_BINARY_DIR}/tskit-build")
-set(TSKIT_INSTALL_DIR "${CMAKE_BINARY_DIR}/tskit-install")
-# Platform-appropriate shared-library suffix (.dylib on macOS, .so on Linux,
-# .dll on Windows) -- CMAKE_SHARED_LIBRARY_SUFFIX is set automatically.
-set(TSKIT_LIB_NAME    "libtskit${CMAKE_SHARED_LIBRARY_SUFFIX}")
-set(TSKIT_LIB         "${TSKIT_INSTALL_DIR}/lib/${TSKIT_LIB_NAME}")
+add_library(tskit STATIC
+  ${TSKIT_SOURCE_DIR}/tskit/core.c
+  ${TSKIT_SOURCE_DIR}/tskit/tables.c
+  ${TSKIT_SOURCE_DIR}/tskit/trees.c
+  ${TSKIT_SOURCE_DIR}/tskit/genotypes.c
+  ${TSKIT_SOURCE_DIR}/tskit/stats.c
+  ${TSKIT_SOURCE_DIR}/tskit/convert.c
+  ${TSKIT_SOURCE_DIR}/tskit/haplotype_matching.c
+  ${TSKIT_SOURCE_DIR}/subprojects/kastore/kastore.c)
+target_include_directories(tskit SYSTEM PUBLIC
+  ${TSKIT_SOURCE_DIR}
+  ${TSKIT_SOURCE_DIR}/subprojects/kastore)
+target_link_libraries(tskit PUBLIC m)
+add_library(tskit::tskit ALIAS tskit)
 
-find_program(MESON_EXECUTABLE meson REQUIRED)
-find_program(NINJA_EXECUTABLE ninja REQUIRED)
-
-ExternalProject_Add(tskit_external
-  SOURCE_DIR  ${TSKIT_SOURCE_DIR}
-  BINARY_DIR  ${TSKIT_BINARY_DIR}
-  INSTALL_DIR ${TSKIT_INSTALL_DIR}
-  PATCH_COMMAND
-    ${CMAKE_COMMAND} -E copy
-      ${CMAKE_SOURCE_DIR}/third_party/patches/tskit_meson_options.txt
-      ${TSKIT_SOURCE_DIR}/meson_options.txt
-    COMMAND ${CMAKE_COMMAND} -E copy
-      ${CMAKE_SOURCE_DIR}/third_party/patches/tskit_meson.build
-      ${TSKIT_SOURCE_DIR}/meson.build
-  CONFIGURE_COMMAND
-    ${MESON_EXECUTABLE} setup ${TSKIT_BINARY_DIR} ${TSKIT_SOURCE_DIR}
-      --prefix=${TSKIT_INSTALL_DIR}
-      --libdir=lib
-      --wipe
-      -Dbuild_tests=false
-      -Dbuild_examples=false
-  BUILD_COMMAND
-    ${NINJA_EXECUTABLE} -C ${TSKIT_BINARY_DIR} ${TSKIT_LIB_NAME}
-  INSTALL_COMMAND
-    ${NINJA_EXECUTABLE} -C ${TSKIT_BINARY_DIR} install
-    COMMAND ${CMAKE_COMMAND} -E copy
-      ${TSKIT_SOURCE_DIR}/subprojects/kastore/kastore.h
-      ${TSKIT_INSTALL_DIR}/include/kastore.h
-  BUILD_BYPRODUCTS ${TSKIT_LIB}
-)
-
-file(MAKE_DIRECTORY "${TSKIT_INSTALL_DIR}/include")
-
-add_library(tskit::tskit IMPORTED SHARED GLOBAL)
-add_dependencies(tskit::tskit tskit_external)
-set_target_properties(tskit::tskit PROPERTIES
-  IMPORTED_LOCATION     ${TSKIT_LIB}
-  INTERFACE_INCLUDE_DIRECTORIES ${TSKIT_INSTALL_DIR}/include
-  INTERFACE_LINK_LIBRARIES m)
-
-message(STATUS "tskit will be built from ${TSKIT_SOURCE_DIR}")
+file(READ "${TSKIT_SOURCE_DIR}/VERSION.txt" TSKIT_VERSION)
+string(STRIP "${TSKIT_VERSION}" TSKIT_VERSION)
+message(STATUS "tskit ${TSKIT_VERSION} from ${TSKIT_SOURCE_DIR}")
 
 # ---- Project layout ----------------------------------------------------
 # OpenMP detection happens inside src/lib/CMakeLists.txt via the standard
@@ -74,8 +54,3 @@ set(SARGENT_INCLUDE_DIR "${CMAKE_SOURCE_DIR}/include")
 add_subdirectory(src/lib)
 add_subdirectory(src/progs)
 add_subdirectory(test/lib)
-
-# ---- Installation ------------------------------------------------------
-install(DIRECTORY "${SARGENT_INCLUDE_DIR}/"
-        DESTINATION include
-        FILES_MATCHING PATTERN "*.h")
