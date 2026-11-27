@@ -85,9 +85,8 @@ MAIN OPTIONS:
         Requires BED genotypes (not --ts-geno) and the Stage-2 ARG fit
         (incompatible with --snp-only).  The full ARG must have the train
         individuals first and the test individuals last (simulate.py's
-        layout).  Reproduces analysis/predict.py; see
-        test/eval/native_predict_design.md.  Paths default from the
-        <geno_prefix> (the case prefix):
+        layout).  Paths default from the <geno_prefix> (the case
+        prefix):
           --full-trees <path>   test+train ARG   (<geno_prefix>.full.trees)
           --test-geno  <prefix> test BED prefix  (<geno_prefix>.test)
           --test-pheno <path>   test phenotypes  (<geno_prefix>.test.phen)

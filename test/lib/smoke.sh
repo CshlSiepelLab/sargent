@@ -19,10 +19,12 @@ set -euo pipefail
 REPO=$(cd "$(dirname "$0")/../.." && pwd)
 BIN=$REPO/build/test/lib/check_tree_matvec
 
-# Default smoke case: the Phase 3 debug-scale balanced cell.  Falls back to any
-# *.trees file the user passes as $1.
-CASE_DEFAULT=/Users/acs/test-sargent/overnight/h2sweep/s42_balanced/case.trees
-CASE=${1:-$CASE_DEFAULT}
+# Smoke case: a *.trees file passed as $1, or $SARGENT_SMOKE_CASE.
+CASE=${1:-${SARGENT_SMOKE_CASE:-}}
+if [[ -z $CASE ]]; then
+    echo "usage: $0 case.trees   (or set SARGENT_SMOKE_CASE)"
+    exit 2
+fi
 
 if [[ ! -x $BIN ]]; then
     echo "ERROR: $BIN not built.  Run:"
