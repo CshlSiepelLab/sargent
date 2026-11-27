@@ -6,14 +6,24 @@ SARGENT fits Bayesian sparse linear mixed models for complex traits that
 combine effects of typed SNPs with a random effect derived from an ancestral
 recombination graph (ARG), capturing heritability not tagged by the typed SNPs.
 
-## Dependencies
+## Installing with Homebrew (macOS and Linux)
 
-### Required
+```bash
+brew install cshlsiepellab/tools/sargent
+```
+
+The example files are installed in `$(brew --prefix)/share/sargent/examples`.
+
+## Building from source
+
+### Dependencies
+
+#### Required
 
 - C compiler (clang or gcc)
 - CMake >= 3.16
 
-### Optional
+#### Optional
 
 - OpenMP — used automatically if available; on macOS install via Homebrew:
   ```bash
@@ -21,7 +31,7 @@ recombination graph (ARG), capturing heritability not tagged by the typed SNPs.
   ```
 
 
-## Building
+### Building
 
 ```bash
 git clone --recurse-submodules https://github.com/CshlSiepelLab/sargent.git
@@ -35,7 +45,7 @@ The [tskit](https://tskit.dev/) C library (C_1.3.1) is obtained as a git submodu
 
 The `sargent` binary will be at `build/src/progs/sargent`.
 
-## Installation
+### Installation
 
 To install the binary to a custom prefix (e.g. `~/sargent`):
 
