@@ -83,9 +83,10 @@ Please report bugs or questions via
 
 ## Citation
 
-If you use SARGENT, please cite the software as
+If you use SARGENT, please cite:
 
-> Kuru N, Siepel A. SARGENT: Sparse ARG-based ENcoding of Traits.
-> Zenodo. https://doi.org/10.5281/zenodo.24606224
+> Kuru N, Khalid S, Siepel A. SARGENT: ARG-based modeling of complex traits
+> across populations and through evolutionary time.  In preparation.
 
-(see also `CITATION.cff`).
+To cite a specific version of the software, you may also cite its Zenodo
+record, https://doi.org/10.5281/zenodo.24606224 (see also `CITATION.cff`).

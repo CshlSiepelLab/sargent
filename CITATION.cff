@@ -1,5 +1,8 @@
 cff-version: 1.2.0
-message: "If you use this software, please cite it as below."
+message: >-
+  If you use SARGENT, please cite the manuscript given under
+  preferred-citation; to cite a specific version of the software, cite it
+  as below.
 type: software
 title: "SARGENT: Sparse ARG-based ENcoding of Traits"
 abstract: >-
@@ -25,3 +28,19 @@ keywords:
   - heritability
   - linear mixed model
   - tree sequence
+preferred-citation:
+  type: article
+  title: "SARGENT: ARG-based modeling of complex traits across populations and through evolutionary time"
+  status: in-preparation
+  year: 2026
+  authors:
+    - family-names: Kuru
+      given-names: Nurdan
+      affiliation: Cold Spring Harbor Laboratory
+    - family-names: Khalid
+      given-names: Shareef
+      affiliation: Cold Spring Harbor Laboratory
+    - family-names: Siepel
+      given-names: Adam
+      affiliation: Cold Spring Harbor Laboratory
+      orcid: "https://orcid.org/0000-0002-3557-7219"
