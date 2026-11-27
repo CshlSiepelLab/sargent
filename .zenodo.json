@@ -1,0 +1,24 @@
+{
+  "title": "SARGENT: Sparse ARG-based ENcoding of Traits",
+  "upload_type": "software",
+  "description": "SARGENT fits Bayesian sparse linear mixed models for complex traits that combine effects of typed SNPs with a random effect derived from an ancestral recombination graph (ARG), capturing heritability from variants that are untyped or poorly tagged by the typed SNPs.",
+  "creators": [
+    {
+      "name": "Kuru, Nurdan",
+      "affiliation": "Cold Spring Harbor Laboratory"
+    },
+    {
+      "name": "Siepel, Adam",
+      "affiliation": "Cold Spring Harbor Laboratory",
+      "orcid": "0000-0002-3557-7219"
+    }
+  ],
+  "license": "BSD-3-Clause",
+  "keywords": [
+    "ancestral recombination graph",
+    "genomic prediction",
+    "heritability",
+    "linear mixed model",
+    "tree sequence"
+  ]
+}
