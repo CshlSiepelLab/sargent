@@ -1,5 +1,9 @@
 # SARGENT: Sparse ARG-based ENcoding of Traits
 
+SARGENT fits Bayesian sparse linear mixed models for complex traits that
+combine effects of typed SNPs with a random effect derived from an ancestral
+recombination graph (ARG), capturing heritability not tagged by the typed SNPs.
+
 ## Dependencies
 
 ### Required
@@ -23,7 +27,7 @@ conda install -c conda-forge cmake meson ninja
 ## Building
 
 ```bash
-git clone --recurse-submodules https://github.com/asiepel/sargent.git
+git clone --recurse-submodules https://github.com/CshlSiepelLab/sargent.git
 cd sargent
 mkdir build && cd build
 cmake ..
@@ -48,3 +52,23 @@ Add to your shell profile to put `sargent` on your PATH:
 ```bash
 export PATH="$HOME/sargent/bin:$PATH"
 ```
+
+## Usage
+
+```bash
+sargent [OPTIONS] <phenotypes> <input.trees> [<geno_prefix>]
+```
+
+Run `sargent --help` for a full description of arguments, options, and
+output files.
+
+## License
+
+SARGENT is distributed under the BSD 3-Clause License (see `LICENSE`).  It
+includes the [tskit](https://tskit.dev/) C library (MIT License) as a
+submodule; see `AUTHORS`.
+
+## Contact
+
+Please report bugs or questions via
+[GitHub issues](https://github.com/CshlSiepelLab/sargent/issues).

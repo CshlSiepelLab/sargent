@@ -1,33 +1,38 @@
-PROGRAM: sargent
+PROGRAM: sargent [Sparse ARG-based ENcoding of Traits]
 
 USAGE: sargent [OPTIONS] <phenotypes> <input.trees> [<geno_prefix>]
 
-DESCRIPTION: Fit a Bayesian sparse linear mixed model incorporating ancestral
-recombination graphs (ARGs).  Phenotypes are modelled as y = X*beta + u + eps
-where X*beta is a BayesR fit to typed SNPs and u is a random effect whose
-covariance is a weighted sum of local-tree kinship matrices from the ARG.
+DESCRIPTION: Fit a Bayesian sparse linear mixed model for a quantitative
+trait that combines the effects of typed SNPs with a random effect derived
+from an ancestral recombination graph (ARG).  Phenotypes are modelled as
+y = X*beta + u + eps, where X*beta captures typed-SNP effects under a
+sparse, BayesR-like mixture prior, and u ~ N(0, sigma_g^2 K) is a random
+effect whose covariance K is the span-weighted expected genetic
+relationship matrix (eGRM) of the ARG.  The full model is called SARGENT;
+omitting the ARG term gives a SNP-only model (SARGENT-S) and omitting the
+SNP term gives an ARG-only model (SARGENT-A).  With --predict, sargent
+also predicts phenotypes for a held-out test set.
 
-By design, the model prioritises typed SNPs: the BayesR fit explains as
-much variance as possible (h2_snp), and the ARG-derived random effect picks
-up additional "missing" heritability not captured by the typed SNPs
-(h2_arg).  This sequential interpretation is well-defined even though a
-classical fixed-vs-random decomposition is not identifiable.
+TYPICAL COMMANDS:
+    Fit the model:
+        sargent --stage1-gibbs --joint --uniform-arg -o out \
+            pheno.txt case.trees case
+
+    Fit and predict for held-out individuals:
+        sargent --stage1-gibbs --joint --uniform-arg --predict -o out \
+            pheno.txt case.trees case
 
 ARGUMENTS:
     <phenotypes>
-        Phenotype file.  Each non-comment line should contain one phenotype
-        value (by default, the last whitespace-separated field on the line
-        is used; use --pheno-col N to pick a specific 1-indexed column,
-        which is helpful for files with multiple replicate columns or ID
-        columns).
+        Phenotype file, with one value per non-comment line (by default,
+        the last whitespace-separated field; see --pheno-col).
 
     <input.trees>
-        Tree sequence file (.trees).  Used for local-tree covariance matrices
-        and, when --ts-geno is given, as the source of genotypes.
+        Tree sequence file (tskit .trees format) representing the ARG.
 
     <geno_prefix>
-        Prefix for PLINK BED files (<prefix>.bed, <prefix>.bim, <prefix>.fam).
-        Required unless --ts-geno is specified.
+        Prefix for PLINK files (<prefix>.bed, .bim, .fam) containing the
+        typed genotypes.  Omit when using --ts-geno.
 
 MAIN OPTIONS:
     --help, -h
@@ -36,296 +41,141 @@ MAIN OPTIONS:
     --version, -v
         Display the current version number and exit.
 
-    --silent, -z
-        Omit all progress updates and per-iteration output to stderr.
+    --outroot, -o <prefix>
+        Prefix for output files (default "sargent").
+
+    --pheno-col, -C <N>
+        Read phenotypes from 1-indexed column <N> (default: last column).
 
     --ts-geno, -G
-        Obtain genotypes from the tree sequence file rather than a BED
-        file.  When this option is given, <geno_prefix> must be omitted.
+        Take genotypes from the tree sequence rather than from PLINK
+        files.
 
-    --snp-only, -S
-        Run Stage 1 (BayesR fit to typed SNPs) only.  Produces
-        <outroot>.beta.tsv but not <outroot>.w2.tsv.
+    --threads, -T <N>
+        Limit all thread pools (OpenMP and BLAS) to <N> threads.  If not
+        given, SARGENT_THREADS, OPENBLAS_NUM_THREADS, MKL_NUM_THREADS, or
+        OMP_NUM_THREADS is used, in that order.
 
-    --arg-only, -A
-        Run Stage 2 (ARG random-effect inference) only, skipping Stage 1.
-        SNP effects are set to zero.  Produces <outroot>.w2.tsv but not
-        <outroot>.beta.tsv.
+    --silent, -z
+        Omit progress updates to the terminal.
 
-    --pi0 <val>, -P <val>
-        Prior expected fraction of null segments (0 < val < 1).  Sets a
-        Beta(1, pi0/(1-pi0)) hyperprior on the activation probability phi,
-        giving prior mean phi=1-pi0 (e.g. --pi0 0.9 gives prior mean
-        phi=0.1, favouring 90% null segments).  Default: Beta(1,1).
-
-    --ws2-l1 <lambda>
-        Block 2.6 fused-lasso prior on log w_s^2.  Sparsity-on-levels
-        penalty (lambda * sum_s |log w_s^2 - log w0|) that shrinks per-
-        tree weights toward a common floor; encourages a small number of
-        large w_s^2 and zeros out the rest.  Helps localization in
-        strongly oligogenic regimes (e.g. lambda~0.5 at block_frac
-        ~0.005 gave +0.07 AUC); at moderately oligogenic settings it
-        can over-shrink and hurt rank quality.  Default: 0 (off).
-
-    --ws2-l2 <lambda>
-        Block 2.6 fused-lasso prior on log w_s^2.  Sparsity-on-
-        differences (total-variation) penalty (lambda * sum_s |log
-        w_{s+1}^2 - log w_s^2|) that smooths neighbouring trees toward
-        each other; matches a contiguous-block architecture where
-        runs of trees share elevated w_s^2.  Often the right default
-        for sparse-architecture localization.  Default: 0 (off).
-
-        --ws2-l1 and --ws2-l2 may be combined; both penalties are
-        applied via a fast proximal step inside the Stage-2 EM.
-
-    --predict
-        After the train fit, run native out-of-sample prediction on a
-        held-out test set and write <outroot>.predict.json (the full
-        four-arm ladder: sargent_s, snp_lmm, sargent_a, sargent).
-        Requires BED genotypes (not --ts-geno) and the Stage-2 ARG fit
-        (incompatible with --snp-only).  The full ARG must have the train
-        individuals first and the test individuals last (simulate.py's
-        layout).  Paths default from the <geno_prefix> (the case
-        prefix):
-          --full-trees <path>   test+train ARG   (<geno_prefix>.full.trees)
-          --test-geno  <prefix> test BED prefix  (<geno_prefix>.test)
-          --test-pheno <path>   test phenotypes  (<geno_prefix>.test.phen)
-          --predict-out <path>  output JSON      (<outroot>.predict.json)
-
-    --branch-select
-        Add the branch-selection arms to --predict.  Instead of a per-tree
-        weight, rank every ARG branch by the marginal LMM score against the
-        uniform-ARG background,
-
-            z_b = | x_b' P y | / sqrt( x_b' P x_b ),
-
-        keep the top k, and fit a two-component REML (K_uniform + K_selected).
-        Two arms are written to the predict JSON: `sargent_w` (pure ARG, the
-        direct counterpart of sargent_a) and `sargent_wf` (with the Stage-1 PRS,
-        the counterpart of sargent).  This is the Stage-2 replacement: it
-        costs seconds rather than the tens of minutes the per-tree EM takes,
-        and it needs no Stage-2 ws2 fit at all, so it composes with
-        --uniform-arg or --snp-only.  Reported h2: `sargent_w_h2_uniform` is
-        the defensible estimate; `sargent_w_h2` includes the selected
-        component, whose variance is upward-biased by selection.
-
-          --select-k N       branches to keep (default 25; flat over 10-50)
-          --select-trees N   evenly-spaced local trees to scan (default 200;
-                             0 = every tree)
-
-        Both sub-options imply --branch-select.  Selection and the selected
-        kinship are computed on the full (train + test) ARG with the score
-        restricted to train rows -- test phenotypes are never touched.
-
-    --precompute, -X
-        Force-rebuild the G_all eigendecomposition cache (see OUTPUT
-        FILES: <prefix>.gall) before Stage 2.  In normal use the cache
-        is auto-built whenever Stage 2 will run and reused if its size
-        signature matches the inputs; --precompute is useful only after
-        a sargent upgrade that bumps GALL_VERSION (e.g. dadeca1's REML
-        correction was such a bump).
-
-    --threads <N>, -T <N>
-        Cap every thread pool sargent can reach -- our own OpenMP loops AND
-        the BLAS behind LAPACK -- at N.  This matters because OpenBLAS keeps
-        its own pool and does not consult OMP_NUM_THREADS, so before this
-        option a caller's limit held for our loops while the
-        eigendecomposition (and, with --branch-select, the per-block dsymm)
-        still took every core on the machine.
-
-        Resolved in this order, first match wins:
-          --threads N  >  SARGENT_THREADS  >  OPENBLAS_NUM_THREADS /
-          MKL_NUM_THREADS  >  OMP_NUM_THREADS  >  library default
-
-        so OMP_NUM_THREADS now caps the BLAS too.  With nothing requested,
-        library defaults are untouched.  Set this on any shared machine.
-
-    --outroot <prefix>, -o <prefix>
-        Set the output file prefix (default: "sargent").  Output files
-        are named <prefix>.beta.tsv and <prefix>.w2.tsv.
-
-    --pheno-col <N>, -C <N>
-        1-indexed column to read from the phenotype file (default: 0,
-        meaning the LAST whitespace-separated field on each line).
-        Useful for multi-column phenotype files of the form
-        "family_id  indv_id  y1  y2 ... yK", where you would pass
-        --pheno-col 3 to select y1, --pheno-col 4 to select y2, etc.
-
-    --mode <name>, -M <name>
-        Choose the operational mode (default: predict).  Modes:
-          predict   - the main pipeline.  Default fit is sequential
-                      (Stage 1 BayesR on typed SNPs, then Stage 2
-                      per-tree REML EM for the ARG random effect).
-                      Stage 2 is preconditioned with the G_all
-                      eigendecomposition (.gall cache) and warm-started
-                      from a fast EMMA solve under uniform weights;
-                      see OUTPUT FILES and ALGORITHMIC VARIANTS below.
-                      Use --em N (N >= 1) for sequential followed by N
-                      joint-EM polish iterations on (beta, ws^2, sigma^2).
-                      Outputs .beta.tsv, .w2.tsv, .summary.json with
-                      h2_snp (variance explained by SNP fit) and h2_arg
-                      (additional variance captured by the ARG).
-          localize  - per-window decomposition of h2_arg across the
-                      genome (not yet implemented; see ROADMAP.md Phase 7).
-
-ALGORITHMIC VARIANTS (for systematic comparison):
-    --stage1-gibbs
-          Replace Stage 1's mean-field variational BayesR fit with a Gibbs
-          sampler (BayesR SSVS) over the same model, reporting the
-          post-burn-in posterior mean of beta.  Mean-field under-fits in high
-          LD: on 500 kb WGS cells the variational fit sits ~0.017-0.037
-          held-out r2 below BayesR (GCTB), while the sampler is statistically
-          indistinguishable from it at h2=0.8 and slightly ahead at h2=0.5
-          (10 seeds per cell, densities 3800/1400/830 SNPs/Mb).
-
-          The chain is warm-started from the variational fit, which supplies
-          a sparse pi; started cold from the uniform pi that sargent_new sets
-          it saturates at p > n.  Cost is ~58 s against the variational fit's
-          ~3 s at p ~ 1600, n = 1000.
-
-          CAVEAT: a better Stage 1 claims more of the variance that is tagged
-          but not typed, and the sequential fit hands Stage 2 only what is
-          left.  At intermediate coverage (~250 SNPs/Mb) that crowds out the
-          ARG and makes the COMBINED arms slightly worse than under the
-          variational fit, even though Stage 1 itself improves.  Use with
-          --snp-only, or where coverage is high or very low.
-
+MODEL FITTING:
     --joint
-          Fit the SNP fixed effects and the ARG variance components TOGETHER in
-          one Gibbs chain, instead of fitting beta first and then the ARG on the
-          residual.  Sequential fitting gives the ARG almost nothing: beta claims
-          whatever the two terms share, so the residual is nearly unstructured
-          and REML drives the ARG variance to zero -- measured on the phi grid,
-          the combined arm reproduced the typed-SNP-only arm to six decimals at
-          every level, while the ARG alone predicted better than either.
-          Joint fitting recovers ~0.016 r2 on average and ~0.030 where the
-          untyped fraction is largest, and costs slightly LESS than the
-          sequential path because it replaces a separate REML stage.
-          Requires the .gall eigenbasis (available with --uniform-arg).
-          Note that SARGENT-F is refitted separately under this flag: it is the
-          fixed-effects-only model, so there is nothing in it to estimate
-          jointly.  Default: off.
+        Estimate the SNP effects and the ARG variance component jointly
+        by stochastic EM (recommended).  By default they are estimated
+        sequentially, SNP effects first.  Requires --uniform-arg.
 
-    --stage1-cv <K>
-          Cross-fit Stage 1 over K folds when forming the Stage-2 residual, so
-          that no individual is scored by a Stage-1 model that saw them.
-          Without it the residual y - Xb is in-sample: a well-fitting Stage 1
-          absorbs signal and noise alike, the residual looks like noise, and
-          REML drives the ARG variance component to zero.  Affects only the
-          arms built on that residual (sargent, sargent_wf); test-set
-          prediction still uses the full-data fit, so sargent_s, snp_lmm, sargent_a
-          and sargent_w are unchanged.  Costs K extra Stage-1 fits.
-          Default: off.
-
-    --gibbs-iter <N>
-          Gibbs sweeps.  Default: 3000.
-
-    --gibbs-burn <N>
-          Gibbs burn-in sweeps discarded before averaging.  Default: 1000.
+    --stage1-gibbs
+        Estimate SNP effects by Gibbs sampling (recommended).  By default
+        a faster mean-field variational approximation is used.
 
     --uniform-arg, -U
-        Replace Stage 2's per-tree REML with a single shared variance
-        component on the uniformly-weighted kinship K = (1/S) sum_s G_s.
-        Equivalent to fitting ARG-BLUP with a single tau^2.  Solved with
-        an EMMA-style 100-step golden-section search over log delta in
-        O(n^2) using the precomputed G_all eigendecomposition (.gall);
-        replaces 100 EM iterations each costing ~700 tree passes.
-        Useful when per-tree weights are unidentifiable.  At very small
-        n where G_all absorbs all residual variance, EMMA's boundary
-        check defers to the per-tree solver as a safety fallback.
+        Use a single ARG variance component on the span-weighted eGRM
+        (recommended).  By default each local tree receives its own
+        weight (see EXPERIMENTAL/LITTLE USED).
 
-    --em <N>, -E <N>
-        Run sequential SARGENT (Stage 1 + Stage 2) and then N polish
-        iterations of joint variational coordinate descent on
-        (beta, ws^2, sigma^2), starting from sequential's posterior.
-        Each polish iteration does ONE V-solve, ONE damped BayesR beta
-        sweep, ONE REML EM step on ws^2, and ONE damped multiplicative
-        sigma^2 step.  Default: 0 (sequential only).  Cannot be combined
-        with --sequential, --snp-only, or --arg-only.
+    --gibbs-iter <N>
+        Number of Gibbs sweeps (default 3000).
 
-        The polish trajectory is monitored: if sigma^2 changes by more
-        than 5 percent in one iteration (a signature of BayesR mixture-
-        component snapping that destabilises the EM dynamics), the iter
-        is reverted and the polish stops.  In practice this yields a
-        few iterations of meaningful improvement over sequential when
-        n_indiv * n_trees is small enough for the cold-start basin to
-        be narrow, and a clean revert otherwise.
+    --gibbs-burn <N>
+        Number of burn-in sweeps (default 1000).
 
-        Phase 4.5 (2026-05-21) made joint EM usable at scale by warm-
-        starting from sequential rather than from beta=0.  The earlier
-        cold-start variant degenerated on cases with ~thousands of
-        local trees (sigma^2 collapsed; h2_arg saturated at 1).  See
-        ROADMAP.md Phase 4.5 for the full diagnosis.
+    --precompute, -X
+        Force a rebuild of the cached eigendecomposition of the ARG
+        kinship matrix (see OUTPUT FILES).  Normally the cache is built
+        and reused automatically.
 
-    --sequential, -Q
-        Forces the two-stage Stage1->Stage2 pipeline.  This is the
-        default behaviour and the flag is currently a no-op; it is kept
-        for explicit-documentation purposes and for scripts written
-        when joint EM was briefly the default.  --snp-only / --arg-only
-        also imply sequential.
+PREDICTION:
+    --predict
+        After fitting, predict phenotypes for a held-out test set and
+        write accuracy measures for each model variant (sargent,
+        sargent_s, sargent_a, and snp_lmm, a standard GRM-based LMM) to
+        <outroot>.predict.json.  Requires PLINK genotypes.  The full ARG
+        must list the training individuals first and the test individuals
+        last.  Input and output paths default as follows, and may be set
+        explicitly:
+          --full-trees <path>     ARG for training + test individuals
+                                  (<geno_prefix>.full.trees)
+          --test-geno <prefix>    test genotypes (<geno_prefix>.test)
+          --test-pheno <path>     test phenotypes (<geno_prefix>.test.phen)
+          --predict-out <path>    output (<outroot>.predict.json)
 
-
-ENVIRONMENT VARIABLES (Stage 1):
-    SARGENT_STAGE1_RESTARTS=N
-          Run N variational Stage-1 fits and keep the highest-ELBO one.
-          Default 1, which is byte-identical to <=0.4.0.  The mean-field
-          objective is multimodal on high-coverage cells; N=6 gains +0.0203
-          held-out r2 (10 seeds, 3800 SNPs/Mb, h2=0.8, improving 10/10) and
-          removes a collapse mode that the var(X beta) trust region was
-          otherwise needed to suppress.  With restarts on, that trust region
-          relaxes from 0.6 to 0.9 automatically.  Cost is ~N x Stage 1.
-
-    SARGENT_S2_VFCAP=<x>
-          Override the var(X beta) trust region (0 disables it).
-
-    SARGENT_POLYAK_BETA=0
-          Disable Polyak-Ruppert averaging of beta (on by default since
-          0.4.0).
-
-    SARGENT_LEARN_SCALE=1
-          Learn the BayesR mixture scale in the variational fit.  r2-neutral;
-          a stability/h2_snp-calibration option.
-
-    SARGENT_GIBBS_SEED=<n>, SARGENT_GIBBS_FREEZE_SCALE=1,
-    SARGENT_GIBBS_COLDSTART=1, SARGENT_GIBBS_RESYNC=1
-          Gibbs chain seed, and diagnostics: freeze the mixture scale, skip
-          the variational warm start, rebuild the residual each sweep.
+    --model <name>
+        Compute only the named variant: sargent, sargent-s, sargent-a,
+        snp-lmm, or all (default all).  Stages not needed for that variant
+        are skipped.
 
 OUTPUT FILES:
     <outroot>.beta.tsv
-        SNP-effect estimates.  Written after Stage 1 (or when both
-        stages are run).  Columns: gamma_1 ... gamma_K  E_beta, where
-        gamma_k is the posterior probability that SNP j belongs to
-        mixture component k, and E_beta is the posterior expected value
-        of beta_j.  One row per polymorphic SNP.
+        Posterior mixture-component probabilities and expected effect
+        size for each typed SNP.
 
     <outroot>.w2.tsv
-        Segment-weight estimates.  Written after Stage 2 (or when both
-        stages are run).  Columns: rho_1 ... rho_M  E_ws2, where rho_m
-        is the posterior responsibility of component m for segment s, and
-        E_ws2 is the posterior expected value of w_s^2.  One row per
-        local tree (segment).
+        Posterior weights for each local tree (per-tree model only).
 
     <outroot>.summary.json
-        Coherent record of the fit: mode, h2_snp, h2_arg, h2 (total),
-        sigma2, plus context (n_indiv, n_variants, n_trees, etc.).
+        Heritability (h2_snp, h2_arg, total h2), residual variance, and
+        basic statistics for the run.
 
-    <trees_prefix>.gall / <trees_prefix>.span.gall
-                        (when Stage 2 runs; cached next to the .trees file,
-                         not under <outroot>.  TWO FILES, because there are two
-                         kernels: .gall is the plain sum_s G_s used by the
-                         learned arms, .span.gall the span-weighted eGRM used
-                         by --uniform-arg.  They are NOT interchangeable -- for
-                         --uniform-arg G_all is the model, not a preconditioner
-                         -- and each file's header records which it holds.)
-        Binary cache of the aggregate kinship G_all = sum_s G_s and its
-        eigendecomposition (U, lambda, w_ones = U^T * 1).  Used inside
-        Stage 2 as:
-          - a CG preconditioner for the per-tree V-solve (reduces CG
-            iterations ~64 -> ~5 in per-tree mode);
-          - the eigenbasis for EMMA's golden-section REML profile under
-            --uniform-arg and for the per-tree EMMA warm-start.
-        Auto-built on first Stage-2 run and invalidated when the
-        n*n size signature changes; force-rebuild with --precompute.
-        Version-tagged (GALL_VERSION): bumps invalidate older caches
-        and require regeneration.
+    <outroot>.predict.json
+        Prediction accuracy for each model variant (with --predict).
+
+    <trees_prefix>.gall, <trees_prefix>.span.gall
+        Cached eigendecompositions of the ARG kinship matrix, written
+        next to the .trees file and reused by later runs.
+
+EXPERIMENTAL/LITTLE USED:
+    --sequential, -Q
+        Fit sequentially (the default without --joint); has no effect.
+
+    --snp-only, -S
+        Fit the SNP term only.
+
+    --arg-only, -A
+        Fit the ARG term only.
+
+    --em, -E <N>
+        After a sequential fit, run <N> iterations of joint variational
+        coordinate descent.
+
+    --stage1-cv <K>
+        In sequential fitting, cross-fit the SNP term over <K> folds
+        before fitting the ARG term to the residual.
+
+    --mode, -M <name>
+        Operational mode; only "predict" (the default) is implemented.
+
+    --pi0, -P <val>
+        (Per-tree model) Prior expected fraction of local trees with
+        zero weight.
+
+    --ws2-l1 <lambda>
+        (Per-tree model) Fused-lasso penalty shrinking per-tree weights
+        toward a common level (default 0).
+
+    --ws2-l2 <lambda>
+        (Per-tree model) Fused-lasso penalty on differences in weight
+        between neighboring trees (default 0).
+
+    --nprobe, -N <N>
+        (Per-tree model) Number of probe vectors for stochastic trace
+        estimation (default 10).
+
+    --branch-select
+        (With --predict) Add variants sargent_w and sargent_wf, which
+        augment the eGRM with a kinship matrix built from the top-scoring
+        individual ARG branches.
+          --select-k <N>        number of branches to keep (default 25)
+          --select-trees <N>    number of local trees to scan (default
+                                200; 0 = all)
+
+    --stack
+        (With --predict) Add a variant (sargent_stack) that combines the
+        SNP and ARG predictions with weights estimated by cross-validation.
+
+    Environment variables:
+        SARGENT_STAGE1_RESTARTS=<N>   restarts of the variational SNP fit
+        SARGENT_S2_VFCAP=<x>          variance cap in the variational fit
+        SARGENT_POLYAK_BETA=0         disable averaging of beta
+        SARGENT_LEARN_SCALE=1         learn the mixture-prior scale
+        SARGENT_GIBBS_SEED=<n>        Gibbs random seed
