@@ -1,7 +1,11 @@
 cmake_minimum_required(VERSION 3.16)
 
+# Single source of truth for the version number: the top-level `version` file.
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/version" SARGENT_VERSION_FILE)
+string(STRIP "${SARGENT_VERSION_FILE}" SARGENT_VERSION_FILE)
+
 project(sargent
-  VERSION 0.1.0
+  VERSION ${SARGENT_VERSION_FILE}
   LANGUAGES C)
 
 set(CMAKE_C_STANDARD 99)
