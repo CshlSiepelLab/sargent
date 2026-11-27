@@ -55,7 +55,8 @@ sargent [OPTIONS] <phenotypes> <input.trees> [<geno_prefix>]
 ```
 
 Run `sargent --help` for a full description of arguments, options, and
-output files.
+output files.  The `examples/` directory contains a small simulated dataset
+that illustrates the input formats; see `examples/README.md`.
 
 ## License
 

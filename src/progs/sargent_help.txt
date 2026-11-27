@@ -14,13 +14,14 @@ SNP term gives an ARG-only model (SARGENT-A).  With --predict, sargent
 also predicts phenotypes for a held-out test set.
 
 TYPICAL COMMANDS:
-    Fit the model:
-        sargent --stage1-gibbs --joint --uniform-arg -o out \
-            pheno.txt case.trees case
+    Fit the model (using the example files in the examples/ directory of
+    the source distribution, which illustrate the input formats):
+        sargent --stage1-gibbs --joint --uniform-arg -o toy_fit \
+            examples/toy.phen examples/toy.trees examples/toy
 
-    Fit and predict for held-out individuals:
-        sargent --stage1-gibbs --joint --uniform-arg --predict -o out \
-            pheno.txt case.trees case
+    Fit the model and predict phenotypes for held-out individuals:
+        sargent --stage1-gibbs --joint --uniform-arg --predict -o toy_pred \
+            examples/toy.phen examples/toy.trees examples/toy
 
 ARGUMENTS:
     <phenotypes>
@@ -120,9 +121,9 @@ OUTPUT FILES:
     <outroot>.predict.json
         Prediction accuracy for each model variant (with --predict).
 
-    <trees_prefix>.gall, <trees_prefix>.span.gall
-        Cached eigendecompositions of the ARG kinship matrix, written
-        next to the .trees file and reused by later runs.
+    <trees_prefix>.gall
+        Cached eigendecomposition of the ARG kinship matrix, written next
+        to the .trees file and reused by later runs.
 
 EXPERIMENTAL/LITTLE USED:
     --sequential, -Q

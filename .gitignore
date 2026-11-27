@@ -12,3 +12,6 @@ __pycache__/
 src/progs/sargent.help.h
 .clangd
 CLAUDE.md
+
+# sargent caches written next to .trees files
+*.gall
